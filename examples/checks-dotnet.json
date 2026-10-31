@@ -1,0 +1,16 @@
+{
+  "checks": [
+    {
+      "name": "build",
+      "executable": "dotnet",
+      "arguments": ["build", "--configuration", "Release", "--nologo"],
+      "timeoutSeconds": 1200
+    },
+    {
+      "name": "tests",
+      "executable": "dotnet",
+      "arguments": ["test", "--configuration", "Release", "--no-build", "--nologo"],
+      "timeoutSeconds": 1800
+    }
+  ]
+}

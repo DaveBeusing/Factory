@@ -1,0 +1,22 @@
+{
+  "checks": [
+    {
+      "name": "configure",
+      "executable": "cmake",
+      "arguments": ["-S", ".", "-B", "build/factory", "-DCMAKE_BUILD_TYPE=Release", "-DBUILD_TESTING=ON"],
+      "timeoutSeconds": 600
+    },
+    {
+      "name": "build",
+      "executable": "cmake",
+      "arguments": ["--build", "build/factory", "--config", "Release", "--parallel"],
+      "timeoutSeconds": 1800
+    },
+    {
+      "name": "tests",
+      "executable": "ctest",
+      "arguments": ["--test-dir", "build/factory", "--build-config", "Release", "--output-on-failure"],
+      "timeoutSeconds": 1800
+    }
+  ]
+}

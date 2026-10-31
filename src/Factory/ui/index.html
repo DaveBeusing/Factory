@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b0e15">
+  <meta name="description" content="Factory Mission Control: live operations, planning and delivery.">
+  <title>Mission Control · Factory</title>
+  <link rel="stylesheet" href="/ui/app.css">
+  <script src="/ui/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <div class="brand-symbol"><span>F</span><i></i></div>
+      <div class="brand-copy"><strong>FACTORY</strong><small>MISSION CONTROL</small></div>
+      <button id="mobile-close" class="icon-button mobile-only" aria-label="Close navigation">×</button>
+    </div>
+    <div class="workspace-picker"><span class="workspace-avatar">◈</span><span class="workspace-text"><strong>Workspace</strong><small>Local environment</small></span><span class="workspace-chevron">⌄</span></div>
+    <nav aria-label="Primary navigation" id="navigation">
+      <div class="nav-heading">WORKSPACE</div>
+      <button class="nav-item active" data-view="overview"><span data-icon="overview"></span> Overview</button>
+      <button class="nav-item" data-view="projects"><span data-icon="folder"></span> Projects <span class="nav-counter" data-count="projects"></span></button>
+      <button class="nav-item" data-view="goals"><span data-icon="target"></span> Goals <span class="nav-counter" data-count="goals"></span></button>
+      <button class="nav-item" data-view="plans"><span data-icon="route"></span> Plans</button>
+      <div class="nav-heading">OPERATIONS</div>
+      <button class="nav-item" data-view="jobs"><span data-icon="layers"></span> Jobs <span class="nav-counter" data-count="jobs"></span></button>
+      <button class="nav-item" data-view="queue"><span data-icon="queue"></span> Queue</button>
+      <button class="nav-item" data-view="workers"><span data-icon="cpu"></span> Workers <span class="nav-counter" data-count="workers"></span></button>
+      <button class="nav-item" data-view="events"><span data-icon="activity"></span> Activity</button>
+      <button class="nav-item hidden" data-view="usage" id="usage-nav"><span data-icon="gauge"></span> Capacity</button>
+      <div class="nav-heading">SYSTEM</div>
+      <button class="nav-item" data-view="settings"><span data-icon="settings"></span> Settings</button>
+    </nav>
+    <div class="sidebar-bottom">
+      <div class="sidebar-health"><span class="live-dot connecting" id="sidebar-dot"></span><span><strong id="sidebar-status">Not connected</strong><small id="sidebar-heartbeat">Connect to begin</small></span></div>
+      <div class="sidebar-version">Factory <span>· .NET 10</span></div>
+    </div>
+  </aside>
+  <div class="backdrop" id="sidebar-backdrop"></div>
+  <div class="main-shell">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="icon-button mobile-only" id="mobile-open" aria-label="Open navigation"><span data-icon="menu"></span></button>
+        <div class="crumb"><span>Factory</span><span class="crumb-separator">/</span><strong id="breadcrumb">Overview</strong></div>
+      </div>
+      <div class="topbar-right">
+        <button class="search-trigger" id="open-search" title="Command palette (Ctrl+K)"><span data-icon="search"></span><span>Search anything...</span><kbd>⌘ K</kbd></button>
+        <div class="connection-pill offline" id="connection-pill" role="status"><span class="live-dot" id="connection-dot"></span><span id="connection-label">Offline</span><small id="connection-age"></small></div>
+        <button class="button button-primary" id="top-create"><span data-icon="plus"></span> Create <span class="hide-small">new</span></button>
+        <button class="avatar" id="open-connection" title="Connection settings" aria-label="Connection settings">FC</button>
+      </div>
+    </header>
+    <main id="main" tabindex="-1"><div class="loading-screen"><div class="spinner"></div> Connecting to Mission Control...</div></main>
+    <footer class="statusbar"><div><span class="live-dot" id="footer-dot"></span><span id="footer-status">Waiting for connection</span></div><span id="status-clock"></span></footer>
+  </div>
+</div>
+<div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+<dialog class="modal" id="form-modal"><div class="modal-head"><div><div class="modal-eyebrow">MISSION CONTROL</div><h2 id="modal-title">Edit item</h2><p id="modal-subtitle"></p></div><button class="icon-button" id="modal-close" aria-label="Close dialog">×</button></div><form id="modal-form"><div id="modal-fields"></div><div class="modal-footer"><button class="button button-muted" type="button" id="modal-cancel">Cancel</button><button class="button button-primary" type="submit" id="modal-submit">Save changes</button></div></form></dialog>
+<dialog class="modal small-modal" id="connection-modal"><div class="modal-head"><div><div class="modal-eyebrow">SECURE ACCESS</div><h2>Connect to Factory</h2><p>Your API token is held in this tab only.</p></div><button class="icon-button" data-close="connection-modal" aria-label="Close dialog">×</button></div><form id="connection-form"><div class="field"><label for="api-token">API token</label><input id="api-token" type="password" autocomplete="off" placeholder="Paste token from ~/.factory/settings.json" required></div><div class="modal-footer"><button class="button button-muted" type="button" id="disconnect">Disconnect</button><button class="button button-primary" type="submit">Connect</button></div></form></dialog>
+<dialog class="modal palette-modal" id="palette"><div class="palette-search"><span data-icon="search"></span><input id="palette-input" aria-label="Search navigation and actions" placeholder="Jump to a page or run an action..." autocomplete="off"><kbd>ESC</kbd></div><div id="palette-results"></div></dialog>
+<aside class="inspector" id="inspector" aria-label="Details" aria-hidden="true"><div class="inspector-head"><div><small>INSPECTOR</small><h2 id="inspector-title">Details</h2></div><button class="icon-button" id="inspector-close" aria-label="Close inspector">×</button></div><div class="inspector-body" id="inspector-body"></div></aside><div class="inspector-backdrop" id="inspector-backdrop"></div>
+</body>
+</html>

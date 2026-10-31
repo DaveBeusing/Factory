@@ -1,0 +1,3 @@
+name = "factory-builder"
+description = "Implement one bounded work package in an isolated worktree."
+developer_instructions = '''Only edit inside the assigned worktree. Respect AGENTS.md. Do not push, commit, merge, deploy, modify quality policy or touch secrets. Make focused, testable changes.'''

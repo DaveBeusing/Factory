@@ -114,32 +114,103 @@ public static class WorkerProtocol
            return true;
         });
 
-    public static bool Complete(StateStore store, WorkerStatus req)
-        => store.Change(s =>
+    public static async Task<bool> CompleteAsync(StateStore store, WorkerStatus req,
+        IWorkerResultVerifier verifier, CancellationToken ct = default)
+    {
+        // Worker-supplied fields cannot authorize a new claim or extend a foreign lease.
+        var state = store.Read();
+        var claimed = state.Jobs.FirstOrDefault(j => j.Id == req.JobId);
+        if (claimed is null || claimed.Mode != JobExecutionModes.Remote ||
+            claimed.LeaseOwner != "remote:" + req.WorkerId ||
+            claimed.LeaseUntil <= DateTimeOffset.UtcNow ||
+            !JobStates.Active.Contains(claimed.State))
+            return false;
+        var project = state.Projects.Single(p => p.Id == claimed.ProjectId);
+        var successReported = req.Job is { State: JobStates.PrReady };
+        VerifiedWorkerResult? verified = null;
+        var failure = "Worker returned no verified PR result";
+        if (successReported)
+        {
+            try
+            {
+                if (req.Job!.Id != claimed.Id || req.Job.ProjectId != claimed.ProjectId ||
+                    req.Job.Attempt != claimed.Attempt ||
+                    req.Job.Mode != JobExecutionModes.Remote)
+                    throw new InvalidOperationException("Worker completion does not match its active job");
+                verified = await verifier.VerifyAsync(project, claimed, req, ct);
+                if (verified is null || string.IsNullOrWhiteSpace(verified.EvidenceJson))
+                    throw new InvalidOperationException("Controller verification returned no evidence");
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex) { failure = "Unverified remote result: " + ex.Message; }
+        }
+        else
+            failure = string.IsNullOrWhiteSpace(req.Error) ? "Remote worker did not report a verified PR" : req.Error;
+
+        string? evidenceFile = null;
+        if (verified is not null)
+        {
+            try
+            {
+                var dir = Path.Combine(store.Home, "evidence", claimed.Id.ToString("N"));
+                Directory.CreateDirectory(dir);
+                evidenceFile = Path.Combine(dir, "controller-" + req.Job!.HeadSha + ".json");
+                await File.WriteAllTextAsync(evidenceFile, verified.EvidenceJson, ct);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                verified = null;
+                failure = "Unable to save controller-verified evidence: " + ex.Message;
+            }
+        }
+
+        return store.Change(s =>
         {
             var j = s.Jobs.FirstOrDefault(x => x.Id == req.JobId);
-           if (j == null || j.LeaseOwner != "remote:" + req.WorkerId ||
-                j.LeaseUntil <= DateTimeOffset.UtcNow) return false;
-           // Usage is cumulative across retries; account for failed/blocked jobs as well.
+            var currentProject = s.Projects.FirstOrDefault(p => p.Id == claimed.ProjectId);
+            if (j is null || j.Mode != JobExecutionModes.Remote ||
+                j.LeaseOwner != "remote:" + req.WorkerId ||
+                j.LeaseUntil <= DateTimeOffset.UtcNow || !JobStates.Active.Contains(j.State) ||
+                j.Attempt != claimed.Attempt || j.ProjectId != claimed.ProjectId ||
+                currentProject is null ||
+                // A project reconfiguration invalidates verification performed against an older policy.
+                Json.Stringify(currentProject.Checks) != Json.Stringify(project.Checks) ||
+                Json.Stringify(currentProject.ProtectedPaths) != Json.Stringify(project.ProtectedPaths) ||
+                currentProject.Origin != project.Origin || currentProject.BaseBranch != project.BaseBranch)
+                return false;
+
+            // Token counters are observational only. They cannot affect PR authorization.
+            if (req.TokensIn >= 0) j.TokensIn = Math.Max(j.TokensIn, req.TokensIn);
+            if (req.TokensOut >= 0) j.TokensOut = Math.Max(j.TokensOut, req.TokensOut);
             if (req.Job != null)
             {
-                j.TokensIn = Math.Max(j.TokensIn, req.Job.TokensIn);
-               j.TokensOut = Math.Max(j.TokensOut, req.Job.TokensOut);
-           }
-            if (req.Job is { State: JobStates.PrReady } finished &&
-                !string.IsNullOrWhiteSpace(finished.PrUrl) && !string.IsNullOrWhiteSpace(finished.HeadSha))
+                if (req.Job.TokensIn >= 0) j.TokensIn = Math.Max(j.TokensIn, req.Job.TokensIn);
+                if (req.Job.TokensOut >= 0) j.TokensOut = Math.Max(j.TokensOut, req.Job.TokensOut);
+            }
+
+            if (verified is not null && successReported)
             {
                 j.State = JobStates.PrReady; j.Stage = "pr";
-               j.Branch = finished.Branch; j.PrUrl = finished.PrUrl;
-               j.HeadSha = finished.HeadSha;
-               j.Error = "";
-           }
-            else { j.State = JobStates.Blocked; j.Stage = "remote_error"; j.Error = req.Error; }
+                j.Branch = req.Job!.Branch; j.PrUrl = req.Job.PrUrl;
+                j.HeadSha = req.Job.HeadSha; j.EvidenceFile = evidenceFile!;
+                j.Error = "";
+                s.Events.Add(new FactoryEvent { JobId = j.Id, Type = "remote_verified",
+                    Message = "Controller verified PR head and required GitHub checks" });
+            }
+            else
+            {
+                j.State = JobStates.Blocked; j.Stage = "remote_verification_failed";
+                j.Error = failure;
+                s.Events.Add(new FactoryEvent { JobId = j.Id, Type = "remote_rejected", Message = failure });
+            }
             j.LeaseOwner = ""; j.LeaseUntil = null; j.UpdatedAt = DateTimeOffset.UtcNow;
-           j.FinishedAt = DateTimeOffset.UtcNow;
-           s.Events.Add(new FactoryEvent { JobId = j.Id, Type = "remote_complete", Message = j.State });
-           return true;
+            j.FinishedAt = DateTimeOffset.UtcNow;
+            s.Events.Add(new FactoryEvent { JobId = j.Id, Type = "remote_complete", Message = j.State });
+            return true;
         });
+    }
+
 }
 
 public static class RemoteWorker

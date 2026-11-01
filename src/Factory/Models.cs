@@ -96,6 +96,7 @@ public sealed class FactoryGoal
 
 public sealed class FactoryEvent
 {
+    public Guid Id { get; set; } = Guid.NewGuid();
     public DateTimeOffset At { get; set; } = DateTimeOffset.UtcNow;
     public Guid? JobId { get; set; }
     public string Type { get; set; } = "";
@@ -114,6 +115,7 @@ public sealed class KnowledgeItem
 
 public sealed class GraphNode
 {
+    public Guid Id { get; set; } = Guid.NewGuid();
     public Guid ProjectId { get; set; }
     public string File { get; set; } = "";
     public List<string> Imports { get; set; } = [];

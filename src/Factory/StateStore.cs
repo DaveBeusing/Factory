@@ -1,83 +1,478 @@
+using System.Collections;
+using System.Globalization;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 
 namespace Factory;
 
+/// <summary>
+/// Relational SQLite persistence with transactional snapshot mutations.
+/// The public snapshot API is retained so existing orchestrator callers stay unchanged.
+/// Only changed entities are written; collection values live in ordered child tables.
+/// </summary>
 public sealed class StateStore
 {
+    private const int DatabaseVersion = 2;
+    private sealed record EntityMap(string Table, string Collection, Type Type);
+
+    // Order places referenced entities before their dependents.
+    private static readonly EntityMap[] Entities =
+    [
+        new("projects", nameof(FactoryState.Projects), typeof(ProjectInfo)),
+        new("goals", nameof(FactoryState.Goals), typeof(FactoryGoal)),
+        new("jobs", nameof(FactoryState.Jobs), typeof(FactoryJob)),
+        new("knowledge_items", nameof(FactoryState.Knowledge), typeof(KnowledgeItem)),
+        new("graph_nodes", nameof(FactoryState.Graph), typeof(GraphNode)),
+        new("evaluations", nameof(FactoryState.Evaluations), typeof(EvaluationResult)),
+        new("releases", nameof(FactoryState.Releases), typeof(ReleaseInfo)),
+        new("workers", nameof(FactoryState.Workers), typeof(WorkerInfo)),
+        new("events", nameof(FactoryState.Events), typeof(FactoryEvent))
+    ];
+
     public string Home { get; }
     private readonly string _file;
+
     public StateStore(string home)
     {
         Home = Path.GetFullPath(Environment.ExpandEnvironmentVariables(home));
         Directory.CreateDirectory(Home);
         _file = Path.Combine(Home, "factory.sqlite3");
         using var connection = Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "CREATE TABLE IF NOT EXISTS factory_state(id INTEGER PRIMARY KEY CHECK(id = 1), content TEXT NOT NULL);";
-        command.ExecuteNonQuery();
+        Initialize(connection);
     }
+
     private SqliteConnection Open()
     {
         var connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            DataSource = _file, Mode = SqliteOpenMode.ReadWriteCreate, Pooling = false, DefaultTimeout = 30
+            DataSource = _file, Mode = SqliteOpenMode.ReadWriteCreate,
+            Pooling = false, DefaultTimeout = 30, ForeignKeys = true
         }.ToString());
         connection.Open();
-        using var pragmas = connection.CreateCommand();
-        pragmas.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=30000;";
-        pragmas.ExecuteNonQuery();
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA journal_mode=WAL; PRAGMA busy_timeout=30000; PRAGMA foreign_keys=ON;";
+        command.ExecuteNonQuery();
         return connection;
     }
-    private static FactoryState Load(SqliteConnection c, SqliteTransaction? tx)
+
+    private static string Q(string identifier) => "\"" + identifier + "\"";
+
+    private static string Column(string property)
     {
-        using var cmd = c.CreateCommand();
-        cmd.Transaction = tx;
-        cmd.CommandText = "SELECT content FROM factory_state WHERE id = 1";
-        var raw = cmd.ExecuteScalar() as string;
-        return raw == null ? new FactoryState() : System.Text.Json.JsonSerializer.Deserialize<FactoryState>(raw, Json.Options) ?? new FactoryState();
+        var result = new StringBuilder();
+        for (int i = 0; i < property.Length; i++)
+        {
+            if (i > 0 && char.IsUpper(property[i]) &&
+                (char.IsLower(property[i - 1]) || char.IsDigit(property[i - 1])))
+                result.Append('_');
+            result.Append(char.ToLowerInvariant(property[i]));
+        }
+        return result.ToString();
     }
+
+    private static PropertyInfo[] Scalars(EntityMap map) =>
+        map.Type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Where(p => !typeof(IList).IsAssignableFrom(p.PropertyType)).ToArray();
+
+    private static PropertyInfo[] Collections(EntityMap map) =>
+        map.Type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+            .Where(p => typeof(IList).IsAssignableFrom(p.PropertyType)).ToArray();
+
+    private static string SqlType(Type property)
+    {
+        property = Nullable.GetUnderlyingType(property) ?? property;
+        if (property == typeof(string) || property == typeof(Guid) || property == typeof(DateTimeOffset))
+            return "TEXT";
+        if (property == typeof(bool) || property == typeof(int) || property == typeof(long))
+            return "INTEGER";
+        throw new NotSupportedException("Unsupported relational property: " + property);
+    }
+
+    private static object DbValue(object? value) => value switch
+    {
+        null => DBNull.Value,
+        Guid id => id.ToString("D"),
+        DateTimeOffset date => date.ToString("O", CultureInfo.InvariantCulture),
+        bool flag => flag ? 1 : 0,
+        _ => value
+    };
+
+    private static object? FromDb(object value, Type property)
+    {
+        if (value is DBNull) return null;
+        var underlying = Nullable.GetUnderlyingType(property) ?? property;
+        if (underlying == typeof(Guid)) return Guid.Parse((string)value);
+        if (underlying == typeof(DateTimeOffset))
+            return DateTimeOffset.Parse((string)value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+        if (underlying == typeof(bool)) return Convert.ToInt64(value, CultureInfo.InvariantCulture) != 0;
+        if (underlying == typeof(int)) return Convert.ToInt32(value, CultureInfo.InvariantCulture);
+        if (underlying == typeof(long)) return Convert.ToInt64(value, CultureInfo.InvariantCulture);
+        if (underlying == typeof(string)) return (string)value;
+        throw new NotSupportedException("Unsupported relational property: " + property);
+    }
+
+    private static SqliteCommand Command(SqliteConnection db, SqliteTransaction? tx, string sql,
+        params (string Name, object? Value)[] arguments)
+    {
+        var command = db.CreateCommand();
+        command.Transaction = tx;
+        command.CommandText = sql;
+        foreach (var (name, value) in arguments)
+            command.Parameters.AddWithValue(name, DbValue(value));
+        return command;
+    }
+
+    private static void Execute(SqliteConnection db, SqliteTransaction? tx, string sql,
+        params (string Name, object? Value)[] arguments)
+    {
+        using var command = Command(db, tx, sql, arguments);
+        command.ExecuteNonQuery();
+    }
+
+    private static void Initialize(SqliteConnection db)
+    {
+        // Serialize first-time initialization across concurrently starting processes.
+        using var tx = db.BeginTransaction();
+        using var version = Command(db, tx, "PRAGMA user_version;");
+        var schemaVersion = Convert.ToInt32(version.ExecuteScalar(), CultureInfo.InvariantCulture);
+        if (schemaVersion == DatabaseVersion)
+        {
+            tx.Commit();
+            return;
+        }
+        if (schemaVersion != 0)
+            throw new InvalidOperationException("Unsupported Factory database schema version " + schemaVersion +
+                "; create a new FACTORY_HOME or restore a matching installation.");
+
+        using var existing = Command(db, tx,
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%';");
+        if (Convert.ToInt64(existing.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+            throw new InvalidOperationException(
+                "Existing/legacy Factory SQLite database detected. Back up .factory, then use a new " +
+                "FACTORY_HOME. The relational schema intentionally has no automatic JSON migration.");
+
+        Execute(db, tx, """
+            CREATE TABLE factory_metadata(
+                id INTEGER PRIMARY KEY CHECK(id=1),
+                schema INTEGER NOT NULL,
+                paused INTEGER NOT NULL CHECK(paused IN (0,1))
+            );
+            INSERT INTO factory_metadata(id, schema, paused) VALUES(1,1,0);
+            """);
+
+        foreach (var map in Entities)
+        {
+            var definitions = new List<string> { "\"position\" INTEGER NOT NULL" };
+            foreach (var property in Scalars(map))
+            {
+                var name = Column(property.Name);
+                var type = SqlType(property.PropertyType);
+                definitions.Add(Q(name) + " " + type + (property.Name == "Id" ? " PRIMARY KEY" :
+                    Nullable.GetUnderlyingType(property.PropertyType) != null ? "" : " NOT NULL"));
+            }
+            if (map.Type.GetProperty("ProjectId") != null)
+                definitions.Add("FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE NO ACTION");
+            if (map.Type == typeof(FactoryJob))
+                definitions.Add("FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE NO ACTION");
+            if (map.Type == typeof(GraphNode))
+                definitions.Add("UNIQUE(project_id, file)");
+            Execute(db, tx, "CREATE TABLE " + Q(map.Table) + "(" + string.Join(", ", definitions) + ");");
+            foreach (var property in Collections(map))
+            {
+                if (map.Type == typeof(ProjectInfo) && property.Name == nameof(ProjectInfo.Checks))
+                    continue;
+                var childTable = map.Table + "_" + Column(property.Name);
+                var element = property.PropertyType.GenericTypeArguments.Single();
+                var valueForeignKey = map.Type == typeof(FactoryJob) &&
+                    property.Name == nameof(FactoryJob.DependsOn)
+                    ? ", FOREIGN KEY(value) REFERENCES jobs(id) ON DELETE NO ACTION"
+                    : "";
+                Execute(db, tx, "CREATE TABLE " + Q(childTable) + "(" +
+                    "owner_id TEXT NOT NULL, position INTEGER NOT NULL, value " + SqlType(element) +
+                    " NOT NULL, PRIMARY KEY(owner_id, position), FOREIGN KEY(owner_id) REFERENCES " +
+                    Q(map.Table) + "(id) ON DELETE CASCADE" + valueForeignKey + ");");
+            }
+        }
+
+        Execute(db, tx, """
+            CREATE TABLE project_checks(
+                owner_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                executable TEXT NOT NULL,
+                container_image TEXT NOT NULL,
+                timeout_seconds INTEGER NOT NULL,
+                PRIMARY KEY(owner_id, position),
+                FOREIGN KEY(owner_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            CREATE TABLE project_check_arguments(
+                owner_id TEXT NOT NULL,
+                check_position INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY(owner_id, check_position, position),
+                FOREIGN KEY(owner_id, check_position)
+                    REFERENCES project_checks(owner_id,position) ON DELETE CASCADE
+            );
+            CREATE INDEX idx_jobs_project_state ON jobs(project_id,state);
+            CREATE INDEX idx_jobs_goal ON jobs(goal_id);
+            CREATE INDEX idx_jobs_lease ON jobs(lease_owner,lease_until);
+            CREATE INDEX idx_goals_project ON goals(project_id,state);
+            CREATE INDEX idx_events_time ON events(at);
+            CREATE INDEX idx_knowledge_project ON knowledge_items(project_id);
+            CREATE INDEX idx_releases_project ON releases(project_id);
+            CREATE INDEX idx_workers_heartbeat ON workers(heartbeat);
+            PRAGMA user_version=2;
+            """);
+        tx.Commit();
+    }
+
+    private static IList Items(FactoryState state, EntityMap map) =>
+        (IList)(typeof(FactoryState).GetProperty(map.Collection)!.GetValue(state)
+            ?? throw new InvalidOperationException("Missing Factory collection: " + map.Collection));
+
+    private static string Key(object entity) =>
+        Convert.ToString(entity.GetType().GetProperty("Id")!.GetValue(entity), CultureInfo.InvariantCulture)
+            ?? throw new InvalidOperationException("Missing entity ID");
+
+    private static FactoryState Load(SqliteConnection db, SqliteTransaction tx)
+    {
+        var state = new FactoryState();
+        using (var meta = Command(db, tx, "SELECT schema,paused FROM factory_metadata WHERE id=1;"))
+        using (var reader = meta.ExecuteReader())
+        {
+            if (!reader.Read()) throw new InvalidOperationException("Factory metadata missing");
+            state.Schema = reader.GetInt32(0);
+            state.Paused = reader.GetInt64(1) != 0;
+        }
+
+        foreach (var map in Entities)
+        {
+            var columns = Scalars(map);
+            var byId = new Dictionary<string, object>(StringComparer.Ordinal);
+            var fields = string.Join(",", columns.Select(p => Q(Column(p.Name))));
+            using (var cmd = Command(db, tx, "SELECT " + fields + " FROM " + Q(map.Table) +
+                " ORDER BY position,id;"))
+            using (var reader = cmd.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    var entity = Activator.CreateInstance(map.Type)!;
+                    for (int i = 0; i < columns.Length; i++)
+                        columns[i].SetValue(entity, FromDb(reader.GetValue(i), columns[i].PropertyType));
+                    // Some models (e.g. ProjectInfo.ProtectedPaths) initialize lists
+                    // with defaults. Database values must replace, never append to them.
+                    foreach (var listProperty in Collections(map))
+                        ((IList)listProperty.GetValue(entity)!).Clear();
+                    Items(state, map).Add(entity);
+                    byId.Add(Key(entity), entity);
+                }
+            }
+
+            foreach (var property in Collections(map))
+            {
+                if (map.Type == typeof(ProjectInfo) && property.Name == nameof(ProjectInfo.Checks))
+                    continue;
+                var table = map.Table + "_" + Column(property.Name);
+                var elementType = property.PropertyType.GenericTypeArguments.Single();
+                using var cmd = Command(db, tx,
+                    "SELECT owner_id,value FROM " + Q(table) + " ORDER BY owner_id,position;");
+                using var reader = cmd.ExecuteReader();
+                while (reader.Read())
+                {
+                    var owner = reader.GetString(0);
+                    if (!byId.TryGetValue(owner, out var entity))
+                        throw new InvalidOperationException("Orphaned child row in " + table);
+                    ((IList)property.GetValue(entity)!).Add(FromDb(reader.GetValue(1), elementType));
+                }
+            }
+            if (map.Type == typeof(ProjectInfo))
+                LoadChecks(db, tx, byId);
+        }
+        return state;
+    }
+
+    private static void LoadChecks(SqliteConnection db, SqliteTransaction tx,
+        Dictionary<string, object> projects)
+    {
+        var checks = new Dictionary<(string Owner, int Position), CheckCommand>();
+        using (var cmd = Command(db, tx,
+            "SELECT owner_id,position,name,executable,container_image,timeout_seconds " +
+            "FROM project_checks ORDER BY owner_id,position;"))
+        using (var reader = cmd.ExecuteReader())
+        {
+            while (reader.Read())
+            {
+                var owner = reader.GetString(0);
+                if (!projects.TryGetValue(owner, out var entity))
+                    throw new InvalidOperationException("Orphaned project check");
+                var check = new CheckCommand
+                {
+                    Name = reader.GetString(2), Executable = reader.GetString(3),
+                    ContainerImage = reader.GetString(4), TimeoutSeconds = reader.GetInt32(5)
+                };
+                var position = reader.GetInt32(1);
+                ((ProjectInfo)entity).Checks.Add(check);
+                checks.Add((owner, position), check);
+            }
+        }
+        using (var cmd = Command(db, tx,
+            "SELECT owner_id,check_position,value FROM project_check_arguments " +
+            "ORDER BY owner_id,check_position,position;"))
+        using (var reader = cmd.ExecuteReader())
+            while (reader.Read())
+                checks[(reader.GetString(0), reader.GetInt32(1))].Arguments.Add(reader.GetString(2));
+    }
+
     public FactoryState Read()
     {
-        using var c = Open();
-        return Load(c, null);
+        using var db = Open();
+        using var tx = db.BeginTransaction(deferred: true);
+        var state = Load(db, tx);
+        tx.Commit();
+        return state;
     }
+
+    private static void Upsert(SqliteConnection db, SqliteTransaction tx, EntityMap map, object entity, int position)
+    {
+        var scalar = Scalars(map);
+        var names = new List<string> { "position" };
+        names.AddRange(scalar.Select(p => Column(p.Name)));
+        var arguments = new List<(string Name, object? Value)> { ("$position", position) };
+        arguments.AddRange(scalar.Select(p => ("$" + Column(p.Name), p.GetValue(entity))));
+        var columns = string.Join(",", names.Select(Q));
+        var bindings = string.Join(",", names.Select(n => "$" + n));
+        var updates = string.Join(",", names.Where(n => n != "id").Select(n => Q(n) + "=excluded." + Q(n)));
+        Execute(db, tx, "INSERT INTO " + Q(map.Table) + "(" + columns + ") VALUES(" + bindings +
+            ") ON CONFLICT(id) DO UPDATE SET " + updates + ";", arguments.ToArray());
+
+        foreach (var property in Collections(map))
+        {
+            if (map.Type == typeof(ProjectInfo) && property.Name == nameof(ProjectInfo.Checks))
+                continue;
+            var table = map.Table + "_" + Column(property.Name);
+            Execute(db, tx, "DELETE FROM " + Q(table) + " WHERE owner_id=$owner;", ("$owner", Key(entity)));
+            var values = (IList)property.GetValue(entity)!;
+            for (int i = 0; i < values.Count; i++)
+                Execute(db, tx, "INSERT INTO " + Q(table) +
+                    "(owner_id,position,value) VALUES($owner,$position,$value);",
+                    ("$owner", Key(entity)), ("$position", i), ("$value", values[i]));
+        }
+
+        if (map.Type == typeof(ProjectInfo))
+        {
+            Execute(db, tx, "DELETE FROM project_checks WHERE owner_id=$owner;", ("$owner", Key(entity)));
+            var checks = ((ProjectInfo)entity).Checks;
+            for (int i = 0; i < checks.Count; i++)
+            {
+                var check = checks[i];
+                Execute(db, tx, "INSERT INTO project_checks " +
+                    "(owner_id,position,name,executable,container_image,timeout_seconds) " +
+                    "VALUES($owner,$position,$name,$executable,$container,$timeout);",
+                    ("$owner", Key(entity)), ("$position", i), ("$name", check.Name),
+                    ("$executable", check.Executable), ("$container", check.ContainerImage),
+                    ("$timeout", check.TimeoutSeconds));
+                for (int j = 0; j < check.Arguments.Count; j++)
+                    Execute(db, tx, "INSERT INTO project_check_arguments " +
+                        "(owner_id,check_position,position,value) VALUES($owner,$check,$position,$value);",
+                        ("$owner", Key(entity)), ("$check", i), ("$position", j),
+                        ("$value", check.Arguments[j]));
+            }
+        }
+    }
+
+    private static void Save(SqliteConnection db, SqliteTransaction tx, FactoryState state,
+        IReadOnlyList<Dictionary<string, string>> before)
+    {
+        Execute(db, tx, "UPDATE factory_metadata SET schema=$schema, paused=$paused WHERE id=1;",
+            ("$schema", state.Schema), ("$paused", state.Paused));
+
+        // Defer cross-entity FK checks to the end of this atomic mutation, since
+        // a plan may insert its goals, jobs and dependencies in one transaction.
+        Execute(db, tx, "PRAGMA defer_foreign_keys=ON;");
+
+        for (int index = 0; index < Entities.Length; index++)
+        {
+            var map = Entities[index];
+            var collection = Items(state, map);
+            var old = before[index];
+            var current = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var entity in collection)
+                if (!current.Add(Key(entity!)))
+                    throw new InvalidOperationException("Duplicate relational entity ID: " + Key(entity!));
+            foreach (var removed in old.Keys.Where(id => !current.Contains(id)))
+                Execute(db, tx, "DELETE FROM " + Q(map.Table) + " WHERE id=$id;", ("$id", removed));
+            for (int i = 0; i < collection.Count; i++)
+            {
+                var entity = collection[i]!;
+                var key = Key(entity);
+                var serialized = JsonSerializer.Serialize(entity, map.Type, Json.Options);
+                // A changed position must also be persisted, even for identical objects.
+                if (old.TryGetValue(key, out var previous) && previous == i + ":" + serialized)
+                    continue;
+                Upsert(db, tx, map, entity, i);
+            }
+        }
+    }
+
     public T Change<T>(Func<FactoryState, T> mutator)
     {
-        using var c = Open();
-        using var tx = c.BeginTransaction();
-        var state = Load(c, tx);
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        var state = Load(db, tx);
+        var before = Entities.Select(map =>
+        {
+            var snapshot = new Dictionary<string, string>(StringComparer.Ordinal);
+            var collection = Items(state, map);
+            for (int i = 0; i < collection.Count; i++)
+            {
+                var item = collection[i]!;
+                if (!snapshot.TryAdd(Key(item), i + ":" +
+                    JsonSerializer.Serialize(item, map.Type, Json.Options)))
+                    throw new InvalidOperationException("Duplicate relational entity ID: " + Key(item));
+            }
+            return snapshot;
+        }).ToArray();
         var result = mutator(state);
-        using var cmd = c.CreateCommand();
-        cmd.Transaction = tx;
-        cmd.CommandText = "INSERT INTO factory_state(id,content) VALUES(1,$v) ON CONFLICT(id) DO UPDATE SET content=excluded.content";
-        cmd.Parameters.AddWithValue("$v", Json.Stringify(state));
-        cmd.ExecuteNonQuery();
+        Save(db, tx, state, before);
         tx.Commit();
         return result;
     }
+
     public void Change(Action<FactoryState> action) => Change<int>(s => { action(s); return 0; });
+
     public void Event(Guid? jobId, string type, string message) => Change(s =>
     {
         s.Events.Add(new FactoryEvent { JobId = jobId, Type = type, Message = message[..Math.Min(message.Length, 2000)] });
         if (s.Events.Count > 20000) s.Events.RemoveRange(0, s.Events.Count - 20000);
     });
+
     public FactoryJob Job(Guid id) => Read().Jobs.FirstOrDefault(j => j.Id == id)
         ?? throw new ArgumentException($"Unknown job: {id}");
+
     public ProjectInfo Project(string key) => Read().Projects.FirstOrDefault(p =>
-        p.Name.Equals(key, StringComparison.OrdinalIgnoreCase) || p.Id.ToString().Equals(key, StringComparison.OrdinalIgnoreCase))
+        p.Name.Equals(key, StringComparison.OrdinalIgnoreCase) ||
+        p.Id.ToString().Equals(key, StringComparison.OrdinalIgnoreCase))
         ?? throw new ArgumentException($"Unknown project: {key}");
+
     public void UpdateJob(Guid id, Action<FactoryJob> action) => Change(s =>
     {
-        var j = s.Jobs.Single(x => x.Id == id);
-        action(j); j.UpdatedAt = DateTimeOffset.UtcNow;
+        var job = s.Jobs.Single(j => j.Id == id);
+        action(job);
+        job.UpdatedAt = DateTimeOffset.UtcNow;
     });
+
     public FactoryJob AddJob(FactoryJob job) => Change(s =>
     {
-        if (!s.Projects.Any(p => p.Id == job.ProjectId)) throw new ArgumentException("Project does not exist");
+        if (!s.Projects.Any(p => p.Id == job.ProjectId))
+            throw new ArgumentException("Project does not exist");
         foreach (var dependency in job.DependsOn)
             if (!s.Jobs.Any(j => j.Id == dependency && j.ProjectId == job.ProjectId))
                 throw new ArgumentException($"Invalid dependency: {dependency}");
-        if (DependencyGraph.WouldCycle(s.Jobs.Append(job).ToList())) throw new ArgumentException("Dependency cycle detected");
+        if (DependencyGraph.WouldCycle(s.Jobs.Append(job).ToList()))
+            throw new ArgumentException("Dependency cycle detected");
         s.Jobs.Add(job);
         s.Events.Add(new FactoryEvent { JobId = job.Id, Type = "queued", Message = job.Title });
         return job;

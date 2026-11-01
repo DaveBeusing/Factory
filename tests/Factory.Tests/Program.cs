@@ -365,6 +365,209 @@ Test("Mission Control blocks cross-project job dependencies", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+
+Test("Relational SQLite schema contains no JSON state table", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-relational-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        using var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            new Microsoft.Data.Sqlite.SqliteConnectionStringBuilder
+            { DataSource = Path.Combine(home, "factory.sqlite3"), ForeignKeys = true }.ToString());
+        db.Open();
+        long Count(string sql)
+        {
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = sql;
+            return Convert.ToInt64(cmd.ExecuteScalar());
+        }
+        Assert(Count("PRAGMA user_version;") == 2, "Unexpected relational schema version");
+        Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
+        foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
+            "workers", "releases", "knowledge_items", "graph_nodes", "evaluations",
+            "project_checks", "project_check_arguments", "jobs_depends_on",
+            "projects_protected_paths", "goals_acceptance_criteria", "evaluations_failures" })
+            Assert(Count($"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';") == 1,
+                "Missing relational table: " + table);
+        Assert(Count("SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='project_id';") == 1);
+        Assert(Count("SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='state';") == 1);
+        Assert(Count("SELECT COUNT(*) FROM pragma_foreign_key_list('jobs') WHERE \"table\"='projects';") == 1);
+        Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_jobs_project_state';") == 1);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Relational persistence roundtrips all entities and ordered collections", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-relational-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo
+        {
+            Name = "my-project", Path = "C:/src/repo", Origin = "https://example.invalid/repo",
+            Checks = [new CheckCommand { Name = "build", Executable = "dotnet",
+                Arguments = ["build", "--configuration", "Release"], TimeoutSeconds = 45 }],
+            ProtectedPaths = [".github/", "configs/"]
+        };
+        var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Improve quality",
+            AcceptanceCriteria = ["Build works", "Tests pass"], TokenBudget = 12345 };
+        var first = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
+            Title = "first", ExpectedPaths = ["src/A.cs"], State = JobStates.Integrated,
+            Integrated = true, TokensIn = 42 };
+        var second = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
+            Title = "second", DependsOn = [first.Id], ExpectedPaths = ["src/B.cs"],
+            LeaseUntil = DateTimeOffset.Parse("2026-01-01T10:20:30+02:00"),
+            StartedAt = DateTimeOffset.Parse("2026-01-01T09:00:00+00:00") };
+        var entry = new FactoryEvent { JobId = first.Id, Type = "status", Message = "ready" };
+        store.Change(s =>
+        {
+            s.Schema = 1; s.Paused = true;
+            s.Projects.Add(project); s.Goals.Add(goal);
+            s.Jobs.Add(first); s.Jobs.Add(second);
+            s.Events.Add(entry);
+            s.Knowledge.Add(new KnowledgeItem { ProjectId = project.Id,
+                Topic = "arch", Content = "Use layered services", SourceSha = "sha" });
+            s.Graph.Add(new GraphNode { ProjectId = project.Id, File = "src/A.cs",
+                Imports = ["System", "Factory"], Symbols = ["Alpha"], Hash = "file-hash" });
+            s.Evaluations.Add(new EvaluationResult { Suite = "regression", Passed = 2,
+                Total = 3, Failures = ["Missing edge case", "Needs retry"] });
+            s.Releases.Add(new ReleaseInfo { ProjectId = project.Id, Version = "1.2.3",
+                Commit = "abcdef", ManifestPath = "releases/manifest.json" });
+            s.Workers.Add(new WorkerInfo { Id = "worker-01", Enabled = true, Draining = true,
+                Platform = "windows", Heartbeat = DateTimeOffset.Parse("2026-01-01T08:30:00+01:00") });
+        });
+        var data = new StateStore(home).Read();
+        Assert(data.Schema == 1 && data.Paused);
+        Assert(data.Projects.Count == 1 && data.Projects[0].Id == project.Id);
+        Assert(data.Projects[0].Checks.Count == 1 &&
+            data.Projects[0].Checks[0].Arguments.SequenceEqual(["build", "--configuration", "Release"]));
+        Assert(data.Projects[0].ProtectedPaths.SequenceEqual([".github/", "configs/"]));
+        Assert(data.Goals.Single().AcceptanceCriteria.SequenceEqual(["Build works", "Tests pass"]));
+        Assert(data.Goals.Single().TokenBudget == 12345);
+        Assert(data.Jobs.Count == 2 && data.Jobs[1].DependsOn.SequenceEqual([first.Id]));
+        Assert(data.Jobs[1].ExpectedPaths.SequenceEqual(["src/B.cs"]));
+        Assert(data.Jobs[1].LeaseUntil == second.LeaseUntil && data.Jobs[1].StartedAt == second.StartedAt);
+        Assert(data.Events.Count == 1 && data.Events[0].Id == entry.Id);
+        Assert(data.Knowledge.Single().Content == "Use layered services");
+        Assert(data.Graph.Single().Imports.SequenceEqual(["System", "Factory"]) &&
+            data.Graph.Single().Symbols.SequenceEqual(["Alpha"]));
+        Assert(data.Evaluations.Single().Failures.SequenceEqual(["Missing edge case", "Needs retry"]));
+        Assert(data.Releases.Single().Version == "1.2.3");
+        Assert(data.Workers.Single().Draining && data.Workers.Single().Id == "worker-01");
+        store.UpdateJob(second.Id, j => { j.State = JobStates.Reviewing; j.TokensOut = 22; });
+        Assert(new StateStore(home).Job(second.Id).TokensOut == 22);
+        Assert(new StateStore(home).Read().Projects.Single().Checks[0].Arguments.Count == 3);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("State mutations update only modified relational rows", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-relational-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "stable" };
+        var job = new FactoryJob { ProjectId = project.Id, Title = "work" };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                CREATE TRIGGER reject_unchanged_project_update
+                BEFORE UPDATE ON projects BEGIN
+                    SELECT RAISE(ABORT, 'unchanged project was rewritten');
+                END;
+                """;
+            cmd.ExecuteNonQuery();
+        }
+        store.UpdateJob(job.Id, j => j.State = JobStates.Building);
+        Assert(store.Job(job.Id).State == JobStates.Building);
+        Assert(store.Project(project.Name).Id == project.Id);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Relational transactions rollback failed mutations and foreign key violations", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-relational-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "clean" };
+        store.Change(s => s.Projects.Add(project));
+        try
+        {
+            store.Change(s => { s.Projects.Single().Status = "disabled"; throw new InvalidOperationException("abort"); });
+            throw new Exception("Mutation unexpectedly committed");
+        }
+        catch (InvalidOperationException ex) { Assert(ex.Message == "abort"); }
+        Assert(store.Project(project.Name).Status == "active");
+        try
+        {
+            store.Change(s => s.Jobs.Add(new FactoryJob { ProjectId = Guid.NewGuid(), Title = "orphan" }));
+            throw new Exception("Foreign-key-invalid job was saved");
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { }
+        Assert(store.Read().Jobs.Count == 0 && store.Read().Projects.Count == 1);
+        var first = store.AddJob(new FactoryJob { ProjectId = project.Id, Title = "valid" });
+        try
+        {
+            store.Change(s => s.Projects.Clear());
+            throw new Exception("Project deletion bypassed job foreign key");
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { }
+        Assert(store.Read().Projects.Count == 1 && store.Job(first.Id).ProjectId == project.Id);
+        Assert(store.Job(first.Id).Id == first.Id);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Legacy JSON state is rejected without modifying the database", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-relational-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(home);
+    try
+    {
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                CREATE TABLE factory_state(id INTEGER PRIMARY KEY, content TEXT NOT NULL);
+                INSERT INTO factory_state(id,content) VALUES(1,'{"projects":[]}');
+                """;
+            cmd.ExecuteNonQuery();
+        }
+        try { _ = new StateStore(home); throw new Exception("Legacy database was accepted"); }
+        catch (InvalidOperationException ex) { Assert(ex.Message.Contains("legacy", StringComparison.OrdinalIgnoreCase)); }
+        using var verify = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(home, "factory.sqlite3")}");
+        verify.Open();
+        using var check = verify.CreateCommand();
+        check.CommandText = "SELECT content FROM factory_state WHERE id=1;";
+        Assert((string?)check.ExecuteScalar() == "{\"projects\":[]}");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Relational state supports atomic concurrent writes", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-relational-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        _ = new StateStore(home);
+        var tasks = Enumerable.Range(0, 12).Select(i => Task.Run(() =>
+            new StateStore(home).Event(null, "concurrent", "event-" + i))).ToArray();
+        Task.WhenAll(tasks).GetAwaiter().GetResult();
+        var messages = new StateStore(home).Read().Events.Select(x => x.Message).ToHashSet();
+        Assert(messages.Count == tasks.Length && messages.Contains("event-0") && messages.Contains("event-11"));
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 var passed = results.Count(x => x.Passed);
 Console.WriteLine($"{passed}/{results.Count} passed");
 return passed == results.Count ? 0 : 1;

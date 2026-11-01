@@ -40,17 +40,31 @@ public static class DependencyGraph
         => job.DependsOn.All(id => all.Any(other => other.Id == id && other.Integrated));
 }
 
+public static class JobExecutionModes
+{
+    public const string Local = "local";
+    public const string Remote = "remote";
+    public static bool IsSupported(string mode) => mode is Local or Remote;
+    public static bool Matches(FactoryJob job, string mode)
+        => IsSupported(mode) && string.Equals(job.Mode, mode, StringComparison.Ordinal);
+}
+
 public sealed class JobScheduler
 {
-    public static IReadOnlyList<FactoryJob> Select(FactoryState state, int limit)
+    // Execution mode is part of the eligibility contract; the safe default is local.
+    public static IReadOnlyList<FactoryJob> Select(FactoryState state, int limit,
+        string executionMode = JobExecutionModes.Local, Func<FactoryJob, bool>? eligibility = null)
     {
+        if (!JobExecutionModes.IsSupported(executionMode))
+            throw new ArgumentException("Unsupported execution mode", nameof(executionMode));
         if (state.Paused || limit <= 0) return [];
         var active = state.Jobs.Where(j => JobStates.Active.Contains(j.State) &&
             j.LeaseUntil > DateTimeOffset.UtcNow).ToList();
         var chosen = new List<FactoryJob>();
         var capacity = Math.Max(0, limit - active.Count);
         var counts = active.GroupBy(j => j.ProjectId).ToDictionary(g => g.Key, g => g.Count());
-        foreach (var job in state.Jobs.Where(j => j.State == JobStates.Queued)
+        foreach (var job in state.Jobs.Where(j => j.State == JobStates.Queued &&
+            JobExecutionModes.Matches(j, executionMode) && (eligibility is null || eligibility(j)))
             .OrderByDescending(j => j.Priority)
             .ThenBy(j => j.CreatedAt))
         {

@@ -130,7 +130,7 @@ To override the default location for the current terminal session:
 $env:FACTORY_HOME = '<absolute-directory>'
 ```
 
-Factory uses a **new, standalone database**. There is no legacy importer or database compatibility layer. Back up `.factory` before replacing an installation or changing machines. Do not commit its configuration, tokens, or state files into a repository.
+Factory uses a **new, standalone database**. There is no legacy importer or database compatibility layer. Back up `.factory` before replacing an installation or changing machines. Do not commit its configuration, tokens, or state files into a repository. Existing configurations retain their administrator token and receive a new independent worker key on first launch.
 
 ### Important settings
 
@@ -145,7 +145,8 @@ Factory uses a **new, standalone database**. There is no legacy importer or data
 | `allowPush` | Permit remote branch publication | `false` |
 | `autoMerge` | Reserved setting; no automatic merge operation | `false` |
 | `workspaceRoot` | Root directory for worktrees | `.factory/worktrees` |
-| `apiToken` | Mission Control and worker API credential | Generated locally |
+| `apiToken` | Mission Control administrator credential; never share with workers | Generated locally |
+| `workerTokenKey` | Controller-only key used to derive a distinct credential per worker ID | Generated locally |
 
 The native agent CLI may maintain its own provider-defined directories. Those directories do **not** replace Factory's `.factory` root. `FACTORY_AGENT_EXECUTABLE` can explicitly select the native agent executable when it is not available on `PATH`.
 
@@ -187,7 +188,7 @@ Run these commands from the Factory root:
 .\dist\Factory.exe dashboard
 ```
 
-Mission Control listens at **http://127.0.0.1:8787** by default. Its API requires the generated `apiToken` from `.factory/settings.json`; the browser does not receive that token automatically. Supply the credential in the dashboard's connection workflow. The token remains in browser tab session storage and is not transmitted in query strings.
+Mission Control listens at **http://127.0.0.1:8787** by default. Administrator API endpoints require the generated `apiToken` from `.factory/settings.json`; the browser does not receive that token automatically. Supply the credential in the dashboard's connection workflow. The token remains in browser tab session storage and is not transmitted in query strings. Remote workers instead authenticate with credentials derived for their individual worker IDs and cannot access administrator endpoints.
 
 ### Mission Control: operations workspace
 
@@ -408,21 +409,33 @@ These components assist engineering decisions; static and agent-generated analys
 | Merge/deployment | Manual; no unattended merge or deployment |
 | Adoption | Explicit approval required |
 | Checks | Executed before review and evidence generation |
-| Remote API | Bearer authentication; HTTPS required outside loopback |
+| Remote API | Separate administrator and worker-scoped bearer authentication; HTTPS required outside loopback |
+| Worker identity | Worker requests must carry a valid ID matching the authenticated worker credential |
+| Worker revocation | Disabled workers cannot register, claim jobs, or submit job updates |
 | Plugins | Trusted .NET assemblies, not sandboxed plugins |
 | Native checks | Execute with worker-user permissions |
 | Worktrees | Git isolation, **not** OS-level sandboxing |
 | Usage limits | No invented remaining percentages |
 
-For a remote worker, expose the API only behind a properly configured TLS endpoint. Pass credentials through environment variables rather than command arguments or logs:
+For a remote worker, expose the controller only behind a properly configured TLS endpoint. The administrator provisions one scoped token for each stable worker ID using the **controller installation**:
 
 ```powershell
+.\dist\Factory.exe worker-token --id worker-01
 .\dist\Factory.exe dashboard --listen 'https://0.0.0.0:8443'
-$env:FACTORY_TOKEN = '<api-token>'
-.\dist\Factory.exe worker --server 'https://<host>:8443/' --workspace '<worker-directory>'
 ```
 
-The server must have valid HTTPS certificate configuration. A secure connection to the controller does **not** automatically sandbox the worker's tools or filesystem; use operating-system restrictions where needed.
+Transfer the generated token securely to that specific worker; never distribute `apiToken` or `workerTokenKey`. On the **worker machine**, supply only the worker token in an environment variable (not a command argument):
+
+```powershell
+$env:FACTORY_WORKER_TOKEN = '<token-for-worker-01>'
+.\dist\Factory.exe worker --server 'https://<host>:8443/' --workspace '<worker-directory>' --id worker-01
+```
+
+Worker IDs must be 1–100 ASCII letters/digits/dots/underscores/hyphens and start with a letter or digit. The worker sends its ID in `X-Factory-Worker-Id`; the controller checks the derived credential and enforces matching IDs in register, claim, heartbeat, and completion payloads. These four worker operations use `POST /api/worker/{register|claim|heartbeat|complete}`. All other `/api` routes, including `/api/workers/register` and worker management actions, require the administrator token. Managed local workers receive their scoped token automatically. Factory also strips controller and worker API credentials from child agent, Git and quality-check processes.
+
+**Migration:** Older remote processes using `FACTORY_TOKEN` must be reprovisioned with `FACTORY_WORKER_TOKEN` and an explicit `--id` before reconnecting. To revoke one worker, disable it in Mission Control; to invalidate *all* issued worker tokens, rotate `workerTokenKey` in the controller settings and restart the controller, then reprovision workers. Keep both controller secrets restricted to the controller operator. Do not put generated tokens in source control, logs, PRs, or screenshots.
+
+The server must have valid HTTPS certificate configuration. A secure connection to the controller does **not** automatically sandbox the worker's tools or filesystem; use operating-system restrictions where needed. Locally managed workers share the controller's OS account unless isolated by the operator, so worker API permissions do not substitute for OS-level privilege separation.
 
 ## 13. Command reference
 
@@ -441,7 +454,8 @@ The server must have valid HTTPS certificate configuration. A secure connection 
 | `release` | Prepare source archives, release notes and checksums |
 | `usage` | Read account-level rate-limit and reset information |
 | `dashboard` | Run Mission Control |
-| `worker` | Run an authenticated remote worker |
+| `worker-token --id ID` | Provision a scoped worker bearer credential on the controller |
+| `worker` | Run an authenticated remote worker using `FACTORY_WORKER_TOKEN` |
 
 Display the current command syntax with:
 

@@ -166,7 +166,26 @@ public sealed class FactorySettings
     };
     public bool AllowPush { get; set; }
     public bool AutoMerge { get; set; }
+    // Administrator credential. Never pass it to worker processes or API responses.
     public string ApiToken { get; set; } = "";
+    // Controller-only HMAC key for distinct, worker-scoped credentials.
+    public string WorkerTokenKey { get; set; } = "";
+    public bool EnsureCredentials()
+    {
+        var changed = false;
+        if (string.IsNullOrWhiteSpace(ApiToken))
+        {
+            ApiToken = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+            changed = true;
+        }
+        if (!WorkerAuthentication.IsValidKey(WorkerTokenKey) ||
+            string.Equals(WorkerTokenKey, ApiToken, StringComparison.Ordinal))
+        {
+            WorkerTokenKey = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+            changed = true;
+        }
+        return changed;
+    }
     public string WorkspaceRoot { get; set; } = "";
     public int PollSeconds { get; set; } = 3;
     public static FactorySettings Load(string path) => File.Exists(path)

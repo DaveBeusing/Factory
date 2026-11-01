@@ -252,7 +252,7 @@ public static class MissionControlManager
     }
     public static WorkerInfo RegisterWorker(StateStore store, WorkerInput input)
     {
-        Require(!string.IsNullOrWhiteSpace(input.Id) && input.Id.Length <= 100, "Worker ID required");
+        Require(WorkerAuthentication.IsValidWorkerId(input.Id), "Worker ID must contain 1-100 ASCII letters, digits, dots, underscores or hyphens and start with a letter or digit");
         return store.Change(s =>
         {
             var w = s.Workers.FirstOrDefault(w => w.Id == input.Id);

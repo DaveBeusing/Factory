@@ -109,6 +109,88 @@ Test("Planning rejects cycle", () =>
 });
 Test("Unauthenticated worker blocked", () => Assert(!WorkerProtocol.Authorized("Bearer invalid", "secret")));
 Test("Authorized worker accepted", () => Assert(WorkerProtocol.Authorized("Bearer abc", "abc")));
+
+Test("Child processes do not inherit controller or worker API tokens", () =>
+{
+    var oldAdmin = Environment.GetEnvironmentVariable("FACTORY_TOKEN");
+    var oldWorker = Environment.GetEnvironmentVariable("FACTORY_WORKER_TOKEN");
+    try
+    {
+        Environment.SetEnvironmentVariable("FACTORY_TOKEN", "admin-test-secret");
+        Environment.SetEnvironmentVariable("FACTORY_WORKER_TOKEN", "worker-test-secret");
+        var child = Commands.StartInfo("git", ["--version"], Environment.CurrentDirectory);
+        Assert(!child.Environment.ContainsKey("FACTORY_TOKEN"));
+        Assert(!child.Environment.ContainsKey("FACTORY_WORKER_TOKEN"));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("FACTORY_TOKEN", oldAdmin);
+        Environment.SetEnvironmentVariable("FACTORY_WORKER_TOKEN", oldWorker);
+    }
+});
+
+Test("Controller and worker secrets are generated independently and remain stable", () =>
+{
+    var settings = new FactorySettings { ApiToken = "existing-admin-token" };
+    Assert(settings.EnsureCredentials());
+    Assert(settings.ApiToken == "existing-admin-token");
+    Assert(WorkerAuthentication.IsValidKey(settings.WorkerTokenKey));
+    Assert(settings.WorkerTokenKey != settings.ApiToken);
+    var key = settings.WorkerTokenKey;
+    Assert(!settings.EnsureCredentials());
+    Assert(settings.WorkerTokenKey == key);
+    var legacy = new FactorySettings { ApiToken = key, WorkerTokenKey = key };
+    Assert(legacy.EnsureCredentials() && legacy.WorkerTokenKey != legacy.ApiToken);
+});
+
+Test("Worker credentials cannot authenticate to administrator endpoints", () =>
+{
+    var settings = new FactorySettings();
+    settings.EnsureCredentials();
+    var token = WorkerAuthentication.CreateToken(settings.WorkerTokenKey, "builder-01");
+    string Bearer(string value) => "Bearer " + value;
+    Assert(WorkerAuthentication.Authorized("POST", "/api/worker/claim", Bearer(token), "builder-01", settings));
+    foreach (var path in new[] { "/api/state", "/api/settings", "/api/jobs", "/api/workers/register",
+        "/api/workers/builder-01/action", "/api/queue/run", "/api/usage" })
+        Assert(!WorkerAuthentication.Authorized("GET", path, Bearer(token), "builder-01", settings),
+            "Worker reached admin route: " + path);
+    Assert(WorkerAuthentication.Authorized("GET", "/api/state", Bearer(settings.ApiToken), null, settings));
+    Assert(!WorkerAuthentication.Authorized("POST", "/api/worker/claim",
+        Bearer(settings.ApiToken), "builder-01", settings));
+});
+
+Test("Worker credentials are bound to identities and worker routes fail closed", () =>
+{
+    var settings = new FactorySettings();
+    settings.EnsureCredentials();
+    var a = WorkerAuthentication.CreateToken(settings.WorkerTokenKey, "builder-01");
+    var b = WorkerAuthentication.CreateToken(settings.WorkerTokenKey, "builder-02");
+    Assert(a != b);
+    Assert(WorkerAuthentication.Authorized("POST", "/api/worker/heartbeat/", "Bearer " + a, "builder-01", settings));
+    Assert(!WorkerAuthentication.Authorized("POST", "/api/worker/heartbeat", "Bearer " + a, "builder-02", settings));
+    Assert(!WorkerAuthentication.Authorized("GET", "/api/worker/heartbeat", "Bearer " + a, "builder-01", settings));
+    Assert(!WorkerAuthentication.Authorized("POST", "/api/worker/other", "Bearer " + a, "builder-01", settings));
+    Assert(!WorkerAuthentication.Authorized("POST", "/api/worker/claim", "Bearer " + a, null, settings));
+    Assert(!WorkerAuthentication.MatchesIdentity("builder-01", "builder-02"));
+    Assert(WorkerAuthentication.MatchesIdentity("builder-01", "builder-01"));
+    Assert(!WorkerAuthentication.IsValidWorkerId("../builder-01"));
+    Assert(!WorkerAuthentication.IsValidWorkerId("worker:admin"));
+});
+
+Test("Unregistered and disabled workers cannot claim jobs", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-auth-test-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var settings = new FactorySettings { AllowPush = true };
+        Assert(WorkerProtocol.Claim(store, settings, "unknown-worker") is null);
+        MissionControlManager.RegisterWorker(store, new WorkerInput { Id = "disabled-worker" });
+        MissionControlManager.ControlWorker(store, "disabled-worker", "disable");
+        Assert(WorkerProtocol.Claim(store, settings, "disabled-worker") is null);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
 Test("Protected path gate", () =>
 {
     try { GitOperations.EnforcePaths(["factory/checks.json"],["factory/"]); throw new Exception("Not blocked"); }

@@ -10,13 +10,13 @@ public static class DependencyGraph
         bool Visit(Guid id)
         {
             if (visited.Contains(id)) return false;
-            if (!visiting.Add(id)) return true;
-            foreach (var dep in byId[id].DependsOn)
+           if (!visiting.Add(id)) return true;
+           foreach (var dep in byId[id].DependsOn)
             {
                 if (!byId.ContainsKey(dep) || Visit(dep)) return true;
-            }
+           }
             visiting.Remove(id); visited.Add(id);
-            return false;
+           return false;
         }
         return byId.Keys.Any(Visit);
     }
@@ -29,8 +29,8 @@ public static class DependencyGraph
         foreach (var y in b.ExpectedPaths)
         {
             var left = x.Replace('\\', '/').TrimEnd('/');
-            var right = y.Replace('\\', '/').TrimEnd('/');
-            if (left.Equals(right, StringComparison.OrdinalIgnoreCase) ||
+           var right = y.Replace('\\', '/').TrimEnd('/');
+           if (left.Equals(right, StringComparison.OrdinalIgnoreCase) ||
                 left.StartsWith(right + "/", StringComparison.OrdinalIgnoreCase) ||
                 right.StartsWith(left + "/", StringComparison.OrdinalIgnoreCase)) return true;
         }
@@ -55,18 +55,22 @@ public sealed class JobScheduler
             .ThenBy(j => j.CreatedAt))
         {
             if (chosen.Count >= capacity) break;
-            if (!DependencyGraph.DependenciesSatisfied(job, state.Jobs)) continue;
-            if (job.GoalId.HasValue)
+           if (!DependencyGraph.DependenciesSatisfied(job, state.Jobs)) continue;
+           if (job.GoalId.HasValue)
             {
                 var goal = state.Goals.FirstOrDefault(g => g.Id == job.GoalId);
-                if (goal == null || goal.State != "active" ||
-                    state.Jobs.Where(j => j.GoalId == job.GoalId).Sum(j => j.TokensIn + j.TokensOut) >= goal.TokenBudget) continue;
-            }
+               if (goal == null || goal.State != "active" ||
+                    state.Jobs.Where(j => j.GoalId == job.GoalId)
+                        .Aggregate(0L, (sum, j) => checked(sum + j.TokensIn + j.TokensOut)) >
+                        goal.TokenBudget - BudgetedAgentRuntime.MinimumTurnAllowance) continue;
+               // One active job per goal, including remote claims. Avoid concurrent budget overspend.
+                if (active.Concat(chosen).Any(j => j.GoalId == job.GoalId)) continue;
+           }
             var project = state.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
-            if (project == null || project.Status != "active" || counts.GetValueOrDefault(job.ProjectId) >= project.MaxParallel) continue;
-            if (active.Concat(chosen).Any(j => DependencyGraph.Conflict(job, j))) continue;
-            chosen.Add(job);
-            counts[job.ProjectId] = counts.GetValueOrDefault(job.ProjectId) + 1;
+           if (project == null || project.Status != "active" || counts.GetValueOrDefault(job.ProjectId) >= project.MaxParallel) continue;
+           if (active.Concat(chosen).Any(j => DependencyGraph.Conflict(job, j))) continue;
+           chosen.Add(job);
+           counts[job.ProjectId] = counts.GetValueOrDefault(job.ProjectId) + 1;
         }
         return chosen;
     }
@@ -80,15 +84,15 @@ public sealed class JobScheduler
         while (remaining.Count > 0)
         {
             var group = new List<FactoryJob>();
-            foreach (var job in remaining.OrderByDescending(j => j.Priority))
+           foreach (var job in remaining.OrderByDescending(j => j.Priority))
             {
                 if (!job.DependsOn.All(integrated.Contains)) continue;
-                if (group.Any(other => DependencyGraph.Conflict(job, other))) continue;
-                group.Add(job);
-            }
+               if (group.Any(other => DependencyGraph.Conflict(job, other))) continue;
+               group.Add(job);
+           }
             if (group.Count == 0) throw new InvalidOperationException("Unresolved dependency or conflict graph");
-            groups.Add(group.Select(j => j.Id).ToArray());
-            foreach (var j in group) { integrated.Add(j.Id); remaining.Remove(j); }
+           groups.Add(group.Select(j => j.Id).ToArray());
+           foreach (var j in group) { integrated.Add(j.Id); remaining.Remove(j); }
         }
         return groups;
     }

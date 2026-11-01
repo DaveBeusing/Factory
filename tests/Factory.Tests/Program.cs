@@ -568,6 +568,167 @@ Test("Relational state supports atomic concurrent writes", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+
+Test("App-server token usage counts deltas on resumed threads", () =>
+{
+    var tracker = new AppServerTokenTracker();
+    var samples = new[]
+    {
+        """{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":1120,"outputTokens":540},"last":{"inputTokens":120,"outputTokens":40}}}}""",
+        """{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":1200,"outputTokens":570},"last":{"inputTokens":80,"outputTokens":30}}}}""",
+        """{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":1200,"outputTokens":570},"last":{"inputTokens":80,"outputTokens":30}}}}"""
+    };
+    foreach (var sample in samples)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(sample);
+        Assert(tracker.Observe(doc.RootElement));
+    }
+    Assert(tracker.Reported);
+    Assert(tracker.Turn.InputTokens == 200 && tracker.Turn.OutputTokens == 70,
+        "Previous thread usage was double-counted");
+    using var missing = System.Text.Json.JsonDocument.Parse(
+        """{"method":"thread/tokenUsage/updated","params":{"tokenUsage":{"total":{"inputTokens":5000,"outputTokens":20}}}}""");
+    Assert(!new AppServerTokenTracker().Observe(missing.RootElement),
+        "Unbounded totals without an initial delta must not be charged");
+});
+
+Test("Same-goal jobs do not run concurrently", () =>
+{
+    var project = new ProjectInfo { MaxParallel = 5 };
+    var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 100000 };
+    var running = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id, State = JobStates.Building,
+        LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(1), ExpectedPaths = ["src/a.cs"] };
+    var queued = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id, ExpectedPaths = ["docs/b.md"] };
+    var otherGoal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 100000 };
+    var independent = new FactoryJob { ProjectId = project.Id, GoalId = otherGoal.Id, ExpectedPaths = ["src/c.cs"] };
+    var selected = JobScheduler.Select(new FactoryState
+    {
+        Projects = [project], Goals = [goal, otherGoal], Jobs = [running, queued, independent]
+    }, 5);
+    Assert(!selected.Any(j => j.Id == queued.Id));
+    Assert(selected.Any(j => j.Id == independent.Id));
+});
+
+await TestAsync("Budgeted runtime checks before every invocation and records reviews", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-budget-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "budget-test" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 512 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
+        var scripted = new UsageTestRuntime();
+        scripted.Reports.Enqueue(new AgentTokenUsage(80, 20));
+        scripted.Reports.Enqueue(new AgentTokenUsage(75, 20));
+        scripted.Reports.Enqueue(new AgentTokenUsage(80, 30));
+        var runtime = new BudgetedAgentRuntime(scripted, store, job.Id);
+        await runtime.RunAsync(home, "builder", "", CancellationToken.None);
+        await runtime.RunAsync(home, "review", "", CancellationToken.None, readOnly: true);
+        await runtime.RunAsync(home, "rework", "", CancellationToken.None);
+        var recorded = store.Job(job.Id);
+        Assert(recorded.TokensIn == 235 && recorded.TokensOut == 70,
+            "Builder/reviewer usage not aggregated");
+        try
+        {
+            await runtime.RunAsync(home, "fourth", "", CancellationToken.None);
+            throw new Exception("Low budget allowed a fourth turn");
+        }
+        catch (TokenBudgetExceededException) { }
+        Assert(scripted.Calls == 3, "Provider was called despite insufficient budget");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Budgeted runtime records failure usage and interrupts exhausted turns", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-budget-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "budget-failure" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 400 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
+        var scripted = new UsageTestRuntime { ReportFailure = true };
+        scripted.Reports.Enqueue(new AgentTokenUsage(50, 20));
+        scripted.Reports.Enqueue(new AgentTokenUsage(270, 100));
+        var runtime = new BudgetedAgentRuntime(scripted, store, job.Id);
+        var failed = await runtime.RunAsync(home, "fail", "", CancellationToken.None);
+        Assert(!failed.Success);
+        Assert(store.Job(job.Id).TokensIn == 50 && store.Job(job.Id).TokensOut == 20);
+        try
+        {
+            await runtime.RunAsync(home, "overrun", "", CancellationToken.None);
+            throw new Exception("Over-budget turn was allowed to finish");
+        }
+        catch (TokenBudgetExceededException) { }
+        var current = store.Job(job.Id);
+        Assert(current.TokensIn == 320 && current.TokensOut == 120,
+            "Usage before cancellation must remain persisted");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Goal budget fails closed when usage is unavailable", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-budget-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "missing-usage" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 1000 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
+        var runtime = new BudgetedAgentRuntime(new UsageTestRuntime(), store, job.Id);
+        try
+        {
+            await runtime.RunAsync(home, "no usage", "", CancellationToken.None);
+            throw new Exception("Missing usage was silently accepted");
+        }
+        catch (TokenBudgetExceededException ex)
+        {
+            Assert(ex.Message.Contains("did not report"));
+        }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Remote goal claims retain remaining budget and failed usage", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-remote-budget-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote", Origin = "https://example.invalid/repo" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 1000 };
+        var earlier = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id, State = JobStates.Integrated,
+            Integrated = true, TokensIn = 200, TokensOut = 50 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id, Mode = "remote", TokensIn = 20 };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(earlier); s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        Assert(claim?.Goal is not null && claim.Goal.TokenBudget == 750);
+        Assert(claim!.Job.TokensIn == 20);
+        Assert(WorkerProtocol.Heartbeat(store, new WorkerStatus
+        {
+            WorkerId = "worker-01", JobId = job.Id, TokensIn = 70, TokensOut = 15
+        }, new FactorySettings()));
+        Assert(store.Job(job.Id).TokensIn == 70 && store.Job(job.Id).TokensOut == 15);
+        Assert(WorkerProtocol.Complete(store, new WorkerStatus
+        {
+            WorkerId = "worker-01", JobId = job.Id,
+            Job = new FactoryJob { State = JobStates.Blocked, TokensIn = 95, TokensOut = 33 }
+        }));
+        Assert(store.Job(job.Id).TokensIn == 95 && store.Job(job.Id).TokensOut == 33);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 var passed = results.Count(x => x.Passed);
 Console.WriteLine($"{passed}/{results.Count} passed");
 return passed == results.Count ? 0 : 1;
@@ -575,13 +736,39 @@ return passed == results.Count ? 0 : 1;
 internal sealed class FakeAgent : IAgentRuntime
 {
     public Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
-        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false)
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
     {
         onSession?.Invoke("fake-session");
-        if (readOnly) return Task.FromResult(new AgentRunResult { Success = true, FinalText = "VERDICT: PASS\nNo blocking issues", SessionId = "fake-session" });
+        onUsage?.Invoke(new AgentTokenUsage(8, 4));
+        if (readOnly) return Task.FromResult(new AgentRunResult { Success = true, FinalText = "VERDICT: PASS\nNo blocking issues", SessionId = "fake-session", InputTokens = 8, OutputTokens = 4, UsageReported = true });
         var src = Path.Combine(directory, "src");
         Directory.CreateDirectory(src);
         File.WriteAllText(Path.Combine(src, "generated.txt"), "Tested content");
-        return Task.FromResult(new AgentRunResult { Success = true, FinalText = "Implementation complete", SessionId = "fake-session" });
+        return Task.FromResult(new AgentRunResult { Success = true, FinalText = "Implementation complete", SessionId = "fake-session", InputTokens = 8, OutputTokens = 4, UsageReported = true });
+    }
+}
+
+internal sealed class UsageTestRuntime : IAgentRuntime
+{
+    public readonly Queue<AgentTokenUsage> Reports = new();
+    public int Calls { get; private set; }
+    public bool ReportFailure { get; set; }
+
+    public Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
+    {
+        Calls++;
+        if (Reports.Count == 0)
+            return Task.FromResult(new AgentRunResult { Success = true, FinalText = "No usage" });
+        var usage = Reports.Dequeue();
+        onUsage?.Invoke(usage);
+        cancellation.ThrowIfCancellationRequested();
+        return Task.FromResult(new AgentRunResult
+        {
+            Success = !ReportFailure, InputTokens = usage.InputTokens,
+            OutputTokens = usage.OutputTokens, UsageReported = true
+        });
     }
 }

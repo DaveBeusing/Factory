@@ -26,16 +26,16 @@ public sealed class FactoryEngine
         return _store.Change(s =>
         {
             var j = s.Jobs.Single(x => x.Id == id);
-            if (j.State != JobStates.Queued ||
+           if (j.State != JobStates.Queued ||
                 !DependencyGraph.DependenciesSatisfied(j, s.Jobs) || s.Paused) return false;
-            var selected = JobScheduler.Select(s, _settings.MaxParallel);
-            if (!selected.Any(x => x.Id == id)) return false;
-            j.State = JobStates.Preparing; j.Stage = "worktree"; j.Attempt++;
-            j.LeaseOwner = _workerId;
-            j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
-            j.StartedAt ??= DateTimeOffset.UtcNow; j.UpdatedAt = DateTimeOffset.UtcNow;
-            s.Events.Add(new FactoryEvent { JobId = id, Type = "claimed", Message = _workerId });
-            return true;
+           var selected = JobScheduler.Select(s, _settings.MaxParallel);
+           if (!selected.Any(x => x.Id == id)) return false;
+           j.State = JobStates.Preparing; j.Stage = "worktree"; j.Attempt++;
+           j.LeaseOwner = _workerId;
+           j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
+           j.StartedAt ??= DateTimeOffset.UtcNow; j.UpdatedAt = DateTimeOffset.UtcNow;
+           s.Events.Add(new FactoryEvent { JobId = id, Type = "claimed", Message = _workerId });
+           return true;
         });
     }
 
@@ -44,7 +44,7 @@ public sealed class FactoryEngine
         _store.UpdateJob(id, job =>
         {
             job.State = state; job.Stage = stage;
-            if (error != null) job.Error = error;
+           if (error != null) job.Error = error;
         });
         _store.Event(id, "stage", state + "/" + stage);
     }
@@ -54,24 +54,24 @@ public sealed class FactoryEngine
         return _store.Change(s =>
         {
             var changed = new List<Guid>();
-            foreach (var job in s.Jobs.Where(j => !string.IsNullOrEmpty(j.LeaseOwner) &&
+           foreach (var job in s.Jobs.Where(j => !string.IsNullOrEmpty(j.LeaseOwner) &&
                 j.LeaseUntil <= DateTimeOffset.UtcNow))
             {
                 // Commit and publish are externally visible. Never blindly replay them.
                 if (job.Mode == "remote" || job.Stage is "commit" or "push" or "pr")
                 {
                     job.State = JobStates.Blocked;
-                    job.Error = "Interrupted during Git side effects; inspect branch and PR before retry";
-                }
+                   job.Error = "Interrupted during Git side effects; inspect branch and PR before retry";
+               }
                 else
                 {
                     job.State = JobStates.Queued;
-                    job.Error = "Recovered after expired worker lease; inspect existing worktree";
-                }
+                   job.Error = "Recovered after expired worker lease; inspect existing worktree";
+               }
                 job.LeaseOwner = ""; job.LeaseUntil = null;
-                job.UpdatedAt = DateTimeOffset.UtcNow;
-                changed.Add(job.Id);
-            }
+               job.UpdatedAt = DateTimeOffset.UtcNow;
+               changed.Add(job.Id);
+           }
             return (IReadOnlyList<Guid>)changed;
         });
     }
@@ -83,25 +83,25 @@ public sealed class FactoryEngine
         while (!ct.IsCancellationRequested)
         {
             var finished = running.Where(kv => kv.Value.IsCompleted).Select(kv => kv.Key).ToArray();
-            foreach (var id in finished)
+           foreach (var id in finished)
             {
                 try { await running[id]; } catch (Exception ex) { _store.Event(id, "worker_error", ex.Message); }
                 running.Remove(id);
-            }
+           }
             var selected = JobScheduler.Select(_store.Read(), _settings.MaxParallel);
-            foreach (var j in selected)
+           foreach (var j in selected)
             {
                 if (running.ContainsKey(j.Id) || !Claim(j.Id)) continue;
-                var jobCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                LocalJobControl.Register(j.Id, jobCancel);
-                running[j.Id] = Task.Run(async () =>
+               var jobCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+               LocalJobControl.Register(j.Id, jobCancel);
+               running[j.Id] = Task.Run(async () =>
                 {
                     try { await RunClaimedAsync(j.Id, jobCancel.Token); }
                     finally { LocalJobControl.Unregister(j.Id); jobCancel.Dispose(); }
                 });
-            }
+           }
             if (running.Count == 0 && selected.Count == 0) break;
-            await Task.Delay(1000, ct);
+           await Task.Delay(1000, ct);
         }
         await Task.WhenAll(running.Values);
     }
@@ -132,32 +132,36 @@ public sealed class FactoryEngine
                 {
                     if (j.LeaseOwner == _workerId && JobStates.Active.Contains(j.State))
                         j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
-                });
-            }
+               });
+           }
         }, heartbeatCancel.Token);
         try { await ExecuteAsync(id, ct); }
+        catch (TokenBudgetExceededException ex)
+        {
+            Stage(id, JobStates.Blocked, "budget", ex.Message);
+        }
         catch (OperationCanceledException)
         {
             var interrupted = _store.Job(id);
-            if (interrupted.Stage is "commit" or "push" or "pr")
+           if (interrupted.Stage is "commit" or "push" or "pr")
                 Stage(id, JobStates.Blocked, "interrupted_git", "Git side effects were interrupted; inspect branch and PR before retry");
-            else
+           else
                 Stage(id, interrupted.RequestedState == JobStates.Stopped ? JobStates.Stopped : JobStates.Paused,
                     "interrupted", "Execution interrupted; inspect worktree before resuming");
         }
         catch (Exception ex)
         {
             var stage = _store.Job(id).Stage;
-            Stage(id, stage is "commit" or "push" or "pr" ? JobStates.Blocked : JobStates.Failed, stage, ex.Message);
+           Stage(id, stage is "commit" or "push" or "pr" ? JobStates.Blocked : JobStates.Failed, stage, ex.Message);
         }
         finally
         {
             heartbeatCancel.Cancel();
-            try { await heartbeat; } catch (OperationCanceledException) { }
+           try { await heartbeat; } catch (OperationCanceledException) { }
             _store.UpdateJob(id, j =>
             {
                 j.LeaseOwner = ""; j.LeaseUntil = null; j.FinishedAt = DateTimeOffset.UtcNow; j.RequestedState = "";
-            });
+           });
         }
     }
 
@@ -166,64 +170,61 @@ public sealed class FactoryEngine
         var j = _store.Job(id);
         var p = _store.Read().Projects.Single(x => x.Id == j.ProjectId);
         if (p.Checks.Count == 0) throw new InvalidOperationException("Project checks missing; configure gates before execution");
-        var runtime = _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk);
+        var runtime = new BudgetedAgentRuntime(
+            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk), _store, id);
         var qualityEngine = new QualityEngine(runtime);
         var worktree = _git.Prepare(p, j);
         _store.UpdateJob(id, x => { x.Worktree = worktree; x.Branch = $"factory/{x.Id:N}"; });
         foreach (var plugin in _plugins) await plugin.BeforeJobAsync(p, _store.Job(id), ct);
-        var budget = j.GoalId.HasValue ? _store.Read().Goals.FirstOrDefault(g => g.Id == j.GoalId.Value)?.TokenBudget : null;
         var report = new QualityResult();
         for (var round = 1; round <= Math.Max(1, j.MaxRounds); round++)
         {
             ct.ThrowIfCancellationRequested();
-            Stage(id, round == 1 ? JobStates.Building : JobStates.Reworking, "agent");
-            var existing = _store.Job(id);
-            var description = round == 1 ? existing.Description :
+           Stage(id, round == 1 ? JobStates.Building : JobStates.Reworking, "agent");
+           var existing = _store.Job(id);
+           var description = round == 1 ? existing.Description :
                 "Address these failed checks and reviews, and rerun necessary tests. Findings: " + string.Join("; ", report.Findings);
-            var prompt = "Implement only the requested work package. Work only in this Git worktree. " +
+           var prompt = "Implement only the requested work package. Work only in this Git worktree. " +
                 "Do not commit, push, merge, deploy or modify protected factory infrastructure. " +
                 "Respect AGENTS.md and the existing architecture. Acceptance evidence is required. " +
                 $"Work package: {existing.Title}\n{description}";
-            var run = await runtime.RunAsync(worktree, prompt, existing.SessionId, ct,
+           var run = await runtime.RunAsync(worktree, prompt, existing.SessionId, ct,
                 session => _store.UpdateJob(id, x => x.SessionId = session));
-            _store.UpdateJob(id, x => { x.TokensIn += run.InputTokens; x.TokensOut += run.OutputTokens; });
             ct.ThrowIfCancellationRequested();
-            if (!run.Success) throw new InvalidOperationException("Agent failed: " + run.Error);
-            if (budget.HasValue && _store.Read().Jobs.Where(x => x.GoalId == j.GoalId).Sum(x => x.TokensIn + x.TokensOut) > budget)
-                throw new InvalidOperationException("Goal token budget exceeded");
+           if (!run.Success) throw new InvalidOperationException("Agent failed: " + run.Error);
             // Only commit after the deterministic protected-path check for changed working files.
             var status = Commands.Require(Commands.Run("git", ["-C", worktree, "status", "--porcelain"], Environment.CurrentDirectory), "git status");
-            if (string.IsNullOrWhiteSpace(status) && round == 1)
+           if (string.IsNullOrWhiteSpace(status) && round == 1)
                 throw new InvalidOperationException("Builder made no file changes");
-            var changedStatus = Commands.Run("git", ["-C", worktree, "status", "--porcelain", "--untracked-files=all"], Environment.CurrentDirectory);
-            if (!changedStatus.Ok) throw new InvalidOperationException(changedStatus.Error);
-            var modified = changedStatus.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+           var changedStatus = Commands.Run("git", ["-C", worktree, "status", "--porcelain", "--untracked-files=all"], Environment.CurrentDirectory);
+           if (!changedStatus.Ok) throw new InvalidOperationException(changedStatus.Error);
+           var modified = changedStatus.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
                 .Select(line => line.Length >= 4 ? line[3..].Trim().Trim('"') : "")
                 .Where(file => file.Length > 0).ToArray();
-            GitOperations.EnforcePaths(modified, p.ProtectedPaths);
-            ct.ThrowIfCancellationRequested();
-            Stage(id, JobStates.Gating, "commit");
-            var sha = GitOperations.CommitIfNeeded(worktree, existing.Title);
-            _store.UpdateJob(id, x => x.HeadSha = sha);
-            ct.ThrowIfCancellationRequested();
-            Stage(id, JobStates.Gating, "checks");
-            report = await qualityEngine.GateAsync(p, _store.Job(id), ct);
-            if (report.Passed)
+           GitOperations.EnforcePaths(modified, p.ProtectedPaths);
+           ct.ThrowIfCancellationRequested();
+           Stage(id, JobStates.Gating, "commit");
+           var sha = GitOperations.CommitIfNeeded(worktree, existing.Title);
+           _store.UpdateJob(id, x => x.HeadSha = sha);
+           ct.ThrowIfCancellationRequested();
+           Stage(id, JobStates.Gating, "checks");
+           report = await qualityEngine.GateAsync(p, _store.Job(id), ct);
+           if (report.Passed)
             {
                 Stage(id, JobStates.Reviewing, "review");
-                report = await qualityEngine.ReviewAsync(p, _store.Job(id), report, ct);
-            }
+               report = await qualityEngine.ReviewAsync(p, _store.Job(id), report, ct);
+           }
             ct.ThrowIfCancellationRequested();
-            foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id), report, ct);
-            var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
-            _store.UpdateJob(id, x => x.EvidenceFile = evidence);
-            if (report.Passed) break;
-            _store.Event(id, "rework", string.Join("; ", report.Findings));
+           foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id), report, ct);
+           var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
+           _store.UpdateJob(id, x => x.EvidenceFile = evidence);
+           if (report.Passed) break;
+           _store.Event(id, "rework", string.Join("; ", report.Findings));
         }
         if (!report.Passed)
         {
             Stage(id, JobStates.Blocked, "quality", "Quality gate did not pass within allotted rounds");
-            return;
+           return;
         }
         ct.ThrowIfCancellationRequested();
         Stage(id, JobStates.AwaitingApproval, "integration");
@@ -231,10 +232,10 @@ public sealed class FactoryEngine
         if (j.Mode == "remote" && _settings.AllowPush)
         {
             ct.ThrowIfCancellationRequested();
-            Stage(id, JobStates.AwaitingApproval, "push");
-            var pr = await GitOperations.PublishAsync(p, _store.Job(id), ct);
-            Stage(id, JobStates.PrReady, "pr");
-            _store.UpdateJob(id, x => x.PrUrl = pr);
+           Stage(id, JobStates.AwaitingApproval, "push");
+           var pr = await GitOperations.PublishAsync(p, _store.Job(id), ct);
+           Stage(id, JobStates.PrReady, "pr");
+           _store.UpdateJob(id, x => x.PrUrl = pr);
         }
         else Stage(id, JobStates.CompletedLocal, "await_manual_integration");
         foreach (var plugin in _plugins) await plugin.AfterJobAsync(p, _store.Job(id), ct);

@@ -11,12 +11,74 @@ public sealed class AgentRunResult
     public string SessionId { get; set; } = "";
     public long InputTokens { get; set; }
     public long OutputTokens { get; set; }
+    public bool UsageReported { get; set; }
 }
+
+public readonly record struct AgentTokenUsage(long InputTokens, long OutputTokens)
+{
+    public long Total => checked(InputTokens + OutputTokens);
+}
+
+/// <summary>Deduplicates cumulative app-server usage notifications, including resumed threads.</summary>
+public sealed class AppServerTokenTracker
+{
+    private AgentTokenUsage? _lastThreadTotal;
+    private AgentTokenUsage _turn;
+    public AgentTokenUsage Turn => _turn;
+    public bool Reported { get; private set; }
+
+    private static bool TryTokens(JsonElement node, out AgentTokenUsage usage)
+    {
+        usage = default;
+        if (node.ValueKind != JsonValueKind.Object) return false;
+        static long? Token(JsonElement data, string camel, string snake)
+        {
+            if (!data.TryGetProperty(camel, out var value) && !data.TryGetProperty(snake, out value)) return null;
+            return value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var count) && count >= 0 ? count : null;
+        }
+        var input = Token(node, "inputTokens", "input_tokens");
+        var output = Token(node, "outputTokens", "output_tokens");
+        if (input is null || output is null) return false;
+        usage = new(input.Value, output.Value);
+        return true;
+    }
+
+    public bool Observe(JsonElement notification)
+    {
+        if (!notification.TryGetProperty("method", out var method) ||
+            method.GetString() != "thread/tokenUsage/updated" ||
+            !notification.TryGetProperty("params", out var parameters) ||
+            !parameters.TryGetProperty("tokenUsage", out var tokenUsage) ||
+            !tokenUsage.TryGetProperty("total", out var totalNode) ||
+            !TryTokens(totalNode, out var total)) return false;
+        if (_lastThreadTotal is null)
+        {
+            // A resumed thread's total includes earlier turns; charge only its latest increment.
+            if (!tokenUsage.TryGetProperty("last", out var last) || !TryTokens(last, out var delta))
+                return false; // Never attribute an unknown preexisting thread total to this turn.
+            _turn = delta;
+        }
+        else
+        {
+            var previous = _lastThreadTotal.Value;
+            // Ignore repeated/replayed or regressing snapshots.
+            if (total.InputTokens < previous.InputTokens || total.OutputTokens < previous.OutputTokens)
+                return false;
+            _turn = new(checked(_turn.InputTokens + total.InputTokens - previous.InputTokens),
+                        checked(_turn.OutputTokens + total.OutputTokens - previous.OutputTokens));
+        }
+        _lastThreadTotal = total;
+        Reported = true;
+        return true;
+    }
+}
+
 
 public interface IAgentRuntime
 {
     Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
-        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false);
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null);
 }
 
 public static class AgentRuntimeFactory
@@ -34,7 +96,8 @@ public static class AgentRuntimeFactory
 public sealed class ExecAgentRuntime(string model) : IAgentRuntime
 {
     public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
-        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false)
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
     {
         var args = new List<string> { "exec", "--json", "--sandbox", readOnly ? "read-only" : "workspace-write", "--cd", directory };
         if (!string.IsNullOrEmpty(model)) { args.Add("--model"); args.Add(model); }
@@ -59,8 +122,13 @@ public sealed class ExecAgentRuntime(string model) : IAgentRuntime
                     item.TryGetProperty("text", out var text)) response.FinalText = text.GetString() ?? "";
                 if (type == "turn.completed" && root.TryGetProperty("usage", out var u))
                 {
-                    response.InputTokens += u.TryGetProperty("input_tokens", out var ti) ? ti.GetInt64() : 0;
-                    response.OutputTokens += u.TryGetProperty("output_tokens", out var to) ? to.GetInt64() : 0;
+                    var input = u.TryGetProperty("input_tokens", out var ti) ? ti.GetInt64() : 0;
+                    var output = u.TryGetProperty("output_tokens", out var to) ? to.GetInt64() : 0;
+                    if (input < 0 || output < 0) throw new InvalidDataException("Invalid usage report");
+                    response.InputTokens = checked(response.InputTokens + input);
+                    response.OutputTokens = checked(response.OutputTokens + output);
+                    response.UsageReported = true;
+                    onUsage?.Invoke(new(response.InputTokens, response.OutputTokens));
                 }
                 if (type == "turn.failed") response.Error = line;
             }
@@ -77,7 +145,8 @@ public sealed class AppServerAgentRuntime(string model) : IAgentRuntime
 {
     // Local stdio JSON-RPC. No experimental remote websocket transport.
     public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
-        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false)
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
     {
         using var process = new Process();
         process.StartInfo = Commands.StartInfo("codex", ["app-server"], directory);
@@ -114,6 +183,7 @@ public sealed class AppServerAgentRuntime(string model) : IAgentRuntime
             }
         }
         var run = new AgentRunResult();
+        var usageTracker = new AppServerTokenTracker();
         try
         {
             await SendAsync(new { method = "initialize", id = 1, @params = new
@@ -140,7 +210,9 @@ public sealed class AppServerAgentRuntime(string model) : IAgentRuntime
             {
                 threadId = run.SessionId, input = new[] { new { type = "text", text = prompt } }, cwd = directory
             } });
-            await ResponseAsync(3);
+            var turnStart = await ResponseAsync(3);
+            var turnId = turnStart.TryGetProperty("turn", out var startedTurn) &&
+                startedTurn.TryGetProperty("id", out var startedId) ? startedId.GetString() : null;
             while (true)
             {
                 var line = await reader.ReadLineAsync(scope.Token) ?? throw new IOException("Agent app-server closed mid-turn");
@@ -149,6 +221,17 @@ public sealed class AppServerAgentRuntime(string model) : IAgentRuntime
                 if (node.TryGetProperty("method", out var m))
                 {
                     var name = m.GetString() ?? "";
+                    if (name == "thread/tokenUsage/updated" &&
+                        (turnId == null || (node.TryGetProperty("params", out var usageParams) &&
+                         usageParams.TryGetProperty("turnId", out var usageTurnId) &&
+                         usageTurnId.GetString() == turnId)) && usageTracker.Observe(node))
+                    {
+                        var usage = usageTracker.Turn;
+                        run.InputTokens = usage.InputTokens;
+                        run.OutputTokens = usage.OutputTokens;
+                        run.UsageReported = true;
+                        onUsage?.Invoke(usage);
+                    }
                     if (node.TryGetProperty("id", out var pending))
                     {
                         await SendAsync(new { id = pending.Clone(), result = new { decision = "decline" } });
@@ -180,11 +263,12 @@ public sealed class SlottedAgentRuntime(IAgentRuntime inner, int maxSessions) : 
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<int, SemaphoreSlim> Slots = new();
     public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
-        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false)
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
     {
         var semaphore = Slots.GetOrAdd(maxSessions, n => new SemaphoreSlim(n, n));
         await semaphore.WaitAsync(cancellation);
-        try { return await inner.RunAsync(directory, prompt, previousSession, cancellation, onSession, readOnly); }
+        try { return await inner.RunAsync(directory, prompt, previousSession, cancellation, onSession, readOnly, onUsage); }
         finally { semaphore.Release(); }
     }
 }

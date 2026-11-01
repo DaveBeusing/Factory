@@ -372,6 +372,9 @@ flowchart TD
 ### Planning, scheduling and goals
 
 - Persistent goals with acceptance criteria and token budgets.
+- Goal budgets are checked **before every builder or reviewer turn**. Streamed usage is persisted during execution and reviews are serialized per job to avoid racing the same remaining allowance.
+- Active jobs sharing a goal are scheduled one at a time, including remote workers. If usage cannot be verified, the goal job is blocked rather than continuing with an assumed zero.
+- At least 256 remaining goal tokens are required to start another turn. Streaming usage can request cancellation at the limit, but external providers may report tokens after consumption, so a single turn can overshoot the configured budget. Planning and diagnostic commands outside execution jobs are not included in the job budget.
 - Read-only repository inspection and proposed task decomposition.
 - Priorities, dependencies, risk classification, and predicted affected paths.
 - Cycle detection, file-path conflict handling, work grouping and per-project capacity limits.

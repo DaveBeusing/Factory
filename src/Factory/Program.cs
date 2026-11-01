@@ -19,10 +19,11 @@ public static class Program
     {
         var settingsFile = Path.Combine(home, "settings.json");
         var settings = FactorySettings.Load(settingsFile);
-        if (string.IsNullOrEmpty(settings.ApiToken))
+        if (settings.EnsureCredentials())
         {
-            settings.ApiToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-            File.WriteAllText(settingsFile, Json.Stringify(settings));
+            var temporary = settingsFile + ".tmp";
+            File.WriteAllText(temporary, Json.Stringify(settings));
+            File.Move(temporary, settingsFile, true);
         }
         return settings;
     }
@@ -55,10 +56,21 @@ Factory | C# / .NET 10
   knowledge --project NAME [--topic TOPIC --content TEXT]
   analytics | eval --suite FILE | test-audit --project NAME [--enqueue]
   release --project NAME --version X.Y.Z
-  dashboard [--port 8787] | worker --server HTTPS_URL --workspace DIR
+  dashboard [--port 8787] | worker --server HTTPS_URL --workspace DIR --id WORKER_ID
+  worker-token --id WORKER_ID
   usage | install-skills [--overwrite]
 Environment: FACTORY_HOME overrides the local state directory.
 """);
+            return 0;
+        }
+        // Remote workers never initialize or read controller settings and credentials.
+        if (args[0] == "worker")
+        {
+            var token = Environment.GetEnvironmentVariable("FACTORY_WORKER_TOKEN");
+            if (string.IsNullOrWhiteSpace(token))
+                throw new InvalidOperationException("Set FACTORY_WORKER_TOKEN (not the administrator token)");
+            await RemoteWorker.RunAsync(new Uri(Required(args, "server")), token,
+                Required(args, "workspace"), Required(args, "id"), CancellationToken.None);
             return 0;
         }
         var store = new StateStore(Home);
@@ -210,15 +222,10 @@ Environment: FACTORY_HOME overrides the local state directory.
             case "dashboard":
                 await DashboardHost.RunAsync(store, settings, Option(args, "listen", "http://127.0.0.1:" + Option(args, "port", "8787")),
                     CancellationToken.None); return 0;
-            case "worker":
-            {
-                var token = Environment.GetEnvironmentVariable("FACTORY_TOKEN") ??
-                    throw new InvalidOperationException("Set FACTORY_TOKEN in the environment");
-                var server = new Uri(Required(args, "server"));
-                await RemoteWorker.RunAsync(server, token, Required(args, "workspace"),
-                    Option(args, "id", Environment.MachineName + "-" + Guid.NewGuid().ToString("N")[..8]), CancellationToken.None);
+            case "worker-token":
+                // Print only when explicitly requested by the local controller operator.
+                Console.WriteLine(WorkerAuthentication.CreateToken(settings.WorkerTokenKey, Required(args, "id")));
                 return 0;
-            }
             case "install-skills":
                 Skills.Install(Flag(args, "overwrite")); return 0;
             default: throw new ArgumentException("Unknown command: " + args[0]);

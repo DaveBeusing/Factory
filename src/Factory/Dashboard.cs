@@ -12,8 +12,10 @@ public static class DashboardHost
     public static async Task RunAsync(StateStore store, FactorySettings settings, string listenUrl,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(settings.ApiToken))
-            throw new InvalidOperationException("API token missing; run 'factory doctor' to initialize settings");
+        if (string.IsNullOrWhiteSpace(settings.ApiToken) ||
+            !WorkerAuthentication.IsValidKey(settings.WorkerTokenKey) ||
+            string.Equals(settings.ApiToken, settings.WorkerTokenKey, StringComparison.Ordinal))
+            throw new InvalidOperationException("Controller credentials are missing or insecure; run 'factory doctor'");
         var uri = new Uri(listenUrl);
         if (uri.Scheme != Uri.UriSchemeHttps && !uri.IsLoopback)
             throw new InvalidOperationException("Non-loopback API endpoint requires HTTPS with a configured certificate");
@@ -38,10 +40,21 @@ public static class DashboardHost
             ctx.Response.Headers["Cache-Control"] = "no-store";
             ctx.Response.Headers["Content-Security-Policy"] =
                 "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
-            if (ctx.Request.Path.StartsWithSegments("/api") &&
-                !WorkerProtocol.Authorized(ctx.Request.Headers.Authorization.ToString(), settings.ApiToken))
+            if (ctx.Request.Path.StartsWithSegments("/api"))
             {
-                ctx.Response.StatusCode = StatusCodes.Status401Unauthorized; return;
+                var path = ctx.Request.Path.Value;
+                var workerId = ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString();
+                if (!WorkerAuthentication.Authorized(ctx.Request.Method, path,
+                    ctx.Request.Headers.Authorization.ToString(), workerId, settings))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status401Unauthorized; return;
+                }
+                // Disabled workers cannot register, claim jobs or submit results.
+                if (WorkerAuthentication.IsWorkerNamespace(path) &&
+                    store.Read().Workers.Any(w => w.Id == workerId && !w.Enabled))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return;
+                }
             }
             try { await next(); }
             catch (Exception ex) when (!ctx.Response.HasStarted)
@@ -156,7 +169,15 @@ public static class DashboardHost
             new FactoryEngine(store, settings).VerifyIntegration(id);
             return Results.Ok();
         });
+        // Registration through Mission Control is administrator-only.
         app.MapPost("/api/workers/register", (WorkerInput input) => Results.Ok(MissionControlManager.RegisterWorker(store, input)));
+        // Remote workers have a distinct API namespace with worker-scoped credentials.
+        app.MapPost("/api/worker/register", (HttpContext ctx, WorkerInput input) =>
+        {
+            if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), input.Id))
+                return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
+            return Results.Ok(MissionControlManager.RegisterWorker(store, input));
+        });
         app.MapPost("/api/workers/{id}/action", (string id, ControlInput input) =>
         {
             if (input.Action == "start") { ManagedWorkers.Start(store, settings, listenUrl, id); return (IResult)Results.Accepted(); }
@@ -203,15 +224,23 @@ public static class DashboardHost
                 note = "Remote jobs cannot be force-stopped. Disable/drain remote workers." });
         });
         app.MapPost("/api/queue/recover", () => Results.Ok(new FactoryEngine(store, settings).Recover()));
-        app.MapPost("/api/workers/claim", (WorkerClaimRequest req) =>
+        app.MapPost("/api/worker/claim", (HttpContext ctx, WorkerClaimRequest req) =>
         {
+            if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
+                return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
             var claim = WorkerProtocol.Claim(store, settings, req.WorkerId);
             return claim is null ? (IResult)Results.NoContent() : Results.Ok(claim);
         });
-        app.MapPost("/api/workers/heartbeat", (WorkerStatus req) =>
-            WorkerProtocol.Heartbeat(store, req, settings) ? (IResult)Results.Ok() : Results.Conflict());
-        app.MapPost("/api/workers/complete", (WorkerStatus req) =>
+        app.MapPost("/api/worker/heartbeat", (HttpContext ctx, WorkerStatus req) =>
         {
+            if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
+                return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
+            return WorkerProtocol.Heartbeat(store, req, settings) ? (IResult)Results.Ok() : Results.Conflict();
+        });
+        app.MapPost("/api/worker/complete", (HttpContext ctx, WorkerStatus req) =>
+        {
+            if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
+                return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
             if (req.Evidence.Length > 1_000_000) return (IResult)Results.BadRequest(new { error = "Evidence too large" });
             if (req.Job is { State: JobStates.PrReady } &&
                 !System.Text.RegularExpressions.Regex.IsMatch(req.Job.HeadSha, "^[0-9a-fA-F]{40,64}$"))

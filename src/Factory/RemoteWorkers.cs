@@ -36,7 +36,7 @@ public static class WorkerProtocol
 
     public static WorkerClaim? Claim(StateStore store, FactorySettings settings, string workerId)
     {
-        if (string.IsNullOrWhiteSpace(workerId) || workerId.Length > 100) return null;
+        if (!WorkerAuthentication.IsValidWorkerId(workerId)) return null;
         return store.Change(s =>
         {
             foreach (var expired in s.Jobs.Where(j => j.Mode == "remote" &&
@@ -48,7 +48,8 @@ public static class WorkerProtocol
             }
             if (s.Paused || !settings.AllowPush) return null;
             var registered = s.Workers.FirstOrDefault(w => w.Id == workerId);
-            if (registered is { Enabled: false } || registered is { Draining: true }) return null;
+            // Worker credentials can only be used with a registered, enabled identity.
+            if (registered is null || !registered.Enabled || registered.Draining) return null;
             var active = s.Jobs.Where(j => JobStates.Active.Contains(j.State) &&
                 j.LeaseUntil > DateTimeOffset.UtcNow).ToList();
             if (active.Count >= settings.MaxParallel) return null;
@@ -65,9 +66,7 @@ public static class WorkerProtocol
                 job.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(settings.LeaseSeconds);
                 job.Attempt++;
                 job.UpdatedAt = DateTimeOffset.UtcNow;
-                s.Workers.RemoveAll(w => w.Id == workerId);
-                s.Workers.Add(new WorkerInfo { Id = workerId, Platform = "remote", Enabled = registered?.Enabled ?? true,
-                    Draining = registered?.Draining ?? false });
+                registered.Heartbeat = DateTimeOffset.UtcNow;
                 s.Events.Add(new FactoryEvent { JobId = job.Id, Type = "remote_claim", Message = workerId });
                 return new WorkerClaim
                 {
@@ -127,19 +126,22 @@ public static class RemoteWorker
     {
         if (!server.IsLoopback && server.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException("Remote workers require HTTPS (or loopback) for API tokens");
+        if (!WorkerAuthentication.IsValidWorkerId(workerId) || string.IsNullOrWhiteSpace(token))
+            throw new ArgumentException("Worker ID and scoped credential are required");
         using var http = new HttpClient { BaseAddress = server, Timeout = TimeSpan.FromMinutes(3) };
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        http.DefaultRequestHeaders.Add(WorkerAuthentication.WorkerIdHeader, workerId);
         Directory.CreateDirectory(workspace);
-        using (var register = await http.PostAsJsonAsync("api/workers/register",
+        using (var register = await http.PostAsJsonAsync("api/worker/register",
             new WorkerInput { Id = workerId, Platform = Environment.OSVersion.Platform.ToString() }, ct))
             register.EnsureSuccessStatusCode();
         while (!ct.IsCancellationRequested)
         {
-            using var claimResponse = await http.PostAsJsonAsync("api/workers/claim", new WorkerClaimRequest { WorkerId = workerId }, ct);
+            using var claimResponse = await http.PostAsJsonAsync("api/worker/claim", new WorkerClaimRequest { WorkerId = workerId }, ct);
             claimResponse.EnsureSuccessStatusCode();
             if (claimResponse.StatusCode == System.Net.HttpStatusCode.NoContent)
             {
-                try { await http.PostAsJsonAsync("api/workers/heartbeat", new WorkerStatus { WorkerId = workerId }, ct); }
+                try { await http.PostAsJsonAsync("api/worker/heartbeat", new WorkerStatus { WorkerId = workerId }, ct); }
                 catch (HttpRequestException) { }
                 await Task.Delay(3000, ct); continue;
             }
@@ -154,7 +156,7 @@ public static class RemoteWorker
                 {
                     try { await Task.Delay(TimeSpan.FromSeconds(Math.Max(5, claim.Settings.LeaseSeconds / 3)), heartbeatCancel.Token); }
                     catch (OperationCanceledException) { break; }
-                    try { await http.PostAsJsonAsync("api/workers/heartbeat", report, heartbeatCancel.Token); }
+                    try { await http.PostAsJsonAsync("api/worker/heartbeat", report, heartbeatCancel.Token); }
                     catch { /* lease expiry will block unsafe replay */ }
                 }
             }, heartbeatCancel.Token);
@@ -193,7 +195,7 @@ public static class RemoteWorker
                 heartbeatCancel.Cancel();
                 try { await heartbeat; } catch (OperationCanceledException) { }
             }
-            using var complete = await http.PostAsJsonAsync("api/workers/complete", report, ct);
+            using var complete = await http.PostAsJsonAsync("api/worker/complete", report, ct);
             complete.EnsureSuccessStatusCode();
         }
     }

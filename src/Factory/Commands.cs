@@ -130,6 +130,10 @@ public static class Commands
             StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
         };
         foreach (var arg in argv) info.ArgumentList.Add(arg);
+        // The native agent CLI, Git and configured quality checks are untrusted child
+        // processes: they must not inherit controller or worker API bearer credentials.
+        info.Environment.Remove("FACTORY_TOKEN");
+        info.Environment.Remove("FACTORY_WORKER_TOKEN");
         return info;
     }
     private static string QuoteCmd(string argument)

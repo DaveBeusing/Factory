@@ -53,34 +53,27 @@ public static class WorkerProtocol
            var registered = s.Workers.FirstOrDefault(w => w.Id == workerId);
            // Worker credentials can only be used with a registered, enabled identity.
             if (registered is null || !registered.Enabled || registered.Draining) return null;
-           var active = s.Jobs.Where(j => JobStates.Active.Contains(j.State) &&
-                j.LeaseUntil > DateTimeOffset.UtcNow).ToList();
-           if (active.Count >= settings.MaxParallel) return null;
-           foreach (var job in s.Jobs.Where(j => j.Mode == "remote" && j.State == JobStates.Queued)
-                .OrderByDescending(j => j.Priority).ThenBy(j => j.CreatedAt))
+            // Apply the same mode, dependency, budget, capacity and conflict gates as local runners.
+            var selected = JobScheduler.Select(s, settings.MaxParallel, JobExecutionModes.Remote,
+                job => s.Projects.Any(p => p.Id == job.ProjectId && !string.IsNullOrWhiteSpace(p.Origin)));
+            foreach (var job in selected)
             {
                 var project = s.Projects.Single(p => p.Id == job.ProjectId);
-               if (string.IsNullOrEmpty(project.Origin) || !DependencyGraph.DependenciesSatisfied(job, s.Jobs)) continue;
-               FactoryGoal? goalCopy = null;
-               if (job.GoalId is { } goalId)
+                FactoryGoal? goalCopy = null;
+                if (job.GoalId is { } goalId)
                 {
-                    var goal = s.Goals.FirstOrDefault(g => g.Id == goalId);
-                   if (goal == null || goal.State != "active") continue;
-                   var spent = s.Jobs.Where(j => j.GoalId == goalId)
+                    var goal = s.Goals.Single(g => g.Id == goalId);
+                    var spent = s.Jobs.Where(j => j.GoalId == goalId)
                         .Aggregate(0L, (sum, j) => checked(sum + j.TokensIn + j.TokensOut));
-                   if (spent > goal.TokenBudget - BudgetedAgentRuntime.MinimumTurnAllowance ||
-                        active.Any(j => j.GoalId == goalId)) continue;
-                   // Transfer the remaining goal allowance, including this job's prior usage.
+                    // Transfer the remaining goal allowance, including this job's prior usage.
                     var others = spent - job.TokensIn - job.TokensOut;
-                   goalCopy = new FactoryGoal
+                    goalCopy = new FactoryGoal
                     {
                         Id = goal.Id, ProjectId = goal.ProjectId, State = goal.State,
                         Objective = goal.Objective, AcceptanceCriteria = goal.AcceptanceCriteria.ToList(),
                         TokenBudget = goal.TokenBudget - others, CreatedAt = goal.CreatedAt
                     };
-               }
-                if (active.Count(j => j.ProjectId == job.ProjectId) >= project.MaxParallel ||
-                    active.Any(j => DependencyGraph.Conflict(j, job))) continue;
+                }
                job.State = JobStates.Preparing;
                job.Stage = "remote_claimed";
                job.LeaseOwner = "remote:" + workerId;
@@ -177,6 +170,8 @@ public static class RemoteWorker
            }
             var claim = await claimResponse.Content.ReadFromJsonAsync<WorkerClaim>(Json.Options, ct)
                 ?? throw new IOException("Empty worker claim");
+            if (!JobExecutionModes.Matches(claim.Job, JobExecutionModes.Remote))
+                throw new InvalidOperationException("Remote worker received a job for another execution mode");
            var jobDir = Path.Combine(workspace, claim.Job.Id.ToString("N"));
            Directory.CreateDirectory(jobDir);
            var localState = new StateStore(Path.Combine(jobDir, "state"));
@@ -239,7 +234,7 @@ public static class RemoteWorker
                    s.Jobs.Add(claim.Job);
                });
                claim.Settings.WorkspaceRoot = Path.Combine(jobDir, "worktrees");
-               var engine = new FactoryEngine(localState, claim.Settings);
+               var engine = new FactoryEngine(localState, claim.Settings, executionMode: JobExecutionModes.Remote);
                await engine.RunQueueAsync(ct);
                report.Job = localState.Job(claim.Job.Id);
                if (!string.IsNullOrWhiteSpace(report.Job.EvidenceFile) && File.Exists(report.Job.EvidenceFile))

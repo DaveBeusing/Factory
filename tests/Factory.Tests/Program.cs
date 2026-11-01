@@ -85,6 +85,29 @@ Test("Scheduler respects project parallel limit", () =>
     var state = new FactoryState { Projects = [p], Jobs = [a,b] };
     Assert(JobScheduler.Select(state, 5).Count == 1);
 });
+
+Test("Scheduler enforces execution mode before priority and capacity", () =>
+{
+    var project = new ProjectInfo { MaxParallel = 1 };
+    var remote = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote,
+        Priority = 100, ExpectedPaths = ["src/remote.cs"] };
+    var local = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Local,
+        Priority = 1, ExpectedPaths = ["src/local.cs"] };
+    var invalid = new FactoryJob { ProjectId = project.Id, Mode = "unknown",
+        Priority = 200, ExpectedPaths = ["src/unknown.cs"] };
+    var state = new FactoryState { Projects = [project], Jobs = [remote, local, invalid] };
+    Assert(JobScheduler.Select(state, 1).Single().Id == local.Id,
+        "Default scheduling selected a remote or unsupported job");
+    Assert(JobScheduler.Select(state, 1, JobExecutionModes.Local).Single().Id == local.Id);
+    Assert(JobScheduler.Select(state, 1, JobExecutionModes.Remote).Single().Id == remote.Id);
+    try
+    {
+        JobScheduler.Select(state, 1, "unknown");
+        throw new Exception("Unsupported runner mode was accepted");
+    }
+    catch (ArgumentException) { }
+});
+
 Test("Store atomic persistence", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-test-" + Guid.NewGuid().ToString("N"));
@@ -191,6 +214,31 @@ Test("Unregistered and disabled workers cannot claim jobs", () =>
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
+
+Test("Remote claims never take local jobs", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-mode-claim-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "mode-claim", Origin = "https://example.invalid/repo" };
+        var local = new FactoryJob { ProjectId = project.Id, Priority = 100,
+            Mode = JobExecutionModes.Local, ExpectedPaths = ["src/local.cs"] };
+        var remote = new FactoryJob { ProjectId = project.Id, Priority = 1,
+            Mode = JobExecutionModes.Remote, ExpectedPaths = ["src/remote.cs"] };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Jobs.Add(local); s.Jobs.Add(remote);
+            s.Workers.Add(new WorkerInfo { Id = "remote-worker" });
+        });
+        var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "remote-worker");
+        Assert(claim?.Job.Id == remote.Id, "Remote worker did not select its eligible job");
+        Assert(store.Job(local.Id).State == JobStates.Queued && store.Job(local.Id).Attempt == 0,
+            "Remote worker claimed a local job");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Protected path gate", () =>
 {
     try { GitOperations.EnforcePaths(["factory/checks.json"],["factory/"]); throw new Exception("Not blocked"); }
@@ -243,6 +291,37 @@ async Task TestAsync(string name, Func<Task> test)
     catch (Exception ex) { results.Add((name, false, ex.Message)); Console.WriteLine("FAIL " + name + ": " + ex.Message); }
 }
 
+
+await TestAsync("Local queue cannot claim or execute remote jobs", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-mode-queue-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "local-controller", MaxParallel = 2 };
+        var remote = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(remote); });
+        var engine = new FactoryEngine(store, new FactorySettings { MaxParallel = 2 },
+            agent: new FakeAgent());
+        await engine.RunQueueAsync(CancellationToken.None);
+        var unchanged = store.Job(remote.Id);
+        Assert(unchanged.State == JobStates.Queued && unchanged.Attempt == 0 &&
+            string.IsNullOrEmpty(unchanged.LeaseOwner), "Local queue claimed a remote job");
+        Assert(!store.Read().Events.Any(e => e.JobId == remote.Id && e.Type == "claimed"),
+            "Local runner emitted a claim for a remote job");
+        try
+        {
+            await engine.RunClaimedAsync(remote.Id, CancellationToken.None);
+            throw new Exception("Unclaimed remote job was executed by local runner");
+        }
+        catch (InvalidOperationException ex)
+        {
+            Assert(ex.Message.Contains("not claimed", StringComparison.Ordinal));
+        }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 await TestAsync("Local agent pipeline, evidence and verified integration", async () =>
 {
     var root = Path.Combine(Path.GetTempPath(), "factory-e2e-" + Guid.NewGuid().ToString("N"));
@@ -264,6 +343,18 @@ await TestAsync("Local agent pipeline, evidence and verified integration", async
             Checks = [new CheckCommand { Name = "git", Executable = "git", Arguments = ["rev-parse", "HEAD"] }]
         };
         store.Change(state => state.Projects.Add(project));
+
+        // A remote-context engine must remain able to execute remote jobs.
+        var remoteJob = store.AddJob(new FactoryJob
+        {
+            ProjectId = project.Id, Title = "Remote execution", Mode = JobExecutionModes.Remote,
+            ExpectedPaths = ["src/generated.txt"]
+        });
+        var remoteEngine = new FactoryEngine(store, new FactorySettings { MaxParallel = 1 },
+            agent: new FakeAgent(), executionMode: JobExecutionModes.Remote);
+        await remoteEngine.RunQueueAsync(CancellationToken.None);
+        Assert(store.Job(remoteJob.Id).State == JobStates.CompletedLocal,
+            "Remote-context engine failed to execute a remote job");
         var job = store.AddJob(new FactoryJob
         {
             ProjectId = project.Id, Title = "Implement bounded change", Description = "Write one text file",

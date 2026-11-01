@@ -7,12 +7,16 @@ public sealed class FactoryEngine
     private readonly GitOperations _git;
     private readonly IAgentRuntime _agent;
     private readonly bool _runtimeOverridden;
+    private readonly string _executionMode;
     private readonly IReadOnlyList<IFactoryPlugin> _plugins;
     private readonly string _workerId = Environment.MachineName + "/" + Guid.NewGuid().ToString("N")[..8];
 
     public FactoryEngine(StateStore store, FactorySettings settings, IReadOnlyList<IFactoryPlugin>? plugins = null,
-        IAgentRuntime? agent = null)
+        IAgentRuntime? agent = null, string executionMode = JobExecutionModes.Local)
     {
+        if (!JobExecutionModes.IsSupported(executionMode))
+            throw new ArgumentException("Unsupported execution mode", nameof(executionMode));
+        _executionMode = executionMode;
         _store = store; _settings = settings;
         _git = new GitOperations(string.IsNullOrEmpty(settings.WorkspaceRoot)
             ? Path.Combine(store.Home, "worktrees") : settings.WorkspaceRoot);
@@ -26,9 +30,9 @@ public sealed class FactoryEngine
         return _store.Change(s =>
         {
             var j = s.Jobs.Single(x => x.Id == id);
-           if (j.State != JobStates.Queued ||
+           if (!JobExecutionModes.Matches(j, _executionMode) || j.State != JobStates.Queued ||
                 !DependencyGraph.DependenciesSatisfied(j, s.Jobs) || s.Paused) return false;
-           var selected = JobScheduler.Select(s, _settings.MaxParallel);
+           var selected = JobScheduler.Select(s, _settings.MaxParallel, _executionMode);
            if (!selected.Any(x => x.Id == id)) return false;
            j.State = JobStates.Preparing; j.Stage = "worktree"; j.Attempt++;
            j.LeaseOwner = _workerId;
@@ -88,7 +92,7 @@ public sealed class FactoryEngine
                 try { await running[id]; } catch (Exception ex) { _store.Event(id, "worker_error", ex.Message); }
                 running.Remove(id);
            }
-            var selected = JobScheduler.Select(_store.Read(), _settings.MaxParallel);
+            var selected = JobScheduler.Select(_store.Read(), _settings.MaxParallel, _executionMode);
            foreach (var j in selected)
             {
                 if (running.ContainsKey(j.Id) || !Claim(j.Id)) continue;
@@ -109,8 +113,8 @@ public sealed class FactoryEngine
     public async Task RunOneAsync(Guid id, CancellationToken ct)
     {
         var job = _store.Job(id);
-        if (job.Mode == "remote")
-            throw new InvalidOperationException("Remote jobs must be claimed by a remote worker");
+        if (!JobExecutionModes.Matches(job, _executionMode))
+            throw new InvalidOperationException("Job execution mode does not match this runner");
         if (!Claim(id))
             throw new InvalidOperationException("Job cannot be claimed: check dependencies, queue state, parallel limits and conflicts");
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -121,6 +125,11 @@ public sealed class FactoryEngine
 
     public async Task RunClaimedAsync(Guid id, CancellationToken ct)
     {
+        var claimed = _store.Job(id);
+        if (!JobExecutionModes.Matches(claimed, _executionMode) ||
+            claimed.LeaseOwner != _workerId || claimed.LeaseUntil <= DateTimeOffset.UtcNow ||
+            !JobStates.Active.Contains(claimed.State))
+            throw new InvalidOperationException("Job is not claimed by this runner for its execution mode");
         using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
         var heartbeat = Task.Run(async () =>
         {
@@ -168,6 +177,8 @@ public sealed class FactoryEngine
     private async Task ExecuteAsync(Guid id, CancellationToken ct)
     {
         var j = _store.Job(id);
+        if (!JobExecutionModes.Matches(j, _executionMode))
+            throw new InvalidOperationException("Job execution mode changed after claim");
         var p = _store.Read().Projects.Single(x => x.Id == j.ProjectId);
         if (p.Checks.Count == 0) throw new InvalidOperationException("Project checks missing; configure gates before execution");
         var runtime = new BudgetedAgentRuntime(

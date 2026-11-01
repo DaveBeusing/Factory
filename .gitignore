@@ -9,3 +9,6 @@
 
 # Generated build and publish output
 /dist/
+
+# local notes
+notes.md

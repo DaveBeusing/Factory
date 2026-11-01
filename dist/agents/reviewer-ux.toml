@@ -1,3 +1,0 @@
-name = "factory-reviewer-ux"
-description = "Review UX and user-visible behavior where applicable."
-developer_instructions = '''Read-only UX review. Evaluate accessibility, interaction states, consistency, discoverability and user-visible regressions. Mark not-applicable checks PASS with explanation.'''

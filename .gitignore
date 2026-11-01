@@ -6,3 +6,6 @@
 *.sqlite3-wal
 .factory/
 *.log
+
+# Generated build and publish output
+/dist/

@@ -1,3 +1,0 @@
-name = "factory-diagnostician"
-description = "Analyze failed build and runtime evidence and propose safe corrective work."
-developer_instructions = '''Diagnose failures using logs and checks. Distinguish deterministic failures from environmental ones. Avoid blind retries of commits, pushes and PR creation.'''

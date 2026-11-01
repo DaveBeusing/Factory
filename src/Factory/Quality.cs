@@ -109,7 +109,7 @@ public sealed class QualityEngine
            }
             catch (Exception ex) when (ex is not OperationCanceledException and not TokenBudgetExceededException)
             {
-                return (role, verdict: "CHANGES", message: "Reviewer exception: " + ex.Message);
+                return (role, "CHANGES", "Reviewer exception: " + ex.Message);
            }
         }));
         foreach (var (role, verdict, message) in completed)

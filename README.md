@@ -130,6 +130,10 @@ To override the default location for the current terminal session:
 $env:FACTORY_HOME = '<absolute-directory>'
 ```
 
+Factory uses a **relational SQLite schema (database version 2)** with separate tables for projects, goals, jobs, workers, events, knowledge, graph nodes, releases and evaluations. Ordered child tables store dependencies, expected paths, acceptance criteria, check commands and arguments, protected paths, imports, symbols and failure records. The schema uses foreign keys, useful query indexes, WAL and atomic transactions. The existing StateStore snapshot API is preserved while only changed entities are persisted.
+
+**Breaking storage change:** Earlier versions stored all state as a single JSON document inside `factory_state`. Version 2 does not automatically migrate that data. Back up the existing `%USERPROFILE%\.factory\factory.sqlite3` (and any SQLite WAL/SHM files after stopping Factory), then set `FACTORY_HOME` to a new directory before running this version. A legacy or unknown database is rejected without overwriting its data. Do not delete an existing state database until you have verified that a clean start is acceptable for your goals/jobs/history.
+
 Factory uses a **new, standalone database**. There is no legacy importer or database compatibility layer. Back up `.factory` before replacing an installation or changing machines. Do not commit its configuration, tokens, or state files into a repository. Existing configurations retain their administrator token and receive a new independent worker key on first launch.
 
 ### Important settings
@@ -465,7 +469,7 @@ Display the current command syntax with:
 
 ## 14. Validation and known limitations
 
-The solution includes source-level tests for state persistence, scheduling, integration rules, process behavior, local job flows and usage-data interpretation. Execute `Build.cmd` on Windows to confirm compilation and run those tests with the installed .NET 10 SDK.
+The solution includes source-level tests for relational SQLite persistence, schema constraints, ordered collection roundtrips, rollback, concurrent writes, legacy database rejection, scheduling, integration rules, process behavior, local job flows and usage-data interpretation. Execute `Build.cmd` on Windows to confirm compilation and run those tests with the installed .NET 10 SDK.
 
 The external agent CLI and GitHub must be validated with real authentication and a controlled test repository before production use. The agent app-server protocol used for weekly usage data is subject to upstream changes. Remote-worker isolation and plugin trust must be evaluated in the intended deployment environment.
 

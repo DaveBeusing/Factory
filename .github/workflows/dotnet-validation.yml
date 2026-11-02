@@ -14,8 +14,10 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout
+      - name: Checkout complete history
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Set up .NET 10
         uses: actions/setup-dotnet@v4
         with:
@@ -37,11 +39,21 @@ jobs:
       - name: Restore, build, test and publish
         shell: powershell
         run: .\Build.ps1
-      - name: Verify published assets
+      - name: Verify published assets and provenance
         shell: powershell
         run: |
-          foreach ($path in @('dist/Factory.exe', 'dist/skills/factory-plan/SKILL.md', 'dist/agents/builder.toml')) {
+          foreach ($path in @('dist/Factory.exe', 'dist/build-manifest.json',
+                             'dist/skills/factory-plan/SKILL.md', 'dist/agents/builder.toml')) {
             if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
               throw "Missing published output: $path"
             }
           }
+          $manifest = Get-Content -Raw -LiteralPath dist/build-manifest.json | ConvertFrom-Json
+          $reportedVersion = & .\dist\Factory.exe version
+          if ($LASTEXITCODE -ne 0 -or $reportedVersion -ne $manifest.informationalVersion) {
+            throw "Executable and manifest version mismatch."
+          }
+          $sha = (& git.exe rev-parse HEAD).Trim()
+          if ($manifest.sourceSha -ne $sha) { throw "Manifest source commit mismatch." }
+          $fileHash = (Get-FileHash -LiteralPath dist/Factory.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifest.executableSha256 -ne $fileHash) { throw "Artifact SHA-256 mismatch." }

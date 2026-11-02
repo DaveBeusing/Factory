@@ -33,7 +33,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         var repository = GitHubRepository(project.Origin);
         var number = PullNumber(finished.PrUrl, repository);
         var evidence = ValidateEvidence(project, job, status);
-        var pr = await PullAsync(repository, number, ct);
+        using var pr = await PullAsync(repository, number, ct);
         ValidatePull(pr, repository, project.BaseBranch, expectedBranch, finished.HeadSha);
 
         // A passing worker-side check cannot substitute for required, independent GitHub checks.
@@ -99,7 +99,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             reviews.EnumerateObject().Count() != RequiredReviewRoles.Length ||
             RequiredReviewRoles.Any(role => !reviews.TryGetProperty(role, out var verdict) ||
                 verdict.ValueKind != JsonValueKind.String ||
-                !verdict.GetString()!.StartsWith("PASS\\n", StringComparison.Ordinal)))
+                !verdict.GetString()!.StartsWith("PASS\n", StringComparison.Ordinal)))
             throw new InvalidOperationException("Worker review evidence is incomplete");
         return root.Clone();
     }

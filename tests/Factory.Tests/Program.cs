@@ -871,8 +871,8 @@ await TestAsync("Worker evidence must match job, SHA, attempts, checks and revie
         Checks = [new CheckReport { Name = "build", ExitCode = 0 }],
         Reviews = new Dictionary<string, string>
         {
-            ["code"] = "PASS\\nOK", ["architecture"] = "PASS\\nOK",
-            ["security"] = "PASS\\nOK", ["ux"] = "PASS\\nOK"
+            ["code"] = "PASS\nOK", ["architecture"] = "PASS\nOK",
+            ["security"] = "PASS\nOK", ["ux"] = "PASS\nOK"
         } };
     string Evidence(QualityResult q, string commit, int attempt) => Json.Stringify(new
     {

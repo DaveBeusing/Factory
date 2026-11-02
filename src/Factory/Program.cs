@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Reflection;
 using System.Text.Json;
 
 namespace Factory;
@@ -47,7 +48,7 @@ public static class Program
         {
             Console.WriteLine("""
 Factory | C# / .NET 10
-  doctor | init <repo> --name NAME [--base master] [--checks-json PATH]
+  version | doctor | init <repo> --name NAME [--base master] [--checks-json PATH]
   enqueue --project NAME --title TITLE --description TEXT [--mode local|remote] [--paths file1,file2]
   run | recover | status | pause | resume | verify <job-guid>
   goal add --project NAME --objective TEXT [--criteria TEXT] [--budget TOKENS]
@@ -61,6 +62,13 @@ Factory | C# / .NET 10
   usage | install-skills [--overwrite]
 Environment: FACTORY_HOME overrides the local state directory.
 """);
+            return 0;
+        }
+        if (args[0] is "version" or "--version")
+        {
+            var assembly = typeof(Program).Assembly;
+            Console.WriteLine(assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                ?? assembly.GetName().Version?.ToString() ?? "unavailable");
             return 0;
         }
         // Remote workers never initialize or read controller settings and credentials.

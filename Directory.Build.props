@@ -1,0 +1,11 @@
+<Project>
+  <!-- Product release baseline; this file is the only checked-in source of product versions. -->
+  <PropertyGroup>
+    <VersionPrefix>0.1.0</VersionPrefix>
+    <FactoryReleaseChannel>preview</FactoryReleaseChannel>
+    <FactoryReleaseSequence>0</FactoryReleaseSequence>
+    <VersionSuffix Condition="'$(FactoryReleaseChannel)' == 'preview'">preview.$(FactoryReleaseSequence)</VersionSuffix>
+    <VersionSuffix Condition="'$(FactoryReleaseChannel)' == 'rc'">rc.$(FactoryReleaseSequence)</VersionSuffix>
+    <VersionSuffix Condition="'$(FactoryReleaseChannel)' == 'stable'"></VersionSuffix>
+  </PropertyGroup>
+</Project>

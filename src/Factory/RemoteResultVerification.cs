@@ -104,7 +104,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         return root.Clone();
     }
 
-    private static string GitHubRepository(string origin)
+    public static string GitHubRepository(string origin)
     {
         string path;
         if (origin.StartsWith("git@github.com:", StringComparison.Ordinal))
@@ -122,7 +122,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         return path;
     }
 
-    private static int PullNumber(string url, string repository)
+    public static int PullNumber(string url, string repository)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
             uri.Scheme != "https" || !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) ||
@@ -145,7 +145,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         return JsonDocument.Parse(response.Output);
     }
 
-    private static void ValidatePull(JsonDocument document, string repository, string baseBranch,
+    public static void ValidatePull(JsonDocument document, string repository, string baseBranch,
         string expectedBranch, string expectedSha)
     {
         var pr = document.RootElement;

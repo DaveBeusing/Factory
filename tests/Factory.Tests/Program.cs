@@ -457,6 +457,18 @@ Test("Mission Control blocks cross-project job dependencies", () =>
 });
 
 
+Test("Native SQLite version includes CVE-2025-6965 fix", () =>
+{
+    using var database = new Microsoft.Data.Sqlite.SqliteConnection("Data Source=:memory:");
+    database.Open();
+    using var query = database.CreateCommand();
+    query.CommandText = "SELECT sqlite_version();";
+    var versionText = (string?)query.ExecuteScalar();
+    Assert(Version.TryParse(versionText, out var nativeVersion) &&
+        nativeVersion >= new Version(3, 50, 2),
+        "Loaded native SQLite version is vulnerable or could not be determined: " + versionText);
+});
+
 Test("Relational SQLite schema contains no JSON state table", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-relational-" + Guid.NewGuid().ToString("N"));

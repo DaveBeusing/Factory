@@ -820,6 +820,45 @@ await TestAsync("Remote goal claims retain remaining budget and failed usage", a
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Controller rejects forged GitHub PR identity and head metadata", () =>
+{
+    var repo = GitHubWorkerResultVerifier.GitHubRepository("https://github.com/Owner/Repository.git");
+    Assert(repo == "Owner/Repository");
+    Assert(GitHubWorkerResultVerifier.PullNumber(
+        "https://github.com/owner/repository/pull/42", repo) == 42);
+    void Reject(Action action)
+    {
+        try { action(); throw new Exception("Forged GitHub identity was accepted"); }
+        catch (InvalidOperationException) { }
+    }
+    Reject(() => GitHubWorkerResultVerifier.PullNumber(
+        "https://github.com/other/repository/pull/42", repo));
+    Reject(() => GitHubWorkerResultVerifier.PullNumber(
+        "https://github.com/owner/repository/pull/42?unexpected=1", repo));
+    Reject(() => GitHubWorkerResultVerifier.GitHubRepository("file:///tmp/malicious.git"));
+
+    var expectedSha = new string('a', 40);
+    var branch = "factory/12345678901234567890123456789012";
+    string Payload(string baseRepo, string headRepo, string baseBranch, string headBranch, string sha)
+        => Json.Stringify(new
+        {
+            state = "open",
+            @base = new { repo = new { full_name = baseRepo }, @ref = baseBranch },
+            head = new { repo = new { full_name = headRepo }, @ref = headBranch, sha }
+        });
+    void Validate(string body)
+    {
+        using var json = System.Text.Json.JsonDocument.Parse(body);
+        GitHubWorkerResultVerifier.ValidatePull(json, repo, "master", branch, expectedSha);
+    }
+    Validate(Payload(repo, repo, "master", branch, expectedSha));
+    Reject(() => Validate(Payload(repo, "Other/Repository", "master", branch, expectedSha)));
+    Reject(() => Validate(Payload("Other/Repository", repo, "master", branch, expectedSha)));
+    Reject(() => Validate(Payload(repo, repo, "main", branch, expectedSha)));
+    Reject(() => Validate(Payload(repo, repo, "master", "factory/other", expectedSha)));
+    Reject(() => Validate(Payload(repo, repo, "master", branch, new string('b', 40))));
+});
+
 await TestAsync("Worker evidence must match job, SHA, attempts, checks and reviews", async () =>
 {
     var project = new ProjectInfo { Checks = [new CheckCommand { Name = "build", Executable = "dotnet" }] };

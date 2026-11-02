@@ -14,5 +14,7 @@
     <EmbeddedResource Include="ui/app.css" LogicalName="Factory.Ui.Style" />
     <EmbeddedResource Include="ui/app.js" LogicalName="Factory.Ui.Script" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <!-- Override the vulnerable transitive native SQLite bundle (GHSA-2m69-gcr7-jv3q). -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.14" />
   </ItemGroup>
 </Project>

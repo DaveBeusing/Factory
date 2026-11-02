@@ -282,6 +282,9 @@ public static class RemoteWorker
                }
                 claim.Project.Path = repoPath;
                claim.Project.Origin = GitOperations.Origin(repoPath) ?? claim.Project.Origin;
+               // The controller already counted the remote claim. The local execution claim
+               // must not increment the same attempt a second time.
+               claim.Job.Attempt = Math.Max(0, claim.Job.Attempt - 1);
                claim.Job.State = JobStates.Queued;
                claim.Job.DependsOn = [];
                claim.Job.LeaseOwner = ""; claim.Job.LeaseUntil = null;

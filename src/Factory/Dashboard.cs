@@ -164,10 +164,10 @@ public static class DashboardHost
             });
             return Results.Accepted();
         });
-        app.MapPost("/api/jobs/{id:guid}/verify", (Guid id) =>
+        app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, CancellationToken ct) =>
         {
-            new FactoryEngine(store, settings).VerifyIntegration(id);
-            return Results.Ok();
+            var proof = await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, ct);
+            return Results.Ok(proof);
         });
         // Registration through Mission Control is administrator-only.
         app.MapPost("/api/workers/register", (WorkerInput input) => Results.Ok(MissionControlManager.RegisterWorker(store, input)));

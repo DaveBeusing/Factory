@@ -252,16 +252,44 @@ public sealed class FactoryEngine
         foreach (var plugin in _plugins) await plugin.AfterJobAsync(p, _store.Job(id), ct);
     }
 
-    public void VerifyIntegration(Guid id)
+    public async Task<IntegrationProof> VerifyIntegrationAsync(Guid id, CancellationToken ct = default,
+        IRemoteBaseReader? remote = null, IIntegrationPullRequestReader? pullRequests = null)
     {
         var state = _store.Read();
         var job = state.Jobs.Single(j => j.Id == id);
         var project = state.Projects.Single(p => p.Id == job.ProjectId);
-        if (job.State is not (JobStates.CompletedLocal or JobStates.PrReady))
-            throw new InvalidOperationException("Job is not ready for integration");
-        if (!GitOperations.IsIntegrated(project, job))
-            throw new InvalidOperationException("Job commit is not an ancestor of the project's base branch; squash PRs require separate GitHub verification");
-        _store.UpdateJob(id, j => { j.Integrated = true; j.State = JobStates.Integrated; j.Stage = "done"; });
-        _store.Event(id, "integrated", job.HeadSha);
+        if (job.State is not (JobStates.CompletedLocal or JobStates.PrReady) || job.Integrated)
+            throw new InvalidOperationException("Job is not eligible for integration verification");
+
+        // Never accept a local-only ancestry result for a project with a configured remote.
+        var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct);
+        ct.ThrowIfCancellationRequested();
+        var recorded = _store.Change(s =>
+        {
+            var current = s.Jobs.Single(j => j.Id == id);
+            var currentProject = s.Projects.Single(p => p.Id == job.ProjectId);
+            if (current.State != job.State || current.Integrated ||
+                current.Mode != job.Mode || current.ProjectId != job.ProjectId ||
+                current.HeadSha != job.HeadSha || current.Branch != job.Branch ||
+                current.PrUrl != job.PrUrl ||
+                currentProject.Path != project.Path ||
+                currentProject.Origin != project.Origin ||
+                currentProject.BaseBranch != project.BaseBranch)
+                return false;
+            current.Integrated = true;
+            current.State = JobStates.Integrated;
+            current.Stage = "done";
+            current.UpdatedAt = DateTimeOffset.UtcNow;
+            s.Events.Add(new FactoryEvent
+            {
+                JobId = id, Type = "integrated",
+                Message = $"{proof.Source}: base={proof.BaseCommit}, commit={proof.IntegratedCommit}"
+            });
+            return true;
+        });
+        if (!recorded)
+            throw new InvalidOperationException("Job or project changed during integration verification; recheck required");
+        return proof;
     }
+
 }

@@ -141,7 +141,7 @@ Environment: FACTORY_HOME overrides the local state directory.
                 Print(new { store.Read().Projects, store.Read().Jobs, store.Read().Goals, store.Read().Workers }); return 0;
             case "pause": store.Change(s => s.Paused = true); Console.WriteLine("Queue paused"); return 0;
             case "resume": store.Change(s => s.Paused = false); Console.WriteLine("Queue resumed"); return 0;
-            case "verify": engine.VerifyIntegration(GuidArg(args[1])); Console.WriteLine("Integration confirmed"); return 0;
+            case "verify": await engine.VerifyIntegrationAsync(GuidArg(args[1])); Console.WriteLine("Integration confirmed"); return 0;
             case "goal":
             {
                 if (args.Length < 2 || args[1] != "add") throw new ArgumentException("Use goal add");

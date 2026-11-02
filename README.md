@@ -317,13 +317,17 @@ Recovery does not blindly repeat an operation with uncertain remote side effects
 
 After implementation and validation, Factory prepares an integration-ready branch, optionally a draft pull request. **Merging remains a manual decision.** Jobs that depend on another change must not start solely because its branch passed review.
 
-Once the change has been integrated through the repository's normal process, verify it against the base-branch Git history:
+Once the change has been integrated through the repository's normal process, verify it:
 
 ```powershell
 .\dist\Factory.exe verify '<job-guid>'
 ```
 
-Verification prevents downstream jobs from building on an unintegrated predecessor. When a source commit changes, its previous quality evidence is not automatically transferable to the new commit.
+**Integration verification is fail-closed.** When a project has a configured origin, Factory fetches the current base branch directly from that origin into a temporary Git ref. It does not trust the locally writable base branch alone. If the job has a PR URL, Factory additionally requires a **merged GitHub PR** in the expected repository, targeting the configured base branch with the same source branch and exact source commit. GitHub's merge commit must be reachable from the fetched remote base; this also supports squash and rebase merges where the original source commit is no longer an ancestor. Without a PR URL, the job's exact source SHA must be an ancestor of the fetched remote base.
+
+**Before unlocking dependent jobs, update the local base branch** to include the verified remote base (for example with an authorized `git pull --ff-only`). Factory does not automatically move the checked-out branch. If the remote is unavailable, metadata is inconsistent, or the local base is behind, verification refuses to mark the job integrated. For a repository intentionally configured **without an origin**, local-only jobs can still be verified against their local base branch; remote jobs and PRs cannot.
+
+Integration evidence records the verified source, remote-base commit and incorporated commit. When a source commit changes, its previous quality evidence is not automatically transferable to the new commit.
 
 ## 10. Monitor usage and activity
 

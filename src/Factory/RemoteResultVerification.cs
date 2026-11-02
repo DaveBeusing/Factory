@@ -67,6 +67,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             throw new InvalidOperationException("No quality checks are configured");
         if (string.IsNullOrWhiteSpace(status.Evidence) || status.Evidence.Length > 1_000_000)
             throw new InvalidOperationException("Worker quality evidence is missing or oversized");
+        var reported = status.Job ?? throw new InvalidOperationException("Missing worker completion");
         using var document = JsonDocument.Parse(status.Evidence);
         var root = document.RootElement;
         if (root.ValueKind != JsonValueKind.Object ||
@@ -74,13 +75,13 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             root.GetProperty("attempt").GetInt32() != job.Attempt ||
             root.GetProperty("outcome").GetString() != "ready" ||
             !string.Equals(root.GetProperty("commit").GetString(),
-                status.Job?.HeadSha, StringComparison.OrdinalIgnoreCase))
+                reported.HeadSha, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Worker evidence identity is inconsistent");
 
         var report = root.GetProperty("report");
         if (!report.GetProperty("passed").GetBoolean() ||
             !string.Equals(report.GetProperty("headSha").GetString(),
-                status.Job.HeadSha, StringComparison.OrdinalIgnoreCase) ||
+                reported.HeadSha, StringComparison.OrdinalIgnoreCase) ||
             report.GetProperty("findings").GetArrayLength() != 0)
             throw new InvalidOperationException("Worker quality report did not pass for this commit");
 

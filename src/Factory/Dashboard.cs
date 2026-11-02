@@ -237,27 +237,16 @@ public static class DashboardHost
                 return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
             return WorkerProtocol.Heartbeat(store, req, settings) ? (IResult)Results.Ok() : Results.Conflict();
         });
-        app.MapPost("/api/worker/complete", (HttpContext ctx, WorkerStatus req) =>
+        app.MapPost("/api/worker/complete", async (HttpContext ctx, WorkerStatus req, CancellationToken ct) =>
         {
             if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
                 return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
-            if (req.Evidence.Length > 1_000_000) return (IResult)Results.BadRequest(new { error = "Evidence too large" });
-            if (req.Job is { State: JobStates.PrReady } &&
-                !System.Text.RegularExpressions.Regex.IsMatch(req.Job.HeadSha, "^[0-9a-fA-F]{40,64}$"))
-                return (IResult)Results.BadRequest(new { error = "Invalid commit hash" });
-            if (!WorkerProtocol.Complete(store, req)) return (IResult)Results.Conflict();
-            if (req.Evidence.Length > 0)
-            {
-                var job = store.Job(req.JobId);
-                if (!System.Text.RegularExpressions.Regex.IsMatch(job.HeadSha, "^[0-9a-fA-F]{40,64}$"))
-                    return (IResult)Results.BadRequest(new { error = "Invalid commit hash" });
-                var dir = Path.Combine(store.Home, "evidence", req.JobId.ToString("N"));
-                Directory.CreateDirectory(dir);
-                var path = Path.Combine(dir, job.HeadSha + ".json");
-                File.WriteAllText(path, req.Evidence);
-                store.UpdateJob(req.JobId, j => j.EvidenceFile = path);
-            }
-            return Results.Ok();
+            if (req.Evidence is { Length: > 1_000_000 })
+                return (IResult)Results.BadRequest(new { error = "Evidence too large" });
+            // Do not persist worker-supplied evidence or PR metadata before independent verification.
+            var accepted = await WorkerProtocol.CompleteAsync(store, req,
+                new GitHubWorkerResultVerifier(), ct);
+            return accepted ? (IResult)Results.Ok() : Results.Conflict();
         });
         await app.RunAsync(cancellationToken);
     }

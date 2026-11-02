@@ -786,7 +786,7 @@ await TestAsync("Goal budget fails closed when usage is unavailable", async () =
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
-Test("Remote goal claims retain remaining budget and failed usage", () =>
+await TestAsync("Remote goal claims retain remaining budget and failed usage", async () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-remote-budget-" + Guid.NewGuid().ToString("N"));
     try
@@ -810,12 +810,157 @@ Test("Remote goal claims retain remaining budget and failed usage", () =>
             WorkerId = "worker-01", JobId = job.Id, TokensIn = 70, TokensOut = 15
         }, new FactorySettings()));
         Assert(store.Job(job.Id).TokensIn == 70 && store.Job(job.Id).TokensOut == 15);
-        Assert(WorkerProtocol.Complete(store, new WorkerStatus
+        Assert(await WorkerProtocol.CompleteAsync(store, new WorkerStatus
         {
             WorkerId = "worker-01", JobId = job.Id,
             Job = new FactoryJob { State = JobStates.Blocked, TokensIn = 95, TokensOut = 33 }
-        }));
+        }, new RefusingWorkerVerifier()));
         Assert(store.Job(job.Id).TokensIn == 95 && store.Job(job.Id).TokensOut == 33);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Controller rejects forged GitHub PR identity and head metadata", () =>
+{
+    var repo = GitHubWorkerResultVerifier.GitHubRepository("https://github.com/Owner/Repository.git");
+    Assert(repo == "Owner/Repository");
+    Assert(GitHubWorkerResultVerifier.PullNumber(
+        "https://github.com/owner/repository/pull/42", repo) == 42);
+    void Reject(Action action)
+    {
+        try { action(); throw new Exception("Forged GitHub identity was accepted"); }
+        catch (InvalidOperationException) { }
+    }
+    Reject(() => GitHubWorkerResultVerifier.PullNumber(
+        "https://github.com/other/repository/pull/42", repo));
+    Reject(() => GitHubWorkerResultVerifier.PullNumber(
+        "https://github.com/owner/repository/pull/42?unexpected=1", repo));
+    Reject(() => GitHubWorkerResultVerifier.GitHubRepository("file:///tmp/malicious.git"));
+
+    var expectedSha = new string('a', 40);
+    var branch = "factory/12345678901234567890123456789012";
+    string Payload(string baseRepo, string headRepo, string baseBranch, string headBranch, string sha)
+        => Json.Stringify(new
+        {
+            state = "open",
+            @base = new { repo = new { full_name = baseRepo }, @ref = baseBranch },
+            head = new { repo = new { full_name = headRepo }, @ref = headBranch, sha }
+        });
+    void Validate(string body)
+    {
+        using var json = System.Text.Json.JsonDocument.Parse(body);
+        GitHubWorkerResultVerifier.ValidatePull(json, repo, "master", branch, expectedSha);
+    }
+    Validate(Payload(repo, repo, "master", branch, expectedSha));
+    Reject(() => Validate(Payload(repo, "Other/Repository", "master", branch, expectedSha)));
+    Reject(() => Validate(Payload("Other/Repository", repo, "master", branch, expectedSha)));
+    Reject(() => Validate(Payload(repo, repo, "main", branch, expectedSha)));
+    Reject(() => Validate(Payload(repo, repo, "master", "factory/other", expectedSha)));
+    Reject(() => Validate(Payload(repo, repo, "master", branch, new string('b', 40))));
+});
+
+await TestAsync("Worker evidence must match job, SHA, attempts, checks and reviews", async () =>
+{
+    var project = new ProjectInfo { Checks = [new CheckCommand { Name = "build", Executable = "dotnet" }] };
+    var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote, Attempt = 2 };
+    var sha = new string('a', 40);
+    var result = new FactoryJob { Id = job.Id, ProjectId = job.ProjectId,
+        Mode = JobExecutionModes.Remote, Attempt = job.Attempt,
+        State = JobStates.PrReady, HeadSha = sha, Branch = $"factory/{job.Id:N}" };
+    var report = new QualityResult { Passed = true, HeadSha = sha,
+        Checks = [new CheckReport { Name = "build", ExitCode = 0 }],
+        Reviews = new Dictionary<string, string>
+        {
+            ["code"] = "PASS\nOK", ["architecture"] = "PASS\nOK",
+            ["security"] = "PASS\nOK", ["ux"] = "PASS\nOK"
+        } };
+    string Evidence(QualityResult q, string commit, int attempt) => Json.Stringify(new
+    {
+        jobId = job.Id, commit, report = q, attempt, outcome = "ready"
+    });
+    var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = result,
+        Evidence = Evidence(report, sha, job.Attempt) };
+    _ = GitHubWorkerResultVerifier.ValidateEvidence(project, job, status);
+    void Reject(string reason)
+    {
+        try { _ = GitHubWorkerResultVerifier.ValidateEvidence(project, job, status);
+            throw new Exception("Invalid worker evidence accepted: " + reason); }
+        catch (InvalidOperationException) { }
+    }
+    status.Evidence = Evidence(report, new string('b', 40), job.Attempt);
+    Reject("different commit");
+    status.Evidence = Evidence(report, sha, job.Attempt + 1);
+    Reject("different attempt");
+    report.Checks[0].ExitCode = 1; status.Evidence = Evidence(report, sha, job.Attempt);
+    Reject("failed check");
+    report.Checks[0].ExitCode = 0; report.Checks[0].Name = "unexpected";
+    status.Evidence = Evidence(report, sha, job.Attempt);
+    Reject("check identity");
+    report.Checks[0].Name = "build"; report.Reviews.Remove("security");
+    status.Evidence = Evidence(report, sha, job.Attempt);
+    Reject("missing review");
+    await Task.CompletedTask;
+});
+
+await TestAsync("Unverified remote success cannot mark a job PR-ready", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-verify-reject-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote", Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        Assert(claim != null);
+        var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
+            Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
+            Branch = $"factory/{job.Id:N}", PrUrl = "https://github.com/example/repo/pull/1" };
+        var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = finished,
+            Evidence = "{\"forged\":true}", TokensIn = 10 };
+        Assert(await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier()));
+        var blocked = store.Job(job.Id);
+        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "remote_verification_failed");
+        Assert(string.IsNullOrEmpty(blocked.PrUrl) && string.IsNullOrEmpty(blocked.HeadSha) &&
+            string.IsNullOrEmpty(blocked.EvidenceFile), "Unverified worker metadata was persisted");
+        Assert(blocked.TokensIn == 10, "Remote usage accounting was dropped");
+        Assert(!await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier()),
+            "A stale worker completion was replayed");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Controller-verified remote results are atomically bound to the active lease", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-verify-accept-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote", Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        Assert(claim != null);
+        var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
+            Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
+            Branch = $"factory/{job.Id:N}", PrUrl = "https://github.com/example/repo/pull/1" };
+        var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = finished };
+        Assert(await WorkerProtocol.CompleteAsync(store, status,
+            new FixedWorkerVerifier(new VerifiedWorkerResult("{\"verifiedBy\":\"test\"}"))));
+        var ready = store.Job(job.Id);
+        Assert(ready.State == JobStates.PrReady && ready.HeadSha == finished.HeadSha &&
+            ready.PrUrl == finished.PrUrl && File.Exists(ready.EvidenceFile));
+        Assert(File.ReadAllText(ready.EvidenceFile).Contains("verifiedBy"));
+        Assert(!await WorkerProtocol.CompleteAsync(store, status,
+            new FixedWorkerVerifier(new VerifiedWorkerResult("{}"))));
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -862,4 +1007,17 @@ internal sealed class UsageTestRuntime : IAgentRuntime
             OutputTokens = usage.OutputTokens, UsageReported = true
         });
     }
+}
+
+internal sealed class RefusingWorkerVerifier : IWorkerResultVerifier
+{
+    public Task<VerifiedWorkerResult> VerifyAsync(ProjectInfo project, FactoryJob job,
+        WorkerStatus status, CancellationToken ct)
+        => throw new InvalidOperationException("Independent GitHub verification failed");
+}
+
+internal sealed class FixedWorkerVerifier(VerifiedWorkerResult value) : IWorkerResultVerifier
+{
+    public Task<VerifiedWorkerResult> VerifyAsync(ProjectInfo project, FactoryJob job,
+        WorkerStatus status, CancellationToken ct) => Task.FromResult(value);
 }

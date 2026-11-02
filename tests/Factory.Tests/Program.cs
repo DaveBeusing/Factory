@@ -368,8 +368,140 @@ await TestAsync("Local agent pipeline, evidence and verified integration", async
         Assert(File.Exists(completed.EvidenceFile), "Evidence missing");
         Assert(!completed.Integrated, "Premature integration");
         Git("merge", "--no-ff", completed.Branch, "-m", "Integrate change");
-        engine.VerifyIntegration(job.Id);
+        await engine.VerifyIntegrationAsync(job.Id);
         Assert(store.Job(job.Id).Integrated, "Verified merge not recorded");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
+
+await TestAsync("Remote integration rejects unpushed local history and stale local bases", async () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-integration-" + Guid.NewGuid().ToString("N"));
+    var checkout = Path.Combine(root, "checkout");
+    var origin = Path.Combine(root, "origin.git");
+    Directory.CreateDirectory(root);
+    Directory.CreateDirectory(checkout);
+    void Git(string dir, params string[] args) =>
+        Commands.Require(Commands.Run("git", ["-C", dir, ..args], root, 90), "git fixture");
+    try
+    {
+        Commands.Require(Commands.Run("git", ["init", "--bare", "-b", "master", origin], root), "git init bare");
+        Git(checkout, "init", "-b", "master");
+        Git(checkout, "config", "user.name", "Factory Tests");
+        Git(checkout, "config", "user.email", "factory-tests@example.invalid");
+        File.WriteAllText(Path.Combine(checkout, "README.md"), "Initial");
+        Git(checkout, "add", "README.md"); Git(checkout, "commit", "-m", "Initial");
+        Git(checkout, "remote", "add", "origin", origin);
+        Git(checkout, "push", "-u", "origin", "master");
+
+        File.WriteAllText(Path.Combine(checkout, "README.md"), "Unpublished change");
+        Git(checkout, "add", "README.md"); Git(checkout, "commit", "-m", "Change");
+        var unpublished = GitOperations.Head(checkout);
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "remote", Path = checkout, Origin = origin };
+        var job = new FactoryJob { ProjectId = project.Id, State = JobStates.CompletedLocal,
+            Mode = JobExecutionModes.Local, HeadSha = unpublished };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var engine = new FactoryEngine(store, new FactorySettings(), agent: new FakeAgent());
+        async Task Reject(Guid id)
+        {
+            try
+            {
+                await engine.VerifyIntegrationAsync(id);
+                throw new Exception("Unverified integration was accepted");
+            }
+            catch (InvalidOperationException) { }
+            Assert(!store.Job(id).Integrated, "Blocked integration released dependent work");
+            Assert(!store.Read().Events.Any(e => e.JobId == id && e.Type == "integrated"));
+        }
+        await Reject(job.Id);
+        Git(checkout, "push", "origin", "master");
+        var proof = await engine.VerifyIntegrationAsync(job.Id);
+        Assert(proof.Source == "remote-ancestry" && proof.IntegratedCommit == unpublished);
+        Assert(store.Job(job.Id).Integrated);
+
+        var other = Path.Combine(root, "other");
+        Commands.Require(Commands.Run("git", ["clone", origin, other], root), "git clone");
+        Git(other, "config", "user.name", "Factory Tests");
+        Git(other, "config", "user.email", "factory-tests@example.invalid");
+        File.WriteAllText(Path.Combine(other, "other.txt"), "Merged elsewhere");
+        Git(other, "add", "other.txt"); Git(other, "commit", "-m", "Remote only");
+        var remoteCommit = GitOperations.Head(other);
+        Git(other, "push", "origin", "master");
+        var stale = store.AddJob(new FactoryJob { ProjectId = project.Id,
+            Mode = JobExecutionModes.Local, State = JobStates.CompletedLocal,
+            HeadSha = remoteCommit });
+        await Reject(stale.Id);
+        Git(checkout, "pull", "--ff-only", "origin", "master");
+        var refreshed = await engine.VerifyIntegrationAsync(stale.Id);
+        Assert(refreshed.BaseCommit == remoteCommit && refreshed.IntegratedCommit == remoteCommit);
+        Assert(DependencyGraph.DependenciesSatisfied(new FactoryJob { DependsOn = [stale.Id] },
+            store.Read().Jobs), "Verified remote integration did not release dependent work");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
+await TestAsync("Merged squash PR requires matching metadata and reachable remote merge commit", async () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-squash-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    void Git(params string[] args) =>
+        Commands.Require(Commands.Run("git", ["-C", root, ..args], root, 90), "git fixture");
+    try
+    {
+        Git("init", "-b", "master");
+        Git("config", "user.name", "Factory Tests");
+        Git("config", "user.email", "factory-tests@example.invalid");
+        File.WriteAllText(Path.Combine(root, "README.md"), "Initial");
+        Git("add", "README.md"); Git("commit", "-m", "Initial");
+        Git("checkout", "-b", "feature");
+        File.WriteAllText(Path.Combine(root, "feature.txt"), "Feature");
+        Git("add", "feature.txt"); Git("commit", "-m", "Feature");
+        var sourceSha = GitOperations.Head(root);
+        Git("checkout", "master");
+        Git("merge", "--squash", "feature");
+        Git("commit", "-m", "Squash feature");
+        var mergeSha = GitOperations.Head(root);
+        Assert(!IntegrationVerifier.IsAncestor(root, sourceSha, mergeSha),
+            "Fixture must simulate rewritten commit history");
+
+        var project = new ProjectInfo { Path = root, Origin = "https://github.com/example/repository",
+            BaseBranch = "master" };
+        var job = new FactoryJob { ProjectId = project.Id, State = JobStates.PrReady,
+            Mode = JobExecutionModes.Remote, HeadSha = sourceSha,
+            PrUrl = "https://github.com/example/repository/pull/12" };
+        job.Branch = $"factory/{job.Id:N}";
+        var merged = new MergedPullRequest(true, "example/repository", "example/repository",
+            "master", job.Branch, sourceSha, mergeSha);
+        var remote = new FixedRemoteBaseReader(mergeSha);
+        var proof = await IntegrationVerifier.VerifyAsync(project, job, remote,
+            new FixedIntegrationPullReader(merged));
+        Assert(proof.Source == "remote-merged-pr" && proof.IntegratedCommit == mergeSha);
+
+        async Task Reject(MergedPullRequest candidate)
+        {
+            try
+            {
+                await IntegrationVerifier.VerifyAsync(project, job, remote,
+                    new FixedIntegrationPullReader(candidate));
+                throw new Exception("Invalid merged PR was accepted");
+            }
+            catch (InvalidOperationException) { }
+        }
+        await Reject(merged with { Merged = false });
+        await Reject(merged with { BaseBranch = "main" });
+        await Reject(merged with { HeadRepository = "attacker/fork" });
+        await Reject(merged with { HeadCommit = new string('a', 40) });
+        await Reject(merged with { MergeCommit = sourceSha });
+        try
+        {
+            await IntegrationVerifier.VerifyAsync(project, job,
+                new FixedRemoteBaseReader(new string('b', 40)),
+                new FixedIntegrationPullReader(merged));
+            throw new Exception("Unreachable remote base was accepted");
+        }
+        catch (InvalidOperationException) { }
     }
     finally { try { Directory.Delete(root, true); } catch { } }
 });
@@ -1032,4 +1164,16 @@ internal sealed class FixedWorkerVerifier(VerifiedWorkerResult value) : IWorkerR
 {
     public Task<VerifiedWorkerResult> VerifyAsync(ProjectInfo project, FactoryJob job,
         WorkerStatus status, CancellationToken ct) => Task.FromResult(value);
+}
+
+internal sealed class FixedRemoteBaseReader(string sha) : IRemoteBaseReader
+{
+    public Task<string> ReadBaseCommitAsync(ProjectInfo project, CancellationToken ct)
+        => Task.FromResult(sha);
+}
+
+internal sealed class FixedIntegrationPullReader(MergedPullRequest result) : IIntegrationPullRequestReader
+{
+    public Task<MergedPullRequest> ReadAsync(string repository, int number, CancellationToken ct)
+        => Task.FromResult(result);
 }

@@ -28,6 +28,24 @@ public sealed class WorkerStatus
     public bool UsageComplete { get; set; }
 }
 
+public sealed class WorkerBudgetExtensionRequest
+{
+    public string WorkerId { get; set; } = "";
+    public Guid JobId { get; set; }
+    public long ExecutionGeneration { get; set; }
+    public string LeaseToken { get; set; } = "";
+    public Guid RequestId { get; set; }
+    public int RequestedTokens { get; set; }
+}
+
+public sealed class WorkerBudgetExtensionGrant
+{
+    public Guid RequestId { get; set; }
+    public long Granted { get; set; }
+    public long Reserved { get; set; }
+    public long ExecutionGeneration { get; set; }
+}
+
 public static class WorkerProtocol
 {
     public static bool Authorized(string? bearer, string token)
@@ -100,6 +118,37 @@ public static class WorkerProtocol
                 };
            }
             return null;
+        });
+    }
+
+    public static WorkerBudgetExtensionGrant? ExtendBudget(StateStore store,
+        FactorySettings settings, WorkerBudgetExtensionRequest request)
+    {
+        if (!WorkerAuthentication.IsValidWorkerId(request.WorkerId) ||
+            request.RequestId == Guid.Empty || request.JobId == Guid.Empty ||
+            request.RequestedTokens is < 256 or > 1000000)
+            return null;
+        return store.Change(state =>
+        {
+            var worker = state.Workers.FirstOrDefault(w => w.Id == request.WorkerId);
+            var job = state.Jobs.FirstOrDefault(j => j.Id == request.JobId);
+            var project = job is null ? null : state.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
+            var fence = new ExecutionFence(request.ExecutionGeneration,
+                request.LeaseToken, "remote:" + request.WorkerId);
+            if (worker is null || job is null || project is null ||
+                !WorkerAuthorization.CanContinue(state, worker, project, job, settings) ||
+                !JobRecovery.Matches(job, fence) ||
+                job.Mode != JobExecutionModes.Remote || job.GoalId is null)
+                return null;
+            var extension = GoalBudgetLedger.ExtendRemote(state, job, fence,
+                request.RequestId, request.RequestedTokens, settings.GoalExtensionIncrementTokens,
+                settings.MaxJobReservationTokens);
+            return new WorkerBudgetExtensionGrant
+            {
+                RequestId = request.RequestId, Granted = extension.Granted,
+                Reserved = GoalBudgetLedger.Current(state, job).Reserved,
+                ExecutionGeneration = job.ExecutionGeneration
+            };
         });
     }
 

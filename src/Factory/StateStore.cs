@@ -601,14 +601,104 @@ public sealed class StateStore
 
     public void Change(Action<FactoryState> action) => Change<int>(s => { action(s); return 0; });
 
-    public void Event(Guid? jobId, string type, string message) => Change(s =>
+    /// <summary>
+    /// Append a single event without materializing unrelated state. The monotonic position
+    /// and bounded retention are committed together under SQLite's write transaction.
+    /// </summary>
+    public void Event(Guid? jobId, string type, string message)
     {
-        s.Events.Add(new FactoryEvent { JobId = jobId, Type = type, Message = message[..Math.Min(message.Length, 2000)] });
-        if (s.Events.Count > 20000) s.Events.RemoveRange(0, s.Events.Count - 20000);
-    });
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        using (var next = Command(db, tx, "SELECT COALESCE(MAX(position),-1)+1 FROM events;"))
+        {
+            var position = Convert.ToInt64(next.ExecuteScalar(), CultureInfo.InvariantCulture);
+            Execute(db, tx, """
+                INSERT INTO events(position,id,at,job_id,type,message)
+                VALUES($position,$id,$at,$job,$type,$message);
+                """, ("$position", position), ("$id", Guid.NewGuid()),
+                ("$at", DateTimeOffset.UtcNow), ("$job", jobId), ("$type", type),
+                ("$message", message[..Math.Min(message.Length, 2000)]));
+        }
+        Execute(db, tx, """
+            DELETE FROM events WHERE id IN (
+                SELECT id FROM events ORDER BY position DESC LIMIT -1 OFFSET 20000
+            );
+            """);
+        tx.Commit();
+    }
 
-    public FactoryJob Job(Guid id) => Read().Jobs.FirstOrDefault(j => j.Id == id)
-        ?? throw new ArgumentException($"Unknown job: {id}");
+    /// <summary>
+    /// Renew only the exact live execution lease. No snapshot is loaded, and a stale
+    /// generation, token, owner, expired lease or terminal state cannot be renewed.
+    /// </summary>
+    public bool RenewLease(Guid jobId, ExecutionFence fence, int leaseSeconds)
+    {
+        if (leaseSeconds <= 0) throw new ArgumentOutOfRangeException(nameof(leaseSeconds));
+        var now = DateTimeOffset.UtcNow;
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        using var command = Command(db, tx, """
+            UPDATE jobs SET lease_until=$until
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+              AND lease_owner=$owner AND lease_until>$now
+              AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+            """, ("$until", now.AddSeconds(leaseSeconds)), ("$id", jobId),
+            ("$generation", fence.Generation), ("$token", fence.Token),
+            ("$owner", fence.Owner), ("$now", now));
+        var updated = command.ExecuteNonQuery() == 1;
+        tx.Commit();
+        return updated;
+    }
+
+    /// <summary>
+    /// Update an enabled worker's liveness observation without loading project/job graphs.
+    /// Does not authorize a job-specific heartbeat or renew an execution lease.
+    /// </summary>
+    public bool TouchWorkerHeartbeat(string workerId)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        using var command = Command(db, tx,
+            "UPDATE workers SET heartbeat=$now WHERE id=$id AND enabled=1;",
+            ("$now", DateTimeOffset.UtcNow), ("$id", workerId));
+        var updated = command.ExecuteNonQuery() == 1;
+        tx.Commit();
+        return updated;
+    }
+
+    /// <summary>Read a single job and its ordered child values in one read transaction.</summary>
+    public FactoryJob Job(Guid id)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction(deferred: true);
+        var map = Entities.Single(m => m.Type == typeof(FactoryJob));
+        var scalar = Scalars(map);
+        FactoryJob? job;
+        using (var cmd = Command(db, tx, "SELECT " +
+            string.Join(",", scalar.Select(p => Q(Column(p.Name)))) +
+            " FROM jobs WHERE id=$id;", ("$id", id)))
+        using (var reader = cmd.ExecuteReader())
+        {
+            if (!reader.Read()) throw new ArgumentException($"Unknown job: {id}");
+            job = new FactoryJob();
+            for (int index = 0; index < scalar.Length; index++)
+                scalar[index].SetValue(job,
+                    FromDb(reader.GetValue(index), scalar[index].PropertyType));
+        }
+        foreach (var property in Collections(map))
+        {
+            var values = (IList)property.GetValue(job)!;
+            values.Clear();
+            var elementType = property.PropertyType.GenericTypeArguments.Single();
+            using var cmd = Command(db, tx, "SELECT value FROM " +
+                Q(map.Table + "_" + Column(property.Name)) +
+                " WHERE owner_id=$id ORDER BY position;", ("$id", id));
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) values.Add(FromDb(reader.GetValue(0), elementType));
+        }
+        tx.Commit();
+        return job;
+    }
 
     public ProjectInfo Project(string key) => Read().Projects.FirstOrDefault(p =>
         p.Name.Equals(key, StringComparison.OrdinalIgnoreCase) ||

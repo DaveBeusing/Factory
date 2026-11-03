@@ -16,6 +16,8 @@ Reduce full aggregate materialization for frequent, narrowly scoped operations w
 - Conditional lease renewal gated by the exact job identity, execution generation, token, owner, unexpired lease, and active lifecycle state
 - Idle worker heartbeat updates conditional on an enabled registration
 - Targeted job reads including persisted ordered child collections
+- Atomic fenced lifecycle stage updates and stage events in one transaction (without loading the aggregate)
+- Rollback and stale lease denial tests for stage changes
 - Local runner and idle worker protocol integration
 - Concurrency and denial tests for targeted operations
 
@@ -33,7 +35,7 @@ Every write uses a SQLite transaction with the existing WAL, foreign-key and tim
 
 ## Validation
 
-The console test suite includes targeted job retrieval, worker heartbeat authorization, generation/owner/expiration denial and durable events. Execute:
+The console test suite includes targeted job retrieval, worker heartbeat authorization, generation/owner/expiration denial, atomic stage events, and failure-injected rollback. Execute:
 
 ```powershell
 dotnet restore Factory.slnx

@@ -796,7 +796,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 3, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 4, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "releases", "knowledge_items", "graph_nodes", "evaluations",
@@ -1010,21 +1010,27 @@ Test("App-server token usage counts deltas on resumed threads", () =>
         "Unbounded totals without an initial delta must not be charged");
 });
 
-Test("Same-goal jobs do not run concurrently", () =>
+Test("Same-goal disjoint packages schedule concurrently within reserved capacity", () =>
 {
     var project = new ProjectInfo { MaxParallel = 5 };
-    var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 100000 };
-    var running = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id, State = JobStates.Building,
-        LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(1), ExpectedPaths = ["src/a.cs"] };
-    var queued = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id, ExpectedPaths = ["docs/b.md"] };
-    var otherGoal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 100000 };
-    var independent = new FactoryJob { ProjectId = project.Id, GoalId = otherGoal.Id, ExpectedPaths = ["src/c.cs"] };
-    var selected = JobScheduler.Select(new FactoryState
-    {
-        Projects = [project], Goals = [goal, otherGoal], Jobs = [running, queued, independent]
-    }, 5);
-    Assert(!selected.Any(j => j.Id == queued.Id));
-    Assert(selected.Any(j => j.Id == independent.Id));
+    var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 12000 };
+    var active = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
+        State = JobStates.Queued, ExpectedPaths = ["src/a.cs"] };
+    var queued = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
+        ExpectedPaths = ["docs/b.md"] };
+    var third = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
+        ExpectedPaths = ["src/c.cs"] };
+    var state = new FactoryState { Projects = [project], Goals = [goal],
+        Jobs = [active, queued, third] };
+    var chosen = JobScheduler.Select(state, 5, reservationTokens: 4096);
+    Assert(chosen.Count == 2, "Scheduler oversubscribed three 4096-token reservations");
+    Assert(chosen.Select(j => j.Id).SequenceEqual([active.Id, queued.Id]));
+    goal.TokenBudget = 13000;
+    Assert(JobScheduler.Select(state, 5, reservationTokens: 4096).Count == 3,
+        "Disjoint same-goal packages were unnecessarily serialized");
+    queued.ExpectedPaths = ["src/a.cs"];
+    Assert(JobScheduler.Select(state, 5, reservationTokens: 4096)
+        .All(j => j.Id != queued.Id), "Overlapping work packages were scheduled concurrently");
 });
 
 await TestAsync("Budgeted runtime checks before every invocation and records reviews", async () =>
@@ -1041,7 +1047,10 @@ await TestAsync("Budgeted runtime checks before every invocation and records rev
         scripted.Reports.Enqueue(new AgentTokenUsage(80, 20));
         scripted.Reports.Enqueue(new AgentTokenUsage(75, 20));
         scripted.Reports.Enqueue(new AgentTokenUsage(80, 30));
-        var runtime = new BudgetedAgentRuntime(scripted, store, job.Id);
+        var fence = store.Change(s =>
+            JobRecovery.Assign(s.Jobs.Single(j => j.Id == job.Id), "budget-test", 120,
+                local: true, state: s));
+        var runtime = new BudgetedAgentRuntime(scripted, store, job.Id, fence);
         await runtime.RunAsync(home, "builder", "", CancellationToken.None);
         await runtime.RunAsync(home, "review", "", CancellationToken.None, readOnly: true);
         await runtime.RunAsync(home, "rework", "", CancellationToken.None);
@@ -1099,7 +1108,10 @@ await TestAsync("Goal budget fails closed when usage is unavailable", async () =
         var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 1000 };
         var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
         store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
-        var runtime = new BudgetedAgentRuntime(new UsageTestRuntime(), store, job.Id);
+        var fence = store.Change(s =>
+            JobRecovery.Assign(s.Jobs.Single(j => j.Id == job.Id), "budget-test", 120,
+                local: true, state: s));
+        var runtime = new BudgetedAgentRuntime(new UsageTestRuntime(), store, job.Id, fence);
         try
         {
             await runtime.RunAsync(home, "no usage", "", CancellationToken.None);

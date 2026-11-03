@@ -204,25 +204,30 @@ public sealed class FactoryEngine
         }
     }
 
-    private async Task ExecuteAsync(Guid id, CancellationToken ct)
+    private async Task ExecuteAsync(Guid id, ExecutionFence fence, CancellationToken ct)
     {
         var j = _store.Job(id);
+        EnsureOwned(id, fence);
         if (!JobExecutionModes.Matches(j, _executionMode))
             throw new InvalidOperationException("Job execution mode changed after claim");
         var p = _store.Read().Projects.Single(x => x.Id == j.ProjectId);
         if (p.Checks.Count == 0) throw new InvalidOperationException("Project checks missing; configure gates before execution");
         WorkPackageScope.ValidateDeclaration(j.ExpectedPaths);
         var runtime = new BudgetedAgentRuntime(
-            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk), _store, id);
+            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk), _store, id, fence);
         var qualityEngine = new QualityEngine(runtime);
         var worktree = _git.Prepare(p, j);
-        _store.UpdateJob(id, x => { x.Worktree = worktree; x.Branch = $"factory/{x.Id:N}"; });
+        UpdateOwned(id, fence, x =>
+        {
+            x.Worktree = worktree; x.Branch = $"factory/{x.Id:N}";
+            JobRecovery.Checkpoint(x, "worktree", GitOperations.Head(worktree));
+        });
         foreach (var plugin in _plugins) await plugin.BeforeJobAsync(p, _store.Job(id), ct);
         var report = new QualityResult();
         for (var round = 1; round <= Math.Max(1, j.MaxRounds); round++)
         {
             ct.ThrowIfCancellationRequested();
-           Stage(id, round == 1 ? JobStates.Building : JobStates.Reworking, "agent");
+           Stage(id, fence,round == 1 ? JobStates.Building : JobStates.Reworking, "agent");
            var existing = _store.Job(id);
            var description = round == 1 ? existing.Description :
                 "Address these failed checks and reviews, and rerun necessary tests. Findings: " + string.Join("; ", report.Findings);
@@ -233,9 +238,10 @@ public sealed class FactoryEngine
                 "Respect AGENTS.md and the existing architecture. Acceptance evidence is required. " +
                 $"Work package: {existing.Title}\n{description}";
            var run = await runtime.RunAsync(worktree, prompt, existing.SessionId, ct,
-                session => _store.UpdateJob(id, x => x.SessionId = session));
+                session => UpdateOwned(id, fence, x => x.SessionId = session));
             ct.ThrowIfCancellationRequested();
-           if (!run.Success) throw new InvalidOperationException("Agent failed: " + run.Error);
+           EnsureOwned(id, fence);
+            if (!run.Success) throw new InvalidOperationException("Agent failed: " + run.Error);
             // Only commit after the deterministic protected-path check for changed working files.
             var status = Commands.Require(Commands.Run("git", ["-C", worktree, "status", "--porcelain"], Environment.CurrentDirectory), "git status");
            if (string.IsNullOrWhiteSpace(status) && round == 1)
@@ -243,49 +249,60 @@ public sealed class FactoryEngine
            // Verify the complete Git delta before staging or committing.
             WorkPackageScope.ValidateWorktree(p, _store.Job(id));
            ct.ThrowIfCancellationRequested();
-           Stage(id, JobStates.Gating, "commit");
-           var sha = GitOperations.CommitIfNeeded(worktree, existing.Title);
-           _store.UpdateJob(id, x => x.HeadSha = sha);
+           Stage(id, fence,JobStates.Gating, "commit");
+           EnsureOwned(id, fence);
+            var sha = GitOperations.CommitIfNeeded(worktree, existing.Title);
+            UpdateOwned(id, fence, x =>
+            {
+                x.HeadSha = sha;
+                JobRecovery.Checkpoint(x, "commit", sha);
+            });
            ct.ThrowIfCancellationRequested();
-           Stage(id, JobStates.Gating, "checks");
+           Stage(id, fence,JobStates.Gating, "checks");
            report = await qualityEngine.GateAsync(p, _store.Job(id), ct);
+            EnsureOwned(id, fence);
            if (report.Passed)
             {
-                Stage(id, JobStates.Reviewing, "review");
+                Stage(id, fence,JobStates.Reviewing, "review");
                report = await qualityEngine.ReviewAsync(p, _store.Job(id), report, ct);
+               EnsureOwned(id, fence);
            }
             ct.ThrowIfCancellationRequested();
             // Checks and reviewers can also modify files; recheck the full worktree.
             WorkPackageScope.ValidateWorktree(p, _store.Job(id));
            foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id), report, ct);
-           var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
-           _store.UpdateJob(id, x => x.EvidenceFile = evidence);
+           EnsureOwned(id, fence);
+            var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
+            UpdateOwned(id, fence, x => x.EvidenceFile = evidence);
            if (report.Passed) break;
            _store.Event(id, "rework", string.Join("; ", report.Findings));
         }
         if (!report.Passed)
         {
-            Stage(id, JobStates.Blocked, "quality", "Quality gate did not pass within allotted rounds");
+            Stage(id, fence,JobStates.Blocked, "quality", "Quality gate did not pass within allotted rounds");
            return;
         }
         ct.ThrowIfCancellationRequested();
+        EnsureOwned(id, fence);
         WorkPackageScope.ValidateWorktree(p, _store.Job(id));
         if (!string.IsNullOrWhiteSpace(GitOperations.Git(worktree, "status", "--porcelain")))
             throw new ScopeViolationException(
                 "Worktree changed after quality verification; inspect and revalidate before integration");
         if (GitOperations.Head(worktree) != report.HeadSha)
             throw new ScopeViolationException("Commit changed after quality verification");
-        Stage(id, JobStates.AwaitingApproval, "integration");
+        Stage(id, fence,JobStates.AwaitingApproval, "integration");
         // Push is a side effect requiring explicit operator opt-in in settings plus remote mode.
         if (j.Mode == "remote" && _settings.AllowPush)
         {
             ct.ThrowIfCancellationRequested();
-           Stage(id, JobStates.AwaitingApproval, "push");
-           var pr = await GitOperations.PublishAsync(p, _store.Job(id), ct);
-           Stage(id, JobStates.PrReady, "pr");
-           _store.UpdateJob(id, x => x.PrUrl = pr);
+           Stage(id, fence,JobStates.AwaitingApproval, "push");
+           EnsureOwned(id, fence);
+            var pr = await GitOperations.PublishAsync(p, _store.Job(id), ct);
+            EnsureOwned(id, fence);
+            UpdateOwned(id, fence, x => x.PrUrl = pr);
+            Stage(id, fence, JobStates.PrReady, "pr");
         }
-        else Stage(id, JobStates.CompletedLocal, "await_manual_integration");
+        else Stage(id, fence,JobStates.CompletedLocal, "await_manual_integration");
         foreach (var plugin in _plugins) await plugin.AfterJobAsync(p, _store.Job(id), ct);
     }
 

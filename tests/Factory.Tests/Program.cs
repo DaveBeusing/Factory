@@ -1717,6 +1717,85 @@ Test("SQLite 3 migration quarantines unreserved goal runners and holds budget", 
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+await TestAsync("Disjoint same-goal jobs execute concurrently end to end", async () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-parallel-goal-" + Guid.NewGuid().ToString("N"));
+    var repo = Path.Combine(root, "repository");
+    Directory.CreateDirectory(repo);
+    void Git(params string[] args) =>
+        Commands.Require(Commands.Run("git", ["-C", repo, ..args], root), "git fixture");
+    try
+    {
+        Git("init", "-b", "master");
+        Git("config", "user.email", "factory-tests@example.invalid");
+        Git("config", "user.name", "Factory Tests");
+        File.WriteAllText(Path.Combine(repo, "README.md"), "Initial");
+        Git("add", "README.md"); Git("commit", "-m", "Initial");
+
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "parallel", Path = repo, MaxParallel = 2,
+            Checks = [new CheckCommand { Name = "git", Executable = "git",
+                Arguments = ["rev-parse", "HEAD"] }] };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 20000 };
+        var a = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id, Title = "Build A",
+            Description = "Write file A", ExpectedPaths = ["src/a.txt"] };
+        var b = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id, Title = "Build B",
+            Description = "Write file B", ExpectedPaths = ["src/b.txt"] };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(a); s.Jobs.Add(b); });
+        var agent = new ParallelGoalTestRuntime();
+        var engine = new FactoryEngine(store, new FactorySettings
+        {
+            MaxParallel = 2, GoalReservationTokens = 8192
+        }, agent: agent);
+        await engine.RunQueueAsync(CancellationToken.None);
+        Assert(agent.MaximumConcurrentBuilders == 2,
+            "Independent work packages were not actually running concurrently");
+        Assert(store.Job(a.Id).State == JobStates.CompletedLocal, store.Job(a.Id).Error);
+        Assert(store.Job(b.Id).State == JobStates.CompletedLocal, store.Job(b.Id).Error);
+        var snapshot = store.Read();
+        Assert(snapshot.BudgetReservations.Count == 2 &&
+            snapshot.BudgetReservations.All(r => r.State == GoalBudgetLedger.Released));
+        Assert(GoalBudgetLedger.Available(snapshot, goal.Id) > 15000,
+            "Completed jobs did not release unused goal reservations");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
+Test("Remote workers can concurrently claim reserved shares of one goal", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-remote-parallel-budget-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote", MaxParallel = 2,
+            Origin = "https://example.invalid/repo" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 18000 };
+        var a = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
+            Mode = JobExecutionModes.Remote, ExpectedPaths = ["src/a.cs"] };
+        var b = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
+            Mode = JobExecutionModes.Remote, ExpectedPaths = ["src/b.cs"] };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(a); s.Jobs.Add(b);
+            s.Workers.Add(new WorkerInfo { Id = "worker-a" });
+            s.Workers.Add(new WorkerInfo { Id = "worker-b" });
+        });
+        var settings = new FactorySettings { AllowPush = true, MaxParallel = 2,
+            GoalReservationTokens = 8000 };
+        var first = WorkerProtocol.Claim(store, settings, "worker-a");
+        var second = WorkerProtocol.Claim(store, settings, "worker-b");
+        Assert(first is not null && second is not null && first.Job.Id != second.Job.Id,
+            "Second remote worker was blocked by same-goal serialization");
+        var state = store.Read();
+        Assert(state.BudgetReservations.Count == 2 &&
+            state.BudgetReservations.Sum(r => r.Reserved) == 16000 &&
+            GoalBudgetLedger.Available(state, goal.Id) == 2000);
+        Assert(first!.Goal?.TokenBudget == 8000 && second!.Goal?.TokenBudget == 8000,
+            "Worker received unrestricted global budget rather than its reserved share");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 var passed = results.Count(x => x.Passed);
 Console.WriteLine($"{passed}/{results.Count} passed");
 return passed == results.Count ? 0 : 1;
@@ -1797,5 +1876,46 @@ internal sealed class ExpireDuringRunAgent(StateStore store, Guid jobId) : IAgen
         Directory.CreateDirectory(Path.Combine(directory, "src"));
         File.WriteAllText(Path.Combine(directory, "src", "generated.txt"), "Uncommitted stale change");
         return Task.FromResult(new AgentRunResult { Success = true });
+    }
+}
+
+// Builder turns coordinate without blocking the thread pool; reviewers remain read-only.
+internal sealed class ParallelGoalTestRuntime : IAgentRuntime
+{
+    private readonly TaskCompletionSource _bothStarted =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private int _running;
+    private int _started;
+    private int _maxRunning;
+    public int MaximumConcurrentBuilders => Volatile.Read(ref _maxRunning);
+
+    public async Task<AgentRunResult> RunAsync(string directory, string prompt,
+        string previousSession, CancellationToken cancellation, Action<string>? onSession = null,
+        bool readOnly = false, Action<AgentTokenUsage>? onUsage = null)
+    {
+        if (readOnly)
+        {
+            onUsage?.Invoke(new AgentTokenUsage(10, 10));
+            return new AgentRunResult { Success = true, UsageReported = true,
+                InputTokens = 10, OutputTokens = 10, FinalText = "VERDICT: PASS\nReviewed" };
+        }
+        var running = Interlocked.Increment(ref _running);
+        var previous = Volatile.Read(ref _maxRunning);
+        while (running > previous &&
+            Interlocked.CompareExchange(ref _maxRunning, running, previous) != previous)
+            previous = Volatile.Read(ref _maxRunning);
+        if (Interlocked.Increment(ref _started) == 2) _bothStarted.TrySetResult();
+        try
+        {
+            await Task.WhenAny(_bothStarted.Task, Task.Delay(3000, cancellation));
+            var name = prompt.Contains("Build A", StringComparison.Ordinal) ? "a.txt" : "b.txt";
+            var src = Path.Combine(directory, "src");
+            Directory.CreateDirectory(src);
+            File.WriteAllText(Path.Combine(src, name), "Generated by test");
+            onUsage?.Invoke(new AgentTokenUsage(30, 20));
+            return new AgentRunResult { Success = true, UsageReported = true,
+                InputTokens = 30, OutputTokens = 20, FinalText = "Complete" };
+        }
+        finally { Interlocked.Decrement(ref _running); }
     }
 }

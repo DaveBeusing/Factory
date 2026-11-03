@@ -628,6 +628,50 @@ public sealed class StateStore
     }
 
     /// <summary>
+    /// Persist a fenced job lifecycle transition and its audit event atomically.
+    /// This hot path avoids reading or comparing unrelated Factory entities.
+    /// A superseded, expired, or inactive execution cannot change the job.
+    /// </summary>
+    public void SetFencedStage(Guid jobId, ExecutionFence fence, string nextState, string stage,
+        string? error = null)
+    {
+        if (string.IsNullOrWhiteSpace(nextState) || string.IsNullOrWhiteSpace(stage))
+            throw new ArgumentException("Job state and stage are required");
+        var now = DateTimeOffset.UtcNow;
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        using (var update = Command(db, tx, """
+            UPDATE jobs SET state=$state, stage=$stage, error=COALESCE($error,error),
+                updated_at=$now, checkpoint_stage=$stage, checkpoint_at=$now
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+              AND lease_owner=$owner AND lease_until>$now
+              AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+            """, ("$state", nextState), ("$stage", stage), ("$error", error),
+            ("$now", now), ("$id", jobId), ("$generation", fence.Generation),
+            ("$token", fence.Token), ("$owner", fence.Owner)))
+        {
+            if (update.ExecuteNonQuery() != 1)
+                throw new LostExecutionLeaseException("Execution lease expired or generation was fenced");
+        }
+
+        using (var next = Command(db, tx, "SELECT COALESCE(MAX(position),-1)+1 FROM events;"))
+        {
+            var position = Convert.ToInt64(next.ExecuteScalar(), CultureInfo.InvariantCulture);
+            Execute(db, tx, """
+                INSERT INTO events(position,id,at,job_id,type,message)
+                VALUES($position,$id,$at,$job,'stage',$message);
+                """, ("$position", position), ("$id", Guid.NewGuid()), ("$at", now),
+                ("$job", jobId), ("$message", nextState + "/" + stage));
+        }
+        Execute(db, tx, """
+            DELETE FROM events WHERE id IN (
+                SELECT id FROM events ORDER BY position DESC LIMIT -1 OFFSET 20000
+            );
+            """);
+        tx.Commit();
+    }
+
+    /// <summary>
     /// Renew only the exact live execution lease. No snapshot is loaded, and a stale
     /// generation, token, owner, expired lease or terminal state cannot be renewed.
     /// </summary>

@@ -1799,6 +1799,56 @@ Test("Remote workers can concurrently claim reserved shares of one goal", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+await TestAsync("Unverified remote final usage holds budget until reviewed reconciliation", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-remote-unknown-budget-" +
+        Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "unverified", Origin = "https://github.com/example/repo" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 1000 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
+            Mode = JobExecutionModes.Remote, ExpectedPaths = ["src/a.cs"] };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        var settings = new FactorySettings { AllowPush = true };
+        var claim = WorkerProtocol.Claim(store, settings, "worker-01");
+        Assert(claim is not null);
+        var claimed = claim!.Job;
+        var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id,
+            GoalId = goal.Id, Attempt = claimed.Attempt, Mode = JobExecutionModes.Remote,
+            State = JobStates.PrReady, HeadSha = new string('a', 40),
+            Branch = $"factory/{job.Id:N}", PrUrl = "https://github.com/example/repo/pull/42",
+            TokensIn = 100, TokensOut = 20 };
+        var report = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = finished,
+            TokensIn = 100, TokensOut = 20, UsageComplete = false,
+            ExecutionGeneration = claimed.ExecutionGeneration, LeaseToken = claimed.LeaseToken };
+        Assert(await WorkerProtocol.CompleteAsync(store, report,
+            new FixedWorkerVerifier(new VerifiedWorkerResult("{\"verifiedBy\":\"test\"}"))));
+        var result = store.Job(job.Id);
+        Assert(result.State == JobStates.Blocked && result.Stage == "remote_verification_failed");
+        var held = store.Read().BudgetReservations.Single();
+        Assert(held.State == GoalBudgetLedger.Held && held.Consumed == 120 &&
+            GoalBudgetLedger.Available(store.Read(), goal.Id) == 0);
+        Assert(!await WorkerProtocol.CompleteAsync(store, report,
+            new FixedWorkerVerifier(new VerifiedWorkerResult("{}"))),
+            "Replayed completion settled a stale reservation");
+
+        MissionControlManager.ControlJob(store, job.Id,
+            new ControlInput { Action = "retry", Reviewed = true });
+        Assert(GoalBudgetLedger.Allocation(store.Read(), store.Job(job.Id), 1000) == 0,
+            "Job retried before uncertain budget was reconciled");
+        GoalBudgetLedger.Reconcile(store, goal.Id, held.Id, 100, 20, true,
+            "Verified final provider usage record");
+        Assert(GoalBudgetLedger.Allocation(store.Read(), store.Job(job.Id), 1000) == 880);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 var passed = results.Count(x => x.Passed);
 Console.WriteLine($"{passed}/{results.Count} passed");
 return passed == results.Count ? 0 : 1;

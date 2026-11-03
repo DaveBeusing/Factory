@@ -30,6 +30,28 @@ void GrantRemoteWorker(StateStore store, string workerId, params Guid[] projectI
     });
 }
 
+Test("Mission Control embeds operational recovery and budget views", () =>
+{
+    string Resource(string resource)
+    {
+        using var stream = typeof(DashboardHost).Assembly.GetManifestResourceStream(resource)
+            ?? throw new Exception("Missing embedded UI asset " + resource);
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd();
+    }
+    var html = Resource("Factory.Ui.Index");
+    var script = Resource("Factory.Ui.Script");
+    var style = Resource("Factory.Ui.Style");
+    Assert(html.Contains("data-view=\"recovery\"", StringComparison.Ordinal));
+    Assert(script.Contains("renderRecovery()", StringComparison.Ordinal));
+    Assert(script.Contains("renderGoalBudget(goalId)", StringComparison.Ordinal));
+    Assert(script.Contains("goals/'+goalId+'/budget", StringComparison.Ordinal));
+    Assert(script.Contains("budget/reconcile", StringComparison.Ordinal));
+    Assert(script.Contains("jobInspectorDetails(j,kv)", StringComparison.Ordinal));
+    Assert(style.Contains(".operational-pulse", StringComparison.Ordinal));
+    Assert(style.Contains(".budget-breakdown", StringComparison.Ordinal));
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {

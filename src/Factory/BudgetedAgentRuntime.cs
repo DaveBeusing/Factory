@@ -10,7 +10,8 @@ public sealed class TokenBudgetExceededException(string message) : InvalidOperat
 public sealed record GoalBudgetExtensionPolicy(int IncrementTokens, int ThresholdTokens, int MaxReservationTokens);
 
 public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, Guid jobId,
-    ExecutionFence? fence = null, GoalBudgetExtensionPolicy? extensionPolicy = null) : IAgentRuntime
+    ExecutionFence? fence = null, GoalBudgetExtensionPolicy? extensionPolicy = null,
+    Func<CancellationToken, Task>? controllerExtension = null, int controllerThresholdTokens = 1024) : IAgentRuntime
 {
     public const long MinimumTurnAllowance = 256;
     private readonly SemaphoreSlim _turnLock = new(1, 1);
@@ -22,6 +23,17 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
         await _turnLock.WaitAsync(cancellation);
         try
         {
+            // Remote workers may synchronize a larger local mirror only after receiving
+            // an authenticated controller grant. A missing or failed grant does not
+            // authorize the worker to lift its own reservation.
+            if (controllerExtension is not null)
+            {
+                var snapshot = store.Read();
+                var current = snapshot.Jobs.Single(j => j.Id == jobId);
+                if (current.GoalId.HasValue &&
+                    GoalBudgetLedger.Remaining(snapshot, current) <= controllerThresholdTokens)
+                    await controllerExtension(cancellation);
+            }
             var remaining = store.Change(state =>
             {
                 var job = state.Jobs.Single(j => j.Id == jobId);

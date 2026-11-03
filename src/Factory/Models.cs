@@ -24,6 +24,8 @@ public sealed class FactoryState
     public List<EvaluationResult> Evaluations { get; set; } = [];
     public List<ReleaseInfo> Releases { get; set; } = [];
     public List<WorkerInfo> Workers { get; set; } = [];
+    public List<WorkerProjectGrant> WorkerProjectGrants { get; set; } = [];
+    public List<WorkerCapabilityProof> WorkerCapabilityProofs { get; set; } = [];
     public bool Paused { get; set; }
 }
 
@@ -37,6 +39,8 @@ public sealed class ProjectInfo
     public int MaxParallel { get; set; } = 2;
     public string Status { get; set; } = "active";
     public List<CheckCommand> Checks { get; set; } = [];
+    // Additional execution requirements are controller-owned, never supplied by a worker.
+    public List<string> RequiredExecutionCapabilities { get; set; } = [];
     public List<string> ProtectedPaths { get; set; } = [".github/workflows/", ".factory/", ".agents/", "factory/"];
 }
 
@@ -65,6 +69,7 @@ public sealed class FactoryJob
     public int MaxRounds { get; set; } = 3;
     public List<Guid> DependsOn { get; set; } = [];
     public List<string> ExpectedPaths { get; set; } = [];
+    public List<string> RequiredExecutionCapabilities { get; set; } = [];
     public string Branch { get; set; } = "";
     public string Worktree { get; set; } = "";
     public string PrUrl { get; set; } = "";
@@ -180,6 +185,24 @@ public sealed class WorkerInfo
     public string Platform { get; set; } = "";
     public bool Enabled { get; set; } = true;
     public bool Draining { get; set; }
+}
+
+// Worker identity is deliberately separate from the controller-managed authorization records.
+public sealed class WorkerProjectGrant
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string WorkerId { get; set; } = "";
+    public Guid ProjectId { get; set; }
+}
+
+public sealed class WorkerCapabilityProof
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public string WorkerId { get; set; } = "";
+    public string Capability { get; set; } = "";
+    // Evidence must be assessed and recorded by the controller administrator.
+    public string Evidence { get; set; } = "";
+    public DateTimeOffset VerifiedAt { get; set; }
 }
 
 public sealed class FactorySettings

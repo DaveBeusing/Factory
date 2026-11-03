@@ -49,6 +49,10 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     Assert(script.Contains("budget/reconcile", StringComparison.Ordinal));
     Assert(script.Contains("jobInspectorDetails(j,kv)", StringComparison.Ordinal));
     Assert(script.Contains("Per-job reported usage", StringComparison.Ordinal));
+    Assert(script.Contains("Controller-authorized extension history", StringComparison.Ordinal));
+    Assert(script.Contains("goalExtensionIncrementTokens", StringComparison.Ordinal));
+    Assert(script.Contains("maxJobReservationTokens", StringComparison.Ordinal));
+    Assert(script.Contains("Dedicated extension history is unavailable", StringComparison.Ordinal));
     Assert(script.Contains("Registered worker connectivity", StringComparison.Ordinal));
     Assert(script.Contains("not measured scheduling latency", StringComparison.Ordinal));
     Assert(style.Contains(".operational-pulse", StringComparison.Ordinal));

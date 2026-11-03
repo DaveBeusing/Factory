@@ -1300,6 +1300,16 @@ Test("Three concurrent goal claims never oversubscribe dynamic extensions", () =
             "Concurrent extensions oversubscribed the goal");
         Assert(snapshot.BudgetReservations.Count(r => r.State == GoalBudgetLedger.Active) == 3);
         Assert(snapshot.Events.Count(e => e.Type == "budget_extended") == 1);
+        using (var details = System.Text.Json.JsonDocument.Parse(
+            Json.Stringify(GoalBudgetLedger.Summary(snapshot, goal.Id))))
+        {
+            var budget = details.RootElement;
+            Assert(budget.GetProperty("activeOutstanding").GetInt64() == 13000);
+            Assert(budget.GetProperty("heldOutstanding").GetInt64() == 0);
+            Assert(!budget.GetProperty("requiresReconciliation").GetBoolean());
+            Assert(budget.GetProperty("jobs").GetArrayLength() == 3);
+            Assert(budget.GetProperty("extensions").GetArrayLength() == 1);
+        }
         var winner = snapshot.Jobs.Single(j => snapshot.BudgetReservations.Any(r =>
             r.JobId == j.Id && r.Reserved > 4096));
         store.Change(s =>

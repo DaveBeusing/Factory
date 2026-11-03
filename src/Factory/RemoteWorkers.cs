@@ -200,9 +200,14 @@ public static class WorkerProtocol
             }
             else
             {
-                j.State = JobStates.Blocked; j.Stage = "remote_verification_failed";
-                j.Error = failure;
-                s.Events.Add(new FactoryEvent { JobId = j.Id, Type = "remote_rejected", Message = failure });
+                var scopeBlocked = req.Job is { State: JobStates.Blocked, Stage: "scope" } candidate &&
+                    candidate.Id == j.Id && candidate.ProjectId == j.ProjectId &&
+                    candidate.Attempt == j.Attempt && candidate.Mode == JobExecutionModes.Remote;
+                j.State = JobStates.Blocked;
+                j.Stage = scopeBlocked ? "scope" : "remote_verification_failed";
+                j.Error = scopeBlocked ? req.Job!.Error : failure;
+                s.Events.Add(new FactoryEvent { JobId = j.Id,
+                    Type = scopeBlocked ? "scope_violation" : "remote_rejected", Message = j.Error });
             }
             j.LeaseOwner = ""; j.LeaseUntil = null; j.UpdatedAt = DateTimeOffset.UtcNow;
             j.FinishedAt = DateTimeOffset.UtcNow;

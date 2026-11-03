@@ -7,8 +7,10 @@ public sealed class TokenBudgetExceededException(string message) : InvalidOperat
 /// Transactional debits and execution fencing prevent concurrent jobs from
 /// spending the same available budget. Turns of one job remain serialized.
 /// </summary>
+public sealed record GoalBudgetExtensionPolicy(int IncrementTokens, int ThresholdTokens, int MaxReservationTokens);
+
 public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, Guid jobId,
-    ExecutionFence? fence = null) : IAgentRuntime
+    ExecutionFence? fence = null, GoalBudgetExtensionPolicy? extensionPolicy = null) : IAgentRuntime
 {
     public const long MinimumTurnAllowance = 256;
     private readonly SemaphoreSlim _turnLock = new(1, 1);
@@ -30,6 +32,10 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 if (job.GoalId is { } goalId &&
                     state.Goals.Single(g => g.Id == goalId).State != "active")
                     throw new TokenBudgetExceededException("Goal is not active");
+                if (extensionPolicy is not null && job.GoalId.HasValue &&
+                    GoalBudgetLedger.Remaining(state, job) <= extensionPolicy.ThresholdTokens)
+                    GoalBudgetLedger.ExtendLocal(state, job, extensionPolicy.IncrementTokens,
+                        extensionPolicy.MaxReservationTokens);
                 return GoalBudgetLedger.BeginTurn(state, job);
             });
 
@@ -50,9 +56,17 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 {
                     var job = state.Jobs.Single(j => j.Id == jobId);
                     if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
-                    return GoalBudgetLedger.Record(state, job,
+                    var balance = GoalBudgetLedger.Record(state, job,
                         checked(job.TokensIn + inputDelta),
                         checked(job.TokensOut + outputDelta));
+                    if (extensionPolicy is not null && job.GoalId.HasValue &&
+                        balance >= 0 && balance <= extensionPolicy.ThresholdTokens)
+                    {
+                        GoalBudgetLedger.ExtendLocal(state, job, extensionPolicy.IncrementTokens,
+                            extensionPolicy.MaxReservationTokens);
+                        balance = GoalBudgetLedger.Remaining(state, job);
+                    }
+                    return balance;
                 });
 
                 recordedIn = usage.InputTokens;
@@ -60,8 +74,8 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 sawUsage = true;
                 onUsage?.Invoke(usage);
 
-                if (remaining != long.MaxValue &&
-                    (usage.Total >= remaining || currentRemaining <= 0))
+                // The authorized reservation may have been extended during this usage debit.
+                if (remaining != long.MaxValue && currentRemaining <= 0)
                 {
                     budgetReached = true;
                     scope.Cancel();

@@ -48,6 +48,9 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     Assert(script.Contains("goals/'+goalId+'/budget", StringComparison.Ordinal));
     Assert(script.Contains("budget/reconcile", StringComparison.Ordinal));
     Assert(script.Contains("jobInspectorDetails(j,kv)", StringComparison.Ordinal));
+    Assert(script.Contains("Per-job reported usage", StringComparison.Ordinal));
+    Assert(script.Contains("Registered worker connectivity", StringComparison.Ordinal));
+    Assert(script.Contains("not measured scheduling latency", StringComparison.Ordinal));
     Assert(style.Contains(".operational-pulse", StringComparison.Ordinal));
     Assert(style.Contains(".budget-breakdown", StringComparison.Ordinal));
 });

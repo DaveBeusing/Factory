@@ -1195,6 +1195,79 @@ Test("Relational state supports atomic concurrent writes", () =>
 });
 
 
+Test("Remote budget grants are controller-authorized, fenced and idempotent", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-remote-budget-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote-budget", Origin = "https://example.invalid/repo" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 13000 };
+        var jobs = Enumerable.Range(0, 3).Select(_ => new FactoryJob
+            { ProjectId = project.Id, GoalId = goal.Id, Mode = JobExecutionModes.Remote }).ToArray();
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.AddRange(jobs);
+        });
+        var settings = new FactorySettings
+        {
+            GoalReservationTokens = 4096, GoalExtensionIncrementTokens = 4096,
+            MaxJobReservationTokens = 8192
+        };
+        var fences = new Dictionary<Guid, ExecutionFence>();
+        foreach (var job in jobs)
+        {
+            var worker = "remote-" + job.Id.ToString("N")[..8];
+            MissionControlManager.RegisterWorker(store,
+                new WorkerInput { Id = worker, Platform = "test" });
+            GrantRemoteWorker(store, worker, project.Id);
+            fences.Add(job.Id, store.Change(s => JobRecovery.Assign(
+                s.Jobs.Single(j => j.Id == job.Id), "remote:" + worker, 120,
+                local: false, state: s, reservationTokens: 4096)));
+        }
+
+        WorkerBudgetExtensionRequest Request(FactoryJob job, Guid id)
+        {
+            var fence = fences[job.Id];
+            return new WorkerBudgetExtensionRequest
+            {
+                WorkerId = fence.Owner["remote:".Length..],
+                JobId = job.Id, ExecutionGeneration = fence.Generation,
+                LeaseToken = fence.Token, RequestId = id, RequestedTokens = 4096
+            };
+        }
+        var requests = jobs.Select(job => Request(job, Guid.NewGuid())).ToArray();
+        var grants = requests.Select(req => Task.Run(() =>
+            WorkerProtocol.ExtendBudget(new StateStore(home), settings, req))).ToArray();
+        Task.WhenAll(grants).GetAwaiter().GetResult();
+        Assert(grants.All(task => task.Result is not null));
+        Assert(grants.Sum(task => task.Result!.Granted) == 712,
+            "Concurrent remote extensions oversubscribed the goal");
+        var snapshot = store.Read();
+        Assert(GoalBudgetLedger.Liability(snapshot, goal.Id) == 13000);
+        Assert(snapshot.BudgetExtensions.Count == 3);
+        Assert(snapshot.BudgetExtensions.Sum(e => e.Granted) == 712);
+        var repeated = WorkerProtocol.ExtendBudget(store, settings, requests[0]);
+        Assert(repeated is not null && repeated.Granted == grants[0].Result!.Granted);
+        Assert(store.Read().BudgetExtensions.Count == 3,
+            "Repeated request allocated more budget or duplicate history");
+
+        var stale = Request(jobs[0], Guid.NewGuid());
+        stale.ExecutionGeneration--;
+        Assert(WorkerProtocol.ExtendBudget(store, settings, stale) is null);
+        var spoofed = Request(jobs[0], Guid.NewGuid());
+        spoofed.WorkerId = "unknown-worker";
+        Assert(WorkerProtocol.ExtendBudget(store, settings, spoofed) is null);
+        store.Change(s => s.Jobs.Single(j => j.Id == jobs[0].Id).LeaseUntil =
+            DateTimeOffset.UtcNow.AddSeconds(-1));
+        Assert(WorkerProtocol.ExtendBudget(store, settings, requests[0]) is null,
+            "Expired remote lease replayed a prior grant");
+        Assert(!WorkerAuthentication.IsWorkerEndpoint("GET", "/api/worker/budget/extend"));
+        Assert(WorkerAuthentication.IsWorkerEndpoint("POST", "/api/worker/budget/extend"));
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Schema 5 budget state upgrades without data loss", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-budget-schema-" + Guid.NewGuid().ToString("N"));

@@ -286,6 +286,49 @@ Test("Git scope scanner includes committed, staged, unstaged, renamed and untrac
     finally { try { Directory.Delete(root, true); } catch { } }
 });
 
+await TestAsync("Remote scope block reaches the controller as amendable scope", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-scope-remote-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote", Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote,
+            ExpectedPaths = ["src/allowed.cs"] };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        Assert(claim is not null);
+        var reported = new FactoryJob
+        {
+            Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
+            Mode = JobExecutionModes.Remote, State = JobStates.Blocked, Stage = "scope",
+            Error = "Contract amendment required for src/unexpected.cs"
+        };
+        Assert(await WorkerProtocol.CompleteAsync(store, new WorkerStatus
+        {
+            WorkerId = "worker-01", JobId = job.Id, Job = reported,
+            Error = reported.Error
+        }, new RefusingWorkerVerifier()));
+        var blocked = store.Job(job.Id);
+        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "scope" &&
+            blocked.Error.Contains("src/unexpected.cs", StringComparison.Ordinal),
+            "Remote scope violation was not preserved for review");
+        Assert(store.Read().Events.Any(e => e.JobId == job.Id && e.Type == "scope_violation"));
+        MissionControlManager.AmendScope(store, job.Id, new ScopeAmendmentInput
+        {
+            ExpectedPaths = ["src/allowed.cs", "src/unexpected.cs"],
+            Reason = "Remote worktree inspected and scope expansion explicitly approved",
+            Reviewed = true
+        });
+        Assert(store.Job(job.Id).Stage == "scope_amended");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Controller PR file verification includes renamed source and destination", () =>
 {
     var changed = GitHubWorkerResultVerifier.ParsePullFilePaths(

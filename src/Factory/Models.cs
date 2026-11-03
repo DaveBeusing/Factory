@@ -208,8 +208,12 @@ public sealed class WorkerCapabilityProof
 public sealed class FactorySettings
 {
     public int MaxParallel { get; set; } = 3;
-    // Maximum per-job authorization. Reservations are atomic and never exceed free goal capacity.
+    // Initial per-job reservation; total goal capacity remains authoritative.
     public int GoalReservationTokens { get; set; } = GoalBudgetLedger.DefaultReservationTokens;
+    // Extensions are controller-local only until remote authorization is implemented.
+    public int GoalExtensionIncrementTokens { get; set; } = 4096;
+    public int GoalExtensionThresholdTokens { get; set; } = 1024;
+    public int MaxJobReservationTokens { get; set; } = 65536;
     public int MaxAgentSessions { get; set; } = 6;
     public int LeaseSeconds { get; set; } = 120;
     public int MaxReviewRounds { get; set; } = 3;

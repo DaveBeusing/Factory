@@ -25,14 +25,17 @@ public static class DependencyGraph
         if (a.ProjectId != b.ProjectId) return false;
         // Unknown scope is conservatively treated as potentially overlapping.
         if (a.ExpectedPaths.Count == 0 || b.ExpectedPaths.Count == 0) return true;
-        foreach (var x in a.ExpectedPaths)
-        foreach (var y in b.ExpectedPaths)
+        try
         {
-            var left = x.Replace('\\', '/').TrimEnd('/');
-           var right = y.Replace('\\', '/').TrimEnd('/');
-           if (left.Equals(right, StringComparison.OrdinalIgnoreCase) ||
-                left.StartsWith(right + "/", StringComparison.OrdinalIgnoreCase) ||
-                right.StartsWith(left + "/", StringComparison.OrdinalIgnoreCase)) return true;
+            foreach (var x in a.ExpectedPaths)
+            foreach (var y in b.ExpectedPaths)
+                if (WorkPackageScope.Includes(x, y) || WorkPackageScope.Includes(y, x))
+                    return true;
+        }
+        catch (ScopeViolationException)
+        {
+            // Invalid contracts cannot safely be scheduled in parallel.
+            return true;
         }
         return false;
     }

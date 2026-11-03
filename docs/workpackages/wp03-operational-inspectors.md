@@ -15,6 +15,7 @@ Improve the existing embedded .NET-hosted Mission Control without Node.js or fro
 - A Recovery navigation page lists blocked, failed, paused, stopped and held-budget jobs and identifies uncertain Git stages, held token liabilities and potentially live leases
 - Operational Intelligence on Overview shows observed queue age, dependency bottlenecks, review/integration states and explicitly budget-blocked work
 - Detailed job inspection shows owner/heartbeat, execution generation and lease status **without lease secrets**, dependencies, scopes, timestamps, checkpoint, budget liabilities and safe-next-step guidance
+- Authenticated `GET /api/jobs/{id}/quality` reads only the job's own evidence directory, verifies the recorded job and commit identity, and returns check exit codes and review verdicts without raw logs; missing, stale and inconsistent evidence is not treated as a successful gate
 - Goal budget inspector obtains authoritative values through `GET /api/goals/{id}/budget`, separates consumption, active/held liabilities and unreserved capacity, and shows reservation rows, per-job usage, persisted budget events, and optional durable controller grant history
 - Dynamic reservation settings (initial allocation, grant increment, low-water threshold, per-job maximum) are editable only when the authenticated settings API advertises support; older controllers do not expose unsupported controls
 - Explicit reviewed reconciliation invokes the existing admin-only `POST /api/goals/{id}/budget/reconcile` with double confirmation and server-side validation
@@ -28,13 +29,13 @@ All controller mutations are authenticated and validated by the existing server.
 
 - End-to-end remote extension history verification after WP-01 integration (the UI now renders the optional ledger response with a compatibility fallback)
 - Dedicated budget-event ledger beyond the existing bounded event list
-- Typed server-side detailed quality/evidence query endpoints
+- Extended structured quality/evidence detail (safe summaries are delivered, but complete drill-down and historical check comparisons are deferred)
 - Full permissions/roles, worker utilization, scenario-driven recovery actions and measured queue throughput
 - Automated browser interaction and accessibility audits
 
 ## Verification
 
-Run the existing .NET 10 build/test suite for regression coverage, then perform browser checks at desktop and narrow viewports: navigation, job/goal selection, budget request/loading/errors, reconciliation form confirmation, stale lease presentation, live event updates, keyboard navigation, and permission denial. **None are marked passed until executed**.
+Run the existing .NET 10 build/test suite for regression coverage, including the job-evidence identity/path traversal denial test, then perform browser checks at desktop and narrow viewports: navigation, job/goal selection, budget request/loading/errors, reconciliation form confirmation, stale lease presentation, live event updates, keyboard navigation, and permission denial. **None are marked passed until executed**.
 
 ## Dependency and integration
 

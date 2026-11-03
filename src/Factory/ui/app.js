@@ -264,6 +264,15 @@ async function renderGoalBudget(goalId){
   }).join('');
   const jobs=new Set(state.jobs.filter(j=>j.goalId===goalId).map(j=>j.id));
   const events=state.events.filter(e=>jobs.has(e.jobId)&&['budget_reserved','budget_extended','budget_held','budget_released','budget_reconciled','budget_overrun'].includes(e.type));
+  const durableExtensions=Array.isArray(budget.extensions)?budget.extensions:null;
+  const grantRows=(durableExtensions||[]).map(e=>{
+   const job=state.jobs.find(j=>j.id===e.jobId);
+   const owner=e.workerId||'Controller';
+   return `<tr><td><strong>${esc(shorten(job?.title||e.jobId||'Unknown',40))}</strong>
+    <small>Generation ${esc(e.executionGeneration)}</small></td>
+    <td>${esc(dateTime(e.at))}</td><td>${esc(owner)}</td>
+    <td>${nf(e.granted)}</td><td>${nf(e.authorizedTotal)}</td></tr>`;
+  }).join('');
   // Extended job accounting is optional until the budget API change is integrated.
   const accountedJobs=Array.isArray(budget.jobs)?budget.jobs:state.jobs.filter(j=>j.goalId===goalId).map(j=>({
    id:j.id,state:j.state,stage:j.stage,worker:j.leaseOwner||null,
@@ -287,8 +296,12 @@ async function renderGoalBudget(goalId){
    <h3>Per-job reported usage</h3>
    ${usageRows?table(['Job','Current owner','Input','Output','Total','Final usage'],usageRows):'<p class="subtext">No linked job usage reported.</p>'}
    <p class="subtext">Owner is the current lease assignment, not a complete historical worker attribution. Unconfirmed final usage is not a provider-account allowance.</p>
+   <h3>Controller-authorized extension history</h3>
+   ${durableExtensions===null?'<p class="subtext">Dedicated extension history is unavailable on this controller version.</p>':
+    grantRows?table(['Job','Granted at','Controller identity','Additional tokens','New reservation'],grantRows):
+    '<p class="subtext">No extension requests have been recorded in the durable ledger.</p>'}
    <h3>Budget activity</h3>${eventItems(events,20)}
-   <p class="subtext">Operational events are subject to controller retention limits; absence of an older extension event does not prove it never occurred.</p>`;
+   <p class="subtext">Operational events are subject to controller retention limits. The durable extension ledger, when supported, begins at its migration date; older events cannot be reconstructed automatically.</p>`;
  }catch(error){
   if(inspectorKey==='goal:'+goalId&&$('inspector-goal-budget'))
    $('inspector-goal-budget').innerHTML=`<p class="subtext" role="alert">Budget details unavailable: ${esc(error.message)}</p><button class="button button-muted" data-act="budget-refresh" data-id="${goalId}">Retry</button>`;

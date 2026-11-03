@@ -17,6 +17,7 @@ A controller-local agent execution may extend its active goal reservation using 
 - Zero over-allocation across concurrent same-goal jobs
 - Usage-driven extension within a turn and before a subsequent turn
 - Durable `budget_extended` operational events identifying reservation, generation, grant, and new authorized total
+- Dedicated `goal_budget_extensions` relational records that are not removed by operational event retention
 - Fail-closed exhaustion and unchanged held-usage reconciliation behavior
 - Validated settings API fields and concurrency/runtime regression tests
 - Goal-budget API summary of active/held liabilities, reconciliation needs, per-job observed usage and retained extension events
@@ -25,9 +26,9 @@ A controller-local agent execution may extend its active goal reservation using 
 
 - Remote-worker controller extension protocol, idempotency keys, delegated-grant acknowledgment and mirror synchronization
 - Unbounded historical reporting beyond existing event-retention policy
-- A distinct `goal_budget_extensions` relational audit table
+- Controller-authorized remote extension requests and idempotent remote grant acknowledgment
 - UI visualization of extensions and provider account allowance controls
-- Guaranteed immutable extension history beyond the bounded operational-event retention
+- Remote grant request history (no remote authorization contract in this increment)
 - Independent automated security and failure-injection review
 
 ## Settings
@@ -43,7 +44,7 @@ No setting is an estimate of provider account quota. Actual provider usage is se
 
 ## Failure and recovery
 
-The extension, reservation total and operational event are committed in one SQLite write transaction. A stale generation or expired claim cannot extend. If the provider's final usage is missing, prior reconciliation rules retain the unknown liability. Overrun observations remain recorded before cancellation; extensions do not conceal a negative balance. No database migration is introduced.
+The extension, reservation total and operational event are committed in one SQLite write transaction. A stale generation or expired claim cannot extend. If the provider's final usage is missing, prior reconciliation rules retain the unknown liability. Overrun observations remain recorded before cancellation; extensions do not conceal a negative balance. A transactional schema-5-to-6 migration adds a durable extension table without rewriting existing reservations, and the existing schema-4-to-5 upgrade continues forward to schema 6. Back up `.factory/factory.sqlite3` together with its WAL state using a consistent SQLite backup or a stopped Factory process before upgrading. Reverting application binaries without restoring a matching database backup is not supported.
 
 ## Verification
 

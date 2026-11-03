@@ -32,6 +32,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
 
         var repository = GitHubRepository(project.Origin);
         var number = PullNumber(finished.PrUrl, repository);
+        WorkPackageScope.ValidateDeclaration(job.ExpectedPaths);
         var evidence = ValidateEvidence(project, job, status);
         using var pr = await PullAsync(repository, number, ct);
         ValidatePull(pr, repository, project.BaseBranch, expectedBranch, finished.HeadSha);
@@ -43,6 +44,11 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             if (!checks.Contains(check.Name))
                 throw new InvalidOperationException("Project check is not a successful required GitHub check: " + check.Name);
         }
+
+        // Controller-side enforcement uses GitHub PR files, not worker-reported paths.
+        var changed = await PullFilePathsAsync(repository, number, ct);
+        WorkPackageScope.Enforce(job.ExpectedPaths, changed);
+        GitOperations.EnforcePaths(changed, project.ProtectedPaths);
 
         // Prevent accepting a PR whose head moved while the checks were inspected.
         using var latest = await PullAsync(repository, number, ct);
@@ -56,6 +62,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             commit = finished.HeadSha,
             verifiedAt = DateTimeOffset.UtcNow,
             requiredChecks = checks.OrderBy(n => n, StringComparer.Ordinal).ToArray(),
+            verifiedChangedPaths = changed,
             // Worker data remains explicitly identified as worker-reported evidence.
             workerEvidence = evidence
         }));
@@ -160,6 +167,51 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             !string.Equals(pr.GetProperty("head").GetProperty("sha").GetString(),
                 expectedSha, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("GitHub PR repository, branch, base or head commit differs from the claim");
+    }
+
+    public static IReadOnlyList<string> ParsePullFilePaths(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("Incomplete GitHub PR file listing");
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var fileCount = 0;
+        foreach (var page in document.RootElement.EnumerateArray())
+        {
+            if (page.ValueKind != JsonValueKind.Array)
+                throw new InvalidOperationException("Incomplete GitHub PR file page");
+            foreach (var file in page.EnumerateArray())
+            {
+                fileCount++;
+                if (fileCount >= 3000)
+                    throw new InvalidOperationException("GitHub PR file limit reached; scope cannot be verified completely");
+                var changed = file.GetProperty("filename").GetString();
+                if (string.IsNullOrWhiteSpace(changed))
+                    throw new InvalidOperationException("GitHub PR file path missing");
+                paths.Add(changed);
+                if (file.TryGetProperty("previous_filename", out var previous) &&
+                    previous.ValueKind == JsonValueKind.String)
+                {
+                    var prior = previous.GetString();
+                    if (!string.IsNullOrWhiteSpace(prior)) paths.Add(prior);
+                }
+            }
+        }
+        if (fileCount == 0)
+            throw new InvalidOperationException("No PR file changes could be verified");
+        return paths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    private static async Task<IReadOnlyList<string>> PullFilePathsAsync(
+        string repository, int number, CancellationToken ct)
+    {
+        var response = await Commands.RunAsync("gh",
+            ["api", "--paginate", "--slurp",
+             $"repos/{repository}/pulls/{number}/files?per_page=100"],
+            Environment.CurrentDirectory, 60, cancellationToken: ct);
+        if (!response.Ok)
+            throw new InvalidOperationException("Unable to verify changed PR files");
+        return ParsePullFilePaths(response.Output);
     }
 
     private static async Task<HashSet<string>> RequiredChecksAsync(string repository, int number, CancellationToken ct)

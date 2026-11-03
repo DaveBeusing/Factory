@@ -57,6 +57,9 @@ public static class GoalBudgetLedger
         if (job.GoalId is not { } id) return 0;
         var goal = state.Goals.FirstOrDefault(g => g.Id == id);
         if (goal?.State != "active") return 0;
+        // An unresolved previous attempt cannot reuse the same job's allowance.
+        if (state.BudgetReservations.Any(r => r.JobId == job.Id && r.State == Held))
+            return 0;
         if (desired < BudgetedAgentRuntime.MinimumTurnAllowance)
             throw new ArgumentOutOfRangeException(nameof(desired));
         var available = Available(state, id, job.Id);

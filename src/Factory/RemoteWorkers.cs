@@ -271,7 +271,8 @@ public static class RemoteWorker
                 TokensIn = claim.Job.TokensIn, TokensOut = claim.Job.TokensOut,
                 ExecutionGeneration = claim.Job.ExecutionGeneration,
                 LeaseToken = claim.Job.LeaseToken };
-           using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+           using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+           using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
            var heartbeat = Task.Run(async () =>
             {
                 while (!heartbeatCancel.IsCancellationRequested)
@@ -291,7 +292,17 @@ public static class RemoteWorker
                             report, heartbeatCancel.Token);
                         response.EnsureSuccessStatusCode();
                     }
-                    catch { /* lease expiry will block unsafe replay */ }
+                    catch (OperationCanceledException) when (heartbeatCancel.IsCancellationRequested)
+                    {
+                        break;
+                    }
+                    catch
+                    {
+                        // A rejected, missing or stale heartbeat revokes permission
+                        // to continue this worker's external execution.
+                        executionCancel.Cancel();
+                        break;
+                    }
                 }
             }, heartbeatCancel.Token);
            try
@@ -301,7 +312,7 @@ public static class RemoteWorker
                if (!Directory.Exists(Path.Combine(repoPath, ".git")))
                 {
                     var clone = await Commands.RunAsync("git", ["clone", "--branch", claim.Project.BaseBranch,
-                        "--single-branch", claim.Project.Origin, repoPath], jobDir, 300, cancellationToken: ct);
+                        "--single-branch", claim.Project.Origin, repoPath], jobDir, 300, cancellationToken: executionCancel.Token);
                    Commands.Require(clone, "git clone");
                }
                 claim.Project.Path = repoPath;
@@ -333,7 +344,7 @@ public static class RemoteWorker
                });
                claim.Settings.WorkspaceRoot = Path.Combine(jobDir, "worktrees");
                var engine = new FactoryEngine(localState, claim.Settings, executionMode: JobExecutionModes.Remote);
-               await engine.RunQueueAsync(ct);
+               await engine.RunQueueAsync(executionCancel.Token);
                report.Job = localState.Job(claim.Job.Id);
                report.TokensIn = report.Job.TokensIn;
                report.TokensOut = report.Job.TokensOut;

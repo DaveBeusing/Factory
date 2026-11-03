@@ -117,7 +117,18 @@ function renderOperationalPulse(){
  const reviews=state.jobs.filter(j=>j.state==='reviewing').length;
  const integration=state.jobs.filter(j=>['awaiting_approval','pr_ready','completed_local'].includes(j.state)).length;
  const constrained=state.jobs.filter(j=>j.stage==='budget'&&(j.state==='blocked'||JobStatesActiveUi.includes(j.state))).length;
- return `<div class="operational-pulse"><div class="pulse-stat"><small>Oldest queue wait</small><strong>${esc(oldest)}</strong><span>Observed since creation</span></div><div class="pulse-stat"><small>Dependency bottlenecks</small><strong>${waiting.length}</strong><span>Unintegrated predecessors</span></div><div class="pulse-stat"><small>Awaiting review / integration</small><strong>${reviews} / ${integration}</strong><span>Observed lifecycle states</span></div><div class="pulse-stat"><small>Budget-blocked</small><strong>${constrained}</strong><span>Explicit budget stage</span></div></div>`;
+ const active=state.jobs.filter(j=>JobStatesActiveUi.includes(j.state)).length;
+ const enabledWorkers=state.workers.filter(w=>w.enabled);
+ const connectedWorkers=enabledWorkers.filter(workerActive).length;
+ const retries=state.jobs.filter(j=>Number(j.attempt)>1).length;
+ return `<div class="operational-pulse">
+ <div class="pulse-stat"><small>Active / pending jobs</small><strong>${active} / ${queued.length}</strong><span>Observed lifecycle states</span></div>
+ <div class="pulse-stat"><small>Oldest queue wait</small><strong>${esc(oldest)}</strong><span>Elapsed since creation, not measured scheduling latency</span></div>
+ <div class="pulse-stat"><small>Dependency bottlenecks</small><strong>${waiting.length}</strong><span>Unintegrated predecessors</span></div>
+ <div class="pulse-stat"><small>Awaiting review / integration</small><strong>${reviews} / ${integration}</strong><span>Observed lifecycle states</span></div>
+ <div class="pulse-stat"><small>Budget-blocked</small><strong>${constrained}</strong><span>Explicit budget stage</span></div>
+ <div class="pulse-stat"><small>Registered worker connectivity</small><strong>${enabledWorkers.length?connectedWorkers+' / '+enabledWorkers.length:'Unavailable'}</strong><span>Heartbeat health; not total compute capacity</span></div>
+ <div class="pulse-stat"><small>Jobs with retry activity</small><strong>${retries}</strong><span>More than one execution attempt</span></div></div>`;
 }
 const JobStatesActiveUi=['preparing','building','gating','reviewing','reworking','awaiting_approval'];
 

@@ -1849,6 +1849,49 @@ await TestAsync("Unverified remote final usage holds budget until reviewed recon
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+await TestAsync("Remote reservation overrun fences worker and preserves actual usage", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-goal-overrun-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote", Origin = "https://example.invalid/repo" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 600 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
+            Mode = JobExecutionModes.Remote, ExpectedPaths = ["src/a.cs"] };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        var settings = new FactorySettings { AllowPush = true };
+        var claim = WorkerProtocol.Claim(store, settings, "worker-01");
+        Assert(claim is not null);
+        var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,
+            ExecutionGeneration = claim!.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,
+            TokensIn = 625, TokensOut = 25 };
+        Assert(!WorkerProtocol.Heartbeat(store, status, settings),
+            "Over-budget heartbeat should revoke the worker lease");
+        var current = store.Job(job.Id);
+        Assert(current.State == JobStates.Blocked && current.Stage == "reconcile");
+        Assert(current.TokensIn == 625 && current.TokensOut == 25);
+        var ledger = store.Read().BudgetReservations.Single();
+        Assert(ledger.Reserved == 600 && ledger.Consumed == 650 &&
+            ledger.State == GoalBudgetLedger.Held);
+        Assert(GoalBudgetLedger.Available(store.Read(), goal.Id) == 0);
+        Assert(!await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier()),
+            "Expired execution generation finalized despite revoked lease");
+        try
+        {
+            GoalBudgetLedger.Reconcile(store, goal.Id, ledger.Id, 625, 25, true,
+                "Usage exceeded the reserved allowance");
+            throw new Exception("Unbounded usage was silently forgiven");
+        }
+        catch (InvalidOperationException) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 var passed = results.Count(x => x.Passed);
 Console.WriteLine($"{passed}/{results.Count} passed");
 return passed == results.Count ? 0 : 1;

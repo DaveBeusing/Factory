@@ -23,6 +23,8 @@ public sealed class WorkerStatus
     public string Error { get; set; } = "";
     public long TokensIn { get; set; }
     public long TokensOut { get; set; }
+    public long ExecutionGeneration { get; set; }
+    public string LeaseToken { get; set; } = "";
 }
 
 public static class WorkerProtocol
@@ -40,15 +42,9 @@ public static class WorkerProtocol
     public static WorkerClaim? Claim(StateStore store, FactorySettings settings, string workerId)
     {
         if (!WorkerAuthentication.IsValidWorkerId(workerId)) return null;
+        JobRecovery.QuarantineExpired(store, JobExecutionModes.Remote);
         return store.Change(s =>
         {
-            foreach (var expired in s.Jobs.Where(j => j.Mode == "remote" &&
-                !string.IsNullOrEmpty(j.LeaseOwner) && j.LeaseUntil <= DateTimeOffset.UtcNow))
-            {
-                expired.State = JobStates.Blocked;
-               expired.Error = "Remote worker lease expired; inspect remote branch and PR before retry";
-               expired.LeaseOwner = ""; expired.LeaseUntil = null;
-           }
             if (s.Paused || !settings.AllowPush) return null;
            var registered = s.Workers.FirstOrDefault(w => w.Id == workerId);
            // Worker credentials can only be used with a registered, enabled identity.
@@ -74,12 +70,7 @@ public static class WorkerProtocol
                         TokenBudget = goal.TokenBudget - others, CreatedAt = goal.CreatedAt
                     };
                 }
-               job.State = JobStates.Preparing;
-               job.Stage = "remote_claimed";
-               job.LeaseOwner = "remote:" + workerId;
-               job.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(settings.LeaseSeconds);
-               job.Attempt++;
-               job.UpdatedAt = DateTimeOffset.UtcNow;
+               JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false);
                registered.Heartbeat = DateTimeOffset.UtcNow;
                s.Events.Add(new FactoryEvent { JobId = job.Id, Type = "remote_claim", Message = workerId });
                return new WorkerClaim
@@ -105,8 +96,9 @@ public static class WorkerProtocol
            if (worker != null) worker.Heartbeat = DateTimeOffset.UtcNow;
            if (req.JobId == Guid.Empty) return worker != null;
            var j = s.Jobs.FirstOrDefault(j => j.Id == req.JobId);
-           if (j == null || j.LeaseOwner != "remote:" + req.WorkerId ||
-                j.LeaseUntil <= DateTimeOffset.UtcNow) return false;
+           if (j == null || !JobRecovery.Matches(j,
+                new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
+                return false;
            if (req.TokensIn < 0 || req.TokensOut < 0) return false;
            j.TokensIn = Math.Max(j.TokensIn, req.TokensIn);
            j.TokensOut = Math.Max(j.TokensOut, req.TokensOut);
@@ -121,9 +113,8 @@ public static class WorkerProtocol
         var state = store.Read();
         var claimed = state.Jobs.FirstOrDefault(j => j.Id == req.JobId);
         if (claimed is null || claimed.Mode != JobExecutionModes.Remote ||
-            claimed.LeaseOwner != "remote:" + req.WorkerId ||
-            claimed.LeaseUntil <= DateTimeOffset.UtcNow ||
-            !JobStates.Active.Contains(claimed.State))
+            !JobRecovery.Matches(claimed,
+                new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
             return false;
         var project = state.Projects.Single(p => p.Id == claimed.ProjectId);
         var successReported = req.Job is { State: JobStates.PrReady };
@@ -170,8 +161,8 @@ public static class WorkerProtocol
             var j = s.Jobs.FirstOrDefault(x => x.Id == req.JobId);
             var currentProject = s.Projects.FirstOrDefault(p => p.Id == claimed.ProjectId);
             if (j is null || j.Mode != JobExecutionModes.Remote ||
-                j.LeaseOwner != "remote:" + req.WorkerId ||
-                j.LeaseUntil <= DateTimeOffset.UtcNow || !JobStates.Active.Contains(j.State) ||
+                !JobRecovery.Matches(j,
+                    new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)) ||
                 j.Attempt != claimed.Attempt || j.ProjectId != claimed.ProjectId ||
                 currentProject is null ||
                 // A project reconfiguration invalidates verification performed against an older policy.
@@ -209,7 +200,8 @@ public static class WorkerProtocol
                 s.Events.Add(new FactoryEvent { JobId = j.Id,
                     Type = scopeBlocked ? "scope_violation" : "remote_rejected", Message = j.Error });
             }
-            j.LeaseOwner = ""; j.LeaseUntil = null; j.UpdatedAt = DateTimeOffset.UtcNow;
+            j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null;
+            j.UpdatedAt = DateTimeOffset.UtcNow;
             j.FinishedAt = DateTimeOffset.UtcNow;
             s.Events.Add(new FactoryEvent { JobId = j.Id, Type = "remote_complete", Message = j.State });
             return true;
@@ -252,7 +244,9 @@ public static class RemoteWorker
            Directory.CreateDirectory(jobDir);
            var localState = new StateStore(Path.Combine(jobDir, "state"));
            var report = new WorkerStatus { WorkerId = workerId, JobId = claim.Job.Id,
-                TokensIn = claim.Job.TokensIn, TokensOut = claim.Job.TokensOut };
+                TokensIn = claim.Job.TokensIn, TokensOut = claim.Job.TokensOut,
+                ExecutionGeneration = claim.Job.ExecutionGeneration,
+                LeaseToken = claim.Job.LeaseToken };
            using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
            var heartbeat = Task.Run(async () =>
             {

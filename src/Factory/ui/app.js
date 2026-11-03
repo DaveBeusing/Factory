@@ -157,6 +157,43 @@ function planEditor(goalId){const g=state.goals.find(g=>g.id===goalId);if(!g)ret
 function renderPlanEditor(){if(!planDraft)return;const html=`<div class="card" style="margin-top:17px"><div class="card-head"><div><h2>Work packages</h2><p>Dependencies use zero-based package indexes; cycles are rejected by the server.</p></div><button class="button button-muted" data-act="package-add">${ico('plus')} Add package</button></div><div class="card-body"><div class="plan-packages">${planDraft.packages.length?planDraft.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(shorten(p.description,100))} · Priority ${p.priority} · ${esc(p.risk)} · Depends on ${esc(p.dependsOn.join(', ')||'none')}</small></div><div class="tiny-actions"><button class="tiny-button" data-act="package-edit" data-index="${i}">Edit</button><button class="tiny-button" data-act="package-remove" data-index="${i}">Remove</button></div></div>`).join(''):empty('route','No packages yet','Add work packages and dependencies before saving.')}</div><div class="head-actions" style="margin-top:20px;justify-content:flex-end"><button class="button button-muted" data-act="plan-close">Cancel</button><button class="button button-primary" data-act="plan-save">${ico('check')} Save plan</button></div></div></div>`;$('inspector-title').textContent='Plan Designer';$('inspector-body').innerHTML=`<p class="muted">${esc(gName(planGoal))}</p>${html}`;showInspector()}
 const gName=id=>state.goals.find(g=>g.id===id)?.objective||'';
 function packageForm(i){const p=planDraft.packages[i]||{title:'',description:'',risk:'medium',priority:50,files:[],dependsOn:[]};let html=field('title','Package title',p.title)+field('description','Description / acceptance criteria',p.description,'textarea')+`<div class="field-row">${field('risk','Risk',p.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}${field('priority','Priority',p.priority,'number')}</div>`+field('files','Expected file paths, one per line',p.files.join('\n'),'textarea')+field('dependsOn','Dependency indexes, comma-separated',p.dependsOn.join(','));openForm(i===planDraft.packages.length?'Add work package':'Edit work package','Keep packages independently executable where possible.',html,async f=>{const x=values(f);const item={title:x.title,description:x.description,risk:x.risk,priority:Number(x.priority),files:lines(x.files),dependsOn:x.dependsOn.split(',').map(x=>x.trim()).filter(Boolean).map(Number)};if(item.dependsOn.some(n=>!Number.isInteger(n)||n<0||n===i||n>=planDraft.packages.length))throw Error('Invalid dependency indexes');planDraft.packages[i]=item;renderPlanEditor()})}
+
+let inspectorKey=null;
+function jobInspectorDetails(j,kv){
+ const owner=j.leaseOwner||'Unassigned';
+ const workerId=owner.startsWith('remote:')?owner.slice(7):owner;
+ const worker=state.workers.find(w=>w.id===workerId);
+ const heartbeat=worker?(workerActive(worker)?'Connected, ':'Stale or offline, ')+relative(worker.heartbeat):'No registered heartbeat';
+ const dependencies=(j.dependsOn||[]).map(id=>{const p=state.jobs.find(x=>x.id===id);return p?`${shorten(p.title,55)}: ${p.integrated?'integrated':p.state}`:'Unresolved '+id}).join('; ')||'None';
+ const reservations=(state.budgetReservations||[]).filter(r=>r.jobId===j.id);
+ const current=reservations.find(r=>r.executionGeneration===j.executionGeneration&&r.state==='active');
+ const held=reservations.filter(r=>r.state==='held');
+ const risk=recoveryExplanation(j);
+ const active=JobStatesActiveUi.includes(j.state);
+ const leaseLive=active&&j.leaseUntil&&new Date(j.leaseUntil).getTime()>Date.now();
+ const next=risk.git?'Reconcile external Git effects before retry':risk.lease?'Current execution may still be active':held.length?'Reconcile held usage before a new claim':j.state==='queued'?'Wait for scheduling and integrated dependencies':active?'Monitor current execution':'Inspect the checkpoint and process before requeue';
+ return `<hr class="panel-divider"><h3>Execution identity and health</h3><div class="job-info-grid">
+ ${kv('Worker / owner',owner)}${kv('Worker heartbeat',heartbeat)}
+ ${kv('Execution generation',j.executionGeneration??'Unavailable')}
+ ${kv('Lease',j.leaseUntil?(leaseLive?'Live until ':'Inactive or expired at ')+dateTime(j.leaseUntil):'No active lease')}
+ ${kv('Started',dateTime(j.startedAt))}${kv('Updated',dateTime(j.updatedAt))}${kv('Finished',dateTime(j.finishedAt))}
+ </div><h3>Work package scope</h3><p class="subtext">${esc((j.expectedPaths||[]).join(', ')||'No declared paths')}</p>
+ <div class="job-info-grid">${kv('Dependencies',dependencies)}${kv('Requested state',j.requestedState||'None')}</div>
+ <h3>Budget and quality evidence</h3><div class="job-info-grid">
+ ${kv('Observed token use',(Number(j.tokensIn||0)+Number(j.tokensOut||0)).toLocaleString())}
+ ${kv('Active reservation',current?Number(current.reserved).toLocaleString()+' tokens':'None')}
+ ${kv('Held reservations',held.length)}${kv('Final provider usage',j.usageComplete?'Reported':'Not confirmed')}
+ ${kv('Evidence artifact',j.evidenceFile?'Path recorded':'Unavailable')}
+ </div>
+ <p class="subtext">Individual check and review verdicts are unavailable in the current job-state API; a recorded path does not prove they passed.</p>
+ <h3>Recovery assessment</h3><div class="recovery-assessment">
+ <strong>Next safe step</strong><p>${esc(next)}</p>
+ <p>Last durable checkpoint: ${esc(j.checkpointStage||'Unavailable')} · ${esc(j.checkpointCommit||'No commit recorded')} · ${esc(dateTime(j.checkpointAt))}</p>
+ <p>Git side effects: ${risk.git?'Possibly occurred; reconcile externally':'No uncertain Git stage reported; absence is not proof'}</p>
+ <p>Unsettled usage: ${risk.hold?'Held; controller reconciliation required':'No held reservation reported'}</p>
+ </div>`;
+}
+
 function showInspector(){inspector=true;$('inspector').classList.add('open');$('inspector').setAttribute('aria-hidden','false');$('inspector-backdrop').classList.add('open')}
 function closeInspector(){inspector=null;$('inspector').classList.remove('open');$('inspector').setAttribute('aria-hidden','true');$('inspector-backdrop').classList.remove('open')}
 function inspectorPanel(title,body){$('inspector-title').textContent=title;$('inspector-body').innerHTML=body;showInspector()}

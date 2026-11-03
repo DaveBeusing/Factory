@@ -672,6 +672,90 @@ public sealed class StateStore
     }
 
     /// <summary>
+    /// Debit a single fenced execution and its active goal reservation atomically.
+    /// Only the job and its current reservation are read/written; observed overrun
+    /// is persisted rather than hidden, and is returned as a negative balance.
+    /// The caller must interrupt/block an execution whose balance is exhausted.
+    /// </summary>
+    public long RecordFencedUsage(Guid jobId, ExecutionFence fence, long inputDelta,
+        long outputDelta, bool? usageComplete = null)
+    {
+        if (inputDelta < 0 || outputDelta < 0)
+            throw new ArgumentOutOfRangeException(nameof(inputDelta), "Token deltas must be nonnegative");
+        var now = DateTimeOffset.UtcNow;
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        long oldIn, oldOut;
+        Guid? goalId;
+        using (var select = Command(db, tx, """
+            SELECT tokens_in,tokens_out,goal_id FROM jobs
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+                AND lease_owner=$owner AND lease_until>$now
+                AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+            """, ("$id", jobId), ("$generation", fence.Generation),
+            ("$token", fence.Token), ("$owner", fence.Owner), ("$now", now)))
+        using (var reader = select.ExecuteReader())
+        {
+            if (!reader.Read())
+                throw new LostExecutionLeaseException("Execution lease expired or generation was fenced");
+            oldIn = reader.GetInt64(0);
+            oldOut = reader.GetInt64(1);
+            goalId = reader.IsDBNull(2) ? null : Guid.Parse(reader.GetString(2));
+        }
+
+        var newIn = checked(oldIn + inputDelta);
+        var newOut = checked(oldOut + outputDelta);
+        var remaining = long.MaxValue;
+        if (goalId is { } goal)
+        {
+            Guid reservationId;
+            long baseUsage, reserved, previousConsumed;
+            using (var select = Command(db, tx, """
+                SELECT id,base_usage,reserved,consumed FROM goal_budget_reservations
+                WHERE job_id=$job AND goal_id=$goal AND execution_generation=$generation
+                    AND lease_token=$token AND state='active';
+                """, ("$job", jobId), ("$goal", goal),
+                ("$generation", fence.Generation), ("$token", fence.Token)))
+            using (var reader = select.ExecuteReader())
+            {
+                if (!reader.Read())
+                    throw new TokenBudgetExceededException("No active fenced goal reservation");
+                reservationId = Guid.Parse(reader.GetString(0));
+                baseUsage = reader.GetInt64(1);
+                reserved = reader.GetInt64(2);
+                previousConsumed = reader.GetInt64(3);
+                if (reader.Read())
+                    throw new InvalidOperationException("Multiple active reservations for one execution");
+            }
+            var consumed = checked(newIn + newOut - baseUsage);
+            if (consumed < previousConsumed)
+                throw new InvalidOperationException("Goal reservation usage cannot regress");
+            Execute(db, tx, """
+                UPDATE goal_budget_reservations SET consumed=$consumed,updated_at=$now
+                WHERE id=$id AND state='active';
+                """, ("$consumed", consumed), ("$now", now), ("$id", reservationId));
+            remaining = reserved - consumed;
+        }
+
+        using (var update = Command(db, tx, """
+            UPDATE jobs SET tokens_in=$input,tokens_out=$output,
+                usage_complete=COALESCE($complete,usage_complete)
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+                AND lease_owner=$owner AND lease_until>$now
+                AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+            """, ("$input", newIn), ("$output", newOut),
+            ("$complete", usageComplete.HasValue ? (object)(usageComplete.Value ? 1 : 0) : null),
+            ("$id", jobId), ("$generation", fence.Generation),
+            ("$token", fence.Token), ("$owner", fence.Owner), ("$now", now)))
+        {
+            if (update.ExecuteNonQuery() != 1)
+                throw new LostExecutionLeaseException("Execution lease expired or generation was fenced");
+        }
+        tx.Commit();
+        return remaining;
+    }
+
+    /// <summary>
     /// Renew only the exact live execution lease. No snapshot is loaded, and a stale
     /// generation, token, owner, expired lease or terminal state cannot be renewed.
     /// </summary>

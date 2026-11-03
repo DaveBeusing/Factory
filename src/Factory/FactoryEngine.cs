@@ -217,8 +217,15 @@ public sealed class FactoryEngine
         var p = _store.Read().Projects.Single(x => x.Id == j.ProjectId);
         if (p.Checks.Count == 0) throw new InvalidOperationException("Project checks missing; configure gates before execution");
         WorkPackageScope.ValidateDeclaration(j.ExpectedPaths);
+        // Only the controller-local runner may allocate additional goal capacity.
+        // Remote workers must receive an explicit controller grant before their cap changes.
+        GoalBudgetExtensionPolicy? extensionPolicy = _executionMode == JobExecutionModes.Local
+            ? new(_settings.GoalExtensionIncrementTokens, _settings.GoalExtensionThresholdTokens,
+                _settings.MaxJobReservationTokens)
+            : null;
         var runtime = new BudgetedAgentRuntime(
-            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk), _store, id, fence);
+            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk),
+            _store, id, fence, extensionPolicy);
         var qualityEngine = new QualityEngine(runtime);
         var worktree = _git.Prepare(p, j);
         UpdateOwned(id, fence, x =>

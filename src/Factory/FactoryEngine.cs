@@ -113,57 +113,94 @@ public sealed class FactoryEngine
     public async Task RunClaimedAsync(Guid id, CancellationToken ct)
     {
         var claimed = _store.Job(id);
-        if (!JobExecutionModes.Matches(claimed, _executionMode) ||
-            claimed.LeaseOwner != _workerId || claimed.LeaseUntil <= DateTimeOffset.UtcNow ||
-            !JobStates.Active.Contains(claimed.State))
+        var fence = new ExecutionFence(claimed.ExecutionGeneration, claimed.LeaseToken, _workerId);
+        if (!JobExecutionModes.Matches(claimed, _executionMode))
             throw new InvalidOperationException("Job is not claimed by this runner for its execution mode");
-        using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        JobRecovery.Require(claimed, fence);
+
+        using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
         var heartbeat = Task.Run(async () =>
         {
             while (!heartbeatCancel.IsCancellationRequested)
             {
-                try { await Task.Delay(TimeSpan.FromSeconds(Math.Max(5, _settings.LeaseSeconds / 3)), heartbeatCancel.Token); }
-                catch (OperationCanceledException) { break; }
-                _store.UpdateJob(id, j =>
+                try
                 {
-                    if (j.LeaseOwner == _workerId && JobStates.Active.Contains(j.State))
-                        j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
-               });
-           }
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Max(5, _settings.LeaseSeconds / 3)),
+                        heartbeatCancel.Token);
+                }
+                catch (OperationCanceledException) { break; }
+                var renewed = _store.Change(state =>
+                {
+                    var job = state.Jobs.Single(j => j.Id == id);
+                    if (!JobRecovery.Matches(job, fence)) return false;
+                    job.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
+                    return true;
+                });
+                if (!renewed)
+                {
+                    executionCancel.Cancel();
+                    break;
+                }
+            }
         }, heartbeatCancel.Token);
-        try { await ExecuteAsync(id, ct); }
+        try { await ExecuteAsync(id, fence, executionCancel.Token); }
+        catch (LostExecutionLeaseException)
+        {
+            // The previous generation may not publish an outcome.
+        }
         catch (TokenBudgetExceededException ex)
         {
-            Stage(id, JobStates.Blocked, "budget", ex.Message);
+            if (JobRecovery.Matches(_store.Job(id), fence))
+                Stage(id, fence, JobStates.Blocked, "budget", ex.Message);
         }
         catch (ScopeViolationException ex)
         {
-            // Keep uncommitted changes for inspection and explicit contract amendment.
-            Stage(id, JobStates.Blocked, "scope", ex.Message);
-            _store.Event(id, "scope_violation", ex.Message);
+            if (JobRecovery.Matches(_store.Job(id), fence))
+            {
+                Stage(id, fence, JobStates.Blocked, "scope", ex.Message);
+                _store.Event(id, "scope_violation", ex.Message);
+            }
         }
         catch (OperationCanceledException)
         {
             var interrupted = _store.Job(id);
-           if (interrupted.Stage is "commit" or "push" or "pr")
-                Stage(id, JobStates.Blocked, "interrupted_git", "Git side effects were interrupted; inspect branch and PR before retry");
-           else
-                Stage(id, interrupted.RequestedState == JobStates.Stopped ? JobStates.Stopped : JobStates.Paused,
-                    "interrupted", "Execution interrupted; inspect worktree before resuming");
+            if (JobRecovery.Matches(interrupted, fence))
+            {
+                if (interrupted.Stage is "commit" or "push" or "pr")
+                    Stage(id, fence, JobStates.Blocked, "interrupted_git",
+                        "Git side effects interrupted; reconcile before retry");
+                else
+                    Stage(id, fence,
+                        interrupted.RequestedState == JobStates.Stopped ? JobStates.Stopped : JobStates.Paused,
+                        "interrupted", "Execution interrupted; inspect worktree before resuming");
+            }
         }
         catch (Exception ex)
         {
-            var stage = _store.Job(id).Stage;
-           Stage(id, stage is "commit" or "push" or "pr" ? JobStates.Blocked : JobStates.Failed, stage, ex.Message);
+            var current = _store.Job(id);
+            if (JobRecovery.Matches(current, fence))
+                Stage(id, fence, current.Stage is "commit" or "push" or "pr" ? JobStates.Blocked : JobStates.Failed,
+                    current.Stage, ex.Message);
         }
         finally
         {
+            executionCancel.Cancel();
             heartbeatCancel.Cancel();
-           try { await heartbeat; } catch (OperationCanceledException) { }
-            _store.UpdateJob(id, j =>
+            try { await heartbeat; } catch (OperationCanceledException) { }
+            _store.Change(state =>
             {
-                j.LeaseOwner = ""; j.LeaseUntil = null; j.FinishedAt = DateTimeOffset.UtcNow; j.RequestedState = "";
-           });
+                var job = state.Jobs.Single(j => j.Id == id);
+                if (job.ExecutionGeneration != fence.Generation ||
+                    job.LeaseToken != fence.Token || job.LeaseOwner != fence.Owner ||
+                    job.LeaseUntil <= DateTimeOffset.UtcNow)
+                    return;
+                job.LeaseOwner = "";
+                job.LeaseToken = "";
+                job.LeaseUntil = null;
+                job.FinishedAt = DateTimeOffset.UtcNow;
+                job.RequestedState = "";
+            });
         }
     }
 

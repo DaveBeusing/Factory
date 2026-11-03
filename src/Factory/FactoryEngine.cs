@@ -32,9 +32,11 @@ public sealed class FactoryEngine
             var j = s.Jobs.Single(x => x.Id == id);
            if (!JobExecutionModes.Matches(j, _executionMode) || j.State != JobStates.Queued ||
                 !DependencyGraph.DependenciesSatisfied(j, s.Jobs) || s.Paused) return false;
-           var selected = JobScheduler.Select(s, _settings.MaxParallel, _executionMode);
+           var selected = JobScheduler.Select(s, _settings.MaxParallel, _executionMode,
+                reservationTokens: _settings.GoalReservationTokens);
            if (!selected.Any(x => x.Id == id)) return false;
-           JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true);
+           JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true,
+                state: s, reservationTokens: _settings.GoalReservationTokens);
            s.Events.Add(new FactoryEvent { JobId = id, Type = "claimed", Message = _workerId });
            return true;
         });
@@ -79,7 +81,8 @@ public sealed class FactoryEngine
                 try { await running[id]; } catch (Exception ex) { _store.Event(id, "worker_error", ex.Message); }
                 running.Remove(id);
            }
-            var selected = JobScheduler.Select(_store.Read(), _settings.MaxParallel, _executionMode);
+            var selected = JobScheduler.Select(_store.Read(), _settings.MaxParallel, _executionMode,
+                reservationTokens: _settings.GoalReservationTokens);
            foreach (var j in selected)
             {
                 if (running.ContainsKey(j.Id) || !Claim(j.Id)) continue;
@@ -195,6 +198,7 @@ public sealed class FactoryEngine
                     job.LeaseToken != fence.Token || job.LeaseOwner != fence.Owner ||
                     job.LeaseUntil <= DateTimeOffset.UtcNow)
                     return;
+                GoalBudgetLedger.Settle(state, job);
                 job.LeaseOwner = "";
                 job.LeaseToken = "";
                 job.LeaseUntil = null;

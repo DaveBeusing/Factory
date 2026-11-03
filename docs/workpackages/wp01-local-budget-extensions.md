@@ -1,51 +1,58 @@
-# WP-01: Bounded local goal-budget extensions
+# WP-01: Dynamic goal budget allocations
 
-- **Status:** Partial implementation, pending CI and security/concurrency review
+- **Status:** Implemented in a draft PR; review and end-to-end acceptance pending
 - **Base:** `d53ca74e547b62c33d9b195ee6c9addfe0ad9e1c`
-- **Risk:** High (budget authority and execution fencing)
-- **Owner:** Budget and runtime
+- **Risk:** High (token accounting, worker authority, database migrations)
+- **Owner:** Budget, controller, and runtime
 - **Target:** `master`
+- **Dependency:** No upstream merge is needed for this PR. Mission Control's enhanced presentation in WP-03 consumes these API fields when WP-01 is integrated.
 
-## Contract
+## Contract and delivered scope
 
-A controller-local agent execution may extend its active goal reservation using the remaining unreserved goal capacity under the same transactional `StateStore.Change` write lock used for initial claims.
+A job receives an initial, goal-backed token reservation when claimed. Additional capacity may be granted only from the **remaining unreserved goal budget** and only while the exact execution lease and generation remain valid. The configured goal limit is authoritative; neither the agent runtime nor a remote worker may create new goal capacity.
 
-### In scope
+- `goalReservationTokens` (default 8,192): initial tokens per job claim
+- `goalExtensionIncrementTokens` (default 4,096): maximum tokens granted by one extension request
+- `goalExtensionThresholdTokens` (default 1,024): low-water mark checked ahead of the next agent turn
+- `maxJobReservationTokens` (default 65,536): absolute per-job reservation ceiling for one execution
 
-- Configurable initial allocation (`GoalReservationTokens`), extension increment, low-water threshold, and per-job reservation ceiling
-- Lease/generation-fenced extensions for controller-local jobs only
-- Zero over-allocation across concurrent same-goal jobs
-- Usage-driven extension within a turn and before a subsequent turn
-- Durable `budget_extended` operational events identifying reservation, generation, grant, and new authorized total
-- Dedicated `goal_budget_extensions` relational records that are not removed by operational event retention
-- Fail-closed exhaustion and unchanged held-usage reconciliation behavior
-- Validated settings API fields and concurrency/runtime regression tests
-- Goal-budget API summary of active/held liabilities, reconciliation needs, per-job observed usage and retained extension events
+The local runner can extend its fenced reservation transactionally before or during an agent turn when provider usage notifications are reported. The extension and its durable history are written in the same SQLite transaction.
 
-### Out of scope in this increment
+A remote worker may call **POST `/api/worker/budget/extend`** with its worker-scoped credential, matching worker identity header, job ID, execution generation, lease token, stable request ID and requested amount. The controller verifies the active lease, worker identity, project authorization and capability attestations. It computes and atomically persists any grant, including a zero-token denial-of-capacity result. A repeated request ID returns the prior grant without reserving more tokens. An expired, superseded or unauthorized lease is rejected.
 
-- Remote-worker controller extension protocol, idempotency keys, delegated-grant acknowledgment and mirror synchronization
-- Unbounded historical reporting beyond existing event-retention policy
-- Controller-authorized remote extension requests and idempotent remote grant acknowledgment
-- UI visualization of extensions and provider account allowance controls
-- Remote grant request history (no remote authorization contract in this increment)
-- Independent automated security and failure-injection review
+The remote runner requests a controller grant before the next agent turn when its remaining local delegated capacity is low. Only a verified controller response may increase the worker-local mirrored reservation and synthetic delegated goal budget. On transport uncertainty, the request ID is retained for safe replay; an unavailable or denied authorization fails closed.
 
-## Settings
+## Persistence and API
 
-| JSON field | Default | Semantics |
-| --- | ---: | --- |
-| `goalReservationTokens` | 8192 | Initial allocation per newly claimed job |
-| `goalExtensionIncrementTokens` | 4096 | Maximum additional tokens per successful extension |
-| `goalExtensionThresholdTokens` | 1024 | Extend when the available reservation reaches this level |
-| `maxJobReservationTokens` | 65536 | Absolute sum of initial and additional grants for one attempt |
+- Schema version **6** adds relational `goal_budget_extensions` history, linked by foreign keys to the goal, job and reservation, with grant amount, authorized total, worker, execution generation and timestamp.
+- The existing schema-4/5 upgrade paths preserve reservations and upgrade transactionally. Schema-5-to-6 does not rewrite existing usage data. Earlier extensions written only to bounded events cannot be reconstructed into the new history.
+- `GoalBudgetLedger.Summary` now reports total budget, consumed tokens, active and held outstanding liabilities, available capacity, reconciliation presence, per-job observed usage and durable extension records.
+- Existing budget reconciliation remains explicit and independently reviewed. Final provider usage that is missing or uncertain remains a held liability; overrun observations are not silently erased.
+- Provider-reported usage is **not** the same as reserved goal capacity, and neither is an estimate of external weekly/account allowances. Such allowances are displayed only when the provider actually reports them.
 
-No setting is an estimate of provider account quota. Actual provider usage is separately reported and may be unavailable. Active reservations reduce the available goal capacity. Unsettled/held reservations continue to count as liabilities. Remote workers never receive these automatic extension privileges.
+## Concurrency and failure behavior
 
-## Failure and recovery
+All claim, extension and reservation mutations use the existing SQLite transactional serialization. The grant is bound to the execution's generation and reservation ID. Concurrent workers cannot allocate the same remaining capacity. Retry of a given remote request ID is idempotent only while that execution remains valid; an expired lease is **not** revived to replay a grant.
 
-The extension, reservation total and operational event are committed in one SQLite write transaction. A stale generation or expired claim cannot extend. If the provider's final usage is missing, prior reconciliation rules retain the unknown liability. Overrun observations remain recorded before cancellation; extensions do not conceal a negative balance. A transactional schema-5-to-6 migration adds a durable extension table without rewriting existing reservations, and the existing schema-4-to-5 upgrade continues forward to schema 6. Back up `.factory/factory.sqlite3` together with its WAL state using a consistent SQLite backup or a stopped Factory process before upgrading. Reverting application binaries without restoring a matching database backup is not supported.
+The remote runner currently checks for more capacity **between agent turns**, not continuously during a single remote provider turn. A long-running turn may still exhaust its granted limit and stop. This is conservative, not a silent permission to exceed the cap. A richer mid-turn remote grant/streaming authorization contract would require separate design and verification.
 
-## Verification
+A crash between a committed controller grant and the worker's local mirror update can be reconciled by retrying the same request ID after restoring the still-valid execution lease; an uncertain or expired execution remains blocked for operator review.
 
-Run the existing .NET 10 console test runner, concurrency tests, and remote-worker authorization regression tests. Additional remote authorization, retry and crash consistency work is **required before full WP-01 completion**. Do not mark this package fully integrated merely because its local slice passes tests.
+## Verification and risk gates
+
+The console regression suite includes concurrent same-goal allocations for three independent jobs, local runtime extension behavior, durable extension history, schema-5-to-6 preservation, and controller-authorized remote requests with idempotent replay, stale generation, invalid worker and expired lease denial.
+
+Run:
+```powershell
+dotnet restore Factory.slnx
+dotnet build Factory.slnx --configuration Release --no-restore
+dotnet run --project tests/Factory.Tests/Factory.Tests.csproj --configuration Release --no-restore
+```
+
+GitHub Actions on the PR supplies executable build/test evidence where runs complete successfully. **Still required before marking this work package fully accepted:** independent persistence/security review, controlled remote-worker HTTP end-to-end exercise, failure injection around lost responses and process crashes, and verification of the latest PR commit.
+
+## Backup, recovery and integration
+
+Before upgrading an existing installation, create a consistent backup of `.factory/factory.sqlite3` and its WAL state using SQLite's backup mechanism or by stopping Factory. A schema-6 database should not be opened with older application binaries; restore a matching backup for rollback. No destructive migration, automatic merge, deployment, or release is part of this PR.
+
+This branch is a **draft implementation**, not an approved, merged, or verified-integrated release.

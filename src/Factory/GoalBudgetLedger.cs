@@ -38,12 +38,31 @@ public static class GoalBudgetLedger
         var goal = state.Goals.Single(g => g.Id == goalId);
         var consumed = Spent(state, goalId);
         var committed = Outstanding(state, goalId);
+        var reservations = state.BudgetReservations.Where(r => r.GoalId == goalId).ToArray();
+        var goalJobs = state.Jobs.Where(j => j.GoalId == goalId).ToArray();
+        var jobIds = goalJobs.Select(j => j.Id).ToHashSet();
         return new
         {
             goalId, total = goal.TokenBudget, consumed, committed,
+            activeOutstanding = reservations.Where(r => r.State == Active)
+                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)),
+            heldOutstanding = reservations.Where(r => r.State == Held)
+                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)),
             available = Available(state, goalId),
-            reservations = state.BudgetReservations.Where(r => r.GoalId == goalId)
-                .Select(r => new
+            requiresReconciliation = reservations.Any(r => r.State == Held),
+            jobs = goalJobs.Select(j => new
+            {
+                j.Id, j.State, j.Stage, j.Error, j.ExecutionGeneration,
+                worker = string.IsNullOrWhiteSpace(j.LeaseOwner) ? null : j.LeaseOwner,
+                j.TokensIn, j.TokensOut, totalConsumed = checked(j.TokensIn + j.TokensOut),
+                j.UsageComplete
+            }).ToArray(),
+            // Operational events are retained up to the StateStore event limit.
+            // This is an observed history window, not an immutable billing ledger.
+            extensions = state.Events.Where(e => e.Type == "budget_extended" &&
+                    e.JobId.HasValue && jobIds.Contains(e.JobId.Value))
+                .Select(e => new { e.Id, e.JobId, e.At, e.Message }).ToArray(),
+            reservations = reservations.Select(r => new
                 {
                     r.Id, r.JobId, r.ExecutionGeneration, r.State,
                     r.Reserved, r.Consumed,

@@ -167,6 +167,8 @@ public static class DashboardHost
             });
             return Results.Accepted();
         });
+        app.MapPost("/api/jobs/{id:guid}/reconcile", (Guid id, ControlInput input) =>
+            Results.Ok(JobRecovery.ReconcileLocal(store, id, input.Reviewed, input.Reason)));
         app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, CancellationToken ct) =>
         {
             var proof = await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, ct);

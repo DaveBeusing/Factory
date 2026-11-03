@@ -74,8 +74,17 @@ public static class WorkPackageScope
             if (!command.Ok)
                 throw new ScopeViolationException(
                     "Cannot inspect complete Git changes; execution blocked: " + command.Error);
+            // Commands.Run reads lines and appends a platform newline after the
+            // final NUL-terminated Git entry. Reject incomplete or truncated output.
+            if (command.Output.Length >= 1_900_000 ||
+                (command.Output.Length != 0 &&
+                 !command.Output.EndsWith("\0" + Environment.NewLine, StringComparison.Ordinal)))
+                throw new ScopeViolationException("Incomplete Git path listing; scope cannot be verified");
             foreach (var entry in command.Output.Split('\0', StringSplitOptions.RemoveEmptyEntries))
+            {
+                if (entry == Environment.NewLine) continue;
                 paths.Add(entry);
+            }
         }
         AddGitPaths("diff", "--name-only", "-z", "--no-renames", baseBranch + "...HEAD");
         AddGitPaths("diff", "--name-only", "-z", "--no-renames", "HEAD");

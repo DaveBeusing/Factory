@@ -74,6 +74,7 @@ public sealed class FactoryJob
     public long ExecutionGeneration { get; set; }
     public string LeaseToken { get; set; } = "";
     public int WorkerProcessId { get; set; }
+    public string WorkerMachineName { get; set; } = "";
     public DateTimeOffset? WorkerProcessStartedAt { get; set; }
     // Durable last known point, written before external side effects.
     public string CheckpointStage { get; set; } = "";

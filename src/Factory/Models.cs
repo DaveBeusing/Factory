@@ -70,6 +70,16 @@ public sealed class FactoryJob
     public string Error { get; set; } = "";
     public string RequestedState { get; set; } = "";
     public string SessionId { get; set; } = "";
+    // Persisted fencing identity: monotonically increasing generation plus per-claim secret.
+    public long ExecutionGeneration { get; set; }
+    public string LeaseToken { get; set; } = "";
+    public int WorkerProcessId { get; set; }
+    public string WorkerMachineName { get; set; } = "";
+    public DateTimeOffset? WorkerProcessStartedAt { get; set; }
+    // Durable last known point, written before external side effects.
+    public string CheckpointStage { get; set; } = "";
+    public string CheckpointCommit { get; set; } = "";
+    public DateTimeOffset? CheckpointAt { get; set; }
     public string LeaseOwner { get; set; } = "";
     public DateTimeOffset? LeaseUntil { get; set; }
     public bool Integrated { get; set; }

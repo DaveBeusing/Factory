@@ -7,7 +7,8 @@ public sealed class TokenBudgetExceededException(string message) : InvalidOperat
 /// before allowing the next turn. Serializes turns within a job to prevent its
 /// reviewers racing the same remaining goal budget.
 /// </summary>
-public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, Guid jobId) : IAgentRuntime
+public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, Guid jobId,
+    ExecutionFence? fence = null) : IAgentRuntime
 {
     public const long MinimumTurnAllowance = 256;
     private readonly SemaphoreSlim _turnLock = new(1, 1);
@@ -21,6 +22,7 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
         {
             var state = store.Read();
             var job = state.Jobs.Single(j => j.Id == jobId);
+            if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
             long? remaining = null;
             if (job.GoalId is { } goalId)
             {
@@ -51,10 +53,12 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 recordedOut = usage.OutputTokens;
                 sawUsage = true;
                 if (inputDelta != 0 || outputDelta != 0)
-                    store.UpdateJob(jobId, j =>
+                    store.Change(state =>
                     {
-                        j.TokensIn = checked(j.TokensIn + inputDelta);
-                        j.TokensOut = checked(j.TokensOut + outputDelta);
+                        var current = state.Jobs.Single(j => j.Id == jobId);
+                        if (fence is { } currentFence) JobRecovery.Require(current, currentFence);
+                        current.TokensIn = checked(current.TokensIn + inputDelta);
+                        current.TokensOut = checked(current.TokensOut + outputDelta);
                     });
                 onUsage?.Invoke(usage);
                 if (remaining.HasValue && usage.Total >= remaining.Value)
@@ -75,6 +79,7 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 // Unknown usage must not silently permit unlimited further turns.
                 if (remaining.HasValue && !sawUsage)
                     throw new TokenBudgetExceededException("Agent did not report token usage; budget cannot be verified");
+                if (fence is { } finalFence) JobRecovery.Require(store.Job(jobId), finalFence);
                 return result;
             }
             catch (OperationCanceledException) when (budgetReached && !cancellation.IsCancellationRequested)

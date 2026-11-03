@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed class StateStore
 {
-    private const int DatabaseVersion = 2;
+    private const int DatabaseVersion = 3;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -142,6 +142,24 @@ public sealed class StateStore
             tx.Commit();
             return;
         }
+        if (schemaVersion == 2)
+        {
+            // Additive upgrade for shipped relational state: never discard jobs or leases.
+            // Existing in-flight work is quarantined by recovery before scheduling.
+            Execute(db, tx, """
+                ALTER TABLE jobs ADD COLUMN execution_generation INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE jobs ADD COLUMN lease_token TEXT NOT NULL DEFAULT '';
+                ALTER TABLE jobs ADD COLUMN worker_process_id INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE jobs ADD COLUMN worker_machine_name TEXT NOT NULL DEFAULT '';
+                ALTER TABLE jobs ADD COLUMN worker_process_started_at TEXT;
+                ALTER TABLE jobs ADD COLUMN checkpoint_stage TEXT NOT NULL DEFAULT '';
+                ALTER TABLE jobs ADD COLUMN checkpoint_commit TEXT NOT NULL DEFAULT '';
+                ALTER TABLE jobs ADD COLUMN checkpoint_at TEXT;
+                PRAGMA user_version=3;
+                """);
+            tx.Commit();
+            return;
+        }
         if (schemaVersion != 0)
             throw new InvalidOperationException("Unsupported Factory database schema version " + schemaVersion +
                 "; create a new FACTORY_HOME or restore a matching installation.");
@@ -224,7 +242,7 @@ public sealed class StateStore
             CREATE INDEX idx_knowledge_project ON knowledge_items(project_id);
             CREATE INDEX idx_releases_project ON releases(project_id);
             CREATE INDEX idx_workers_heartbeat ON workers(heartbeat);
-            PRAGMA user_version=2;
+            PRAGMA user_version=3;
             """);
         tx.Commit();
     }

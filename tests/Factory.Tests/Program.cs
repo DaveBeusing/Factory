@@ -311,6 +311,7 @@ await TestAsync("Remote scope block reaches the controller as amendable scope", 
         Assert(await WorkerProtocol.CompleteAsync(store, new WorkerStatus
         {
             WorkerId = "worker-01", JobId = job.Id, Job = reported,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,
             Error = reported.Error
         }, new RefusingWorkerVerifier()));
         var blocked = store.Job(job.Id);
@@ -795,7 +796,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 2, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 3, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "releases", "knowledge_items", "graph_nodes", "evaluations",
@@ -805,6 +806,10 @@ Test("Relational SQLite schema contains no JSON state table", () =>
                 "Missing relational table: " + table);
         Assert(Count("SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='project_id';") == 1);
         Assert(Count("SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='state';") == 1);
+        foreach (var field in new[] { "execution_generation", "lease_token", "worker_process_id",
+            "worker_process_started_at", "worker_machine_name", "checkpoint_stage", "checkpoint_commit", "checkpoint_at" })
+            Assert(Count($"SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='{field}';") == 1,
+                "Missing durable recovery field: " + field);
         Assert(Count("SELECT COUNT(*) FROM pragma_foreign_key_list('jobs') WHERE \"table\"='projects';") == 1);
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_jobs_project_state';") == 1);
     }
@@ -1129,12 +1134,14 @@ await TestAsync("Remote goal claims retain remaining budget and failed usage", a
         Assert(claim!.Job.TokensIn == 20);
         Assert(WorkerProtocol.Heartbeat(store, new WorkerStatus
         {
-            WorkerId = "worker-01", JobId = job.Id, TokensIn = 70, TokensOut = 15
+            WorkerId = "worker-01", JobId = job.Id, TokensIn = 70, TokensOut = 15,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken
         }, new FactorySettings()));
         Assert(store.Job(job.Id).TokensIn == 70 && store.Job(job.Id).TokensOut == 15);
         Assert(await WorkerProtocol.CompleteAsync(store, new WorkerStatus
         {
             WorkerId = "worker-01", JobId = job.Id,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,
             Job = new FactoryJob { State = JobStates.Blocked, TokensIn = 95, TokensOut = 33 }
         }, new RefusingWorkerVerifier()));
         Assert(store.Job(job.Id).TokensIn == 95 && store.Job(job.Id).TokensOut == 33);
@@ -1243,7 +1250,8 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
             Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
             Branch = $"factory/{job.Id:N}", PrUrl = "https://github.com/example/repo/pull/1" };
         var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = finished,
-            Evidence = "{\"forged\":true}", TokensIn = 10 };
+            Evidence = "{\"forged\":true}", TokensIn = 10,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken };
         Assert(await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier()));
         var blocked = store.Job(job.Id);
         Assert(blocked.State == JobStates.Blocked && blocked.Stage == "remote_verification_failed");
@@ -1274,7 +1282,8 @@ await TestAsync("Controller-verified remote results are atomically bound to the 
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
             Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
             Branch = $"factory/{job.Id:N}", PrUrl = "https://github.com/example/repo/pull/1" };
-        var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = finished };
+        var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = finished,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken };
         Assert(await WorkerProtocol.CompleteAsync(store, status,
             new FixedWorkerVerifier(new VerifiedWorkerResult("{\"verifiedBy\":\"test\"}"))));
         var ready = store.Job(job.Id);
@@ -1285,6 +1294,225 @@ await TestAsync("Controller-verified remote results are atomically bound to the 
             new FixedWorkerVerifier(new VerifiedWorkerResult("{}"))));
     }
     finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+
+Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-recovery-migrate-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "prior-schema" };
+        var job = new FactoryJob { ProjectId = project.Id, Title = "Retained" };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                ALTER TABLE jobs DROP COLUMN execution_generation;
+                ALTER TABLE jobs DROP COLUMN lease_token;
+                ALTER TABLE jobs DROP COLUMN worker_process_id;
+                ALTER TABLE jobs DROP COLUMN worker_machine_name;
+                ALTER TABLE jobs DROP COLUMN worker_process_started_at;
+                ALTER TABLE jobs DROP COLUMN checkpoint_stage;
+                ALTER TABLE jobs DROP COLUMN checkpoint_commit;
+                ALTER TABLE jobs DROP COLUMN checkpoint_at;
+                PRAGMA user_version=2;
+                """;
+            cmd.ExecuteNonQuery();
+        }
+        var migrated = new StateStore(home);
+        Assert(migrated.Job(job.Id).Title == "Retained");
+        Assert(migrated.Job(job.Id).ExecutionGeneration == 0);
+        using var check = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}");
+        check.Open();
+        using var query = check.CreateCommand();
+        query.CommandText = "PRAGMA user_version;";
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 3);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Expired local lease is quarantined and cannot be replayed", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-fence-quarantine-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "recovery" };
+        var job = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["src/a.cs"] };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        ExecutionFence original = default;
+        store.Change(s =>
+        {
+            var owned = s.Jobs.Single();
+            original = JobRecovery.Assign(owned, "old-local-runner", 120, local: true);
+            JobRecovery.Checkpoint(owned, "agent", "0000000000000000000000000000000000000000");
+            owned.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1);
+        });
+        var generation = store.Job(job.Id).ExecutionGeneration;
+        var engine = new FactoryEngine(store, new FactorySettings(), agent: new FakeAgent());
+        Assert(engine.Recover().SequenceEqual([job.Id]));
+        var blocked = new StateStore(home).Job(job.Id);
+        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "reconcile");
+        Assert(blocked.ExecutionGeneration == generation + 1 &&
+            blocked.CheckpointStage == "agent" && blocked.LeaseToken.Length == 0);
+        Assert(!JobRecovery.Matches(blocked, original));
+        Assert(engine.Recover().Count == 0, "Recovery should be idempotent");
+        await engine.RunQueueAsync(CancellationToken.None);
+        Assert(store.Job(job.Id).Attempt == 1 && store.Job(job.Id).State == JobStates.Blocked,
+            "Queue automatically replayed unverified work");
+        try
+        {
+            MissionControlManager.ControlJob(store, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("Unreconciled job was requeued");
+        }
+        catch (InvalidOperationException) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Reconciliation checks process identity, worktree, and committed checkpoints", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-fence-reconcile-" + Guid.NewGuid().ToString("N"));
+    var home = Path.Combine(Path.GetTempPath(), "factory-fence-state-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    void Git(params string[] args) =>
+        Commands.Require(Commands.Run("git", ["-C", root, ..args], root), "git fixture");
+    try
+    {
+        Git("init", "-b", "master");
+        Git("config", "user.name", "Factory Tests");
+        Git("config", "user.email", "factory-tests@example.invalid");
+        File.WriteAllText(Path.Combine(root, "README.md"), "initial");
+        Git("add", "README.md"); Git("commit", "-m", "Initial");
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "recovery", Path = root };
+        var job = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["README.md"] };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Jobs.Add(job);
+            var owned = s.Jobs.Single();
+            JobRecovery.Assign(owned, "owner", 120, local: true);
+            owned.Worktree = root;
+            JobRecovery.Checkpoint(owned, "agent", GitOperations.Head(root));
+            owned.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1);
+        });
+        Assert(JobRecovery.QuarantineExpired(store).SequenceEqual([job.Id]));
+        void Deny(Action action)
+        {
+            try { action(); throw new Exception("Unsafe recovery was accepted"); }
+            catch (InvalidOperationException) { }
+        }
+        Deny(() => JobRecovery.ReconcileLocal(store, job.Id, false, "Reviewed repository"));
+        var actualHost = store.Job(job.Id).WorkerMachineName;
+        store.UpdateJob(job.Id, j => j.WorkerMachineName = "unrecognized-remote-host");
+        Deny(() => JobRecovery.ReconcileLocal(store, job.Id, true, "Reviewed previous process"));
+        store.UpdateJob(job.Id, j => j.WorkerMachineName = actualHost);
+        using (var stillRunning = new CancellationTokenSource())
+        {
+            LocalJobControl.Register(job.Id, stillRunning);
+            Deny(() => JobRecovery.ReconcileLocal(store, job.Id, true, "Reviewed previous process"));
+            LocalJobControl.Unregister(job.Id);
+        }
+        File.AppendAllText(Path.Combine(root, "README.md"), "dirty");
+        Deny(() => JobRecovery.ReconcileLocal(store, job.Id, true, "Reviewed uncommitted change"));
+        Git("checkout", "--", "README.md");
+        var before = store.Job(job.Id).ExecutionGeneration;
+        var reconciled = JobRecovery.ReconcileLocal(store, job.Id, true, "Verified process ended and worktree clean");
+        Assert(reconciled.State == JobStates.Queued && reconciled.Stage == "reconciled");
+        Assert(store.Read().Events.Any(e => e.JobId == job.Id && e.Type == "reconciled"));
+        ExecutionFence next = default;
+        store.Change(s => next = JobRecovery.Assign(s.Jobs.Single(), "new-owner", 120, local: true));
+        Assert(next.Generation > before && !JobRecovery.Matches(store.Job(job.Id),
+            new ExecutionFence(before, "", "owner")), "Old owner regained control");
+        Assert(next.Token.Length > 0 && next.Owner == "new-owner");
+    }
+    finally
+    {
+        try { Directory.Delete(root, true); } catch { }
+        try { Directory.Delete(home, true); } catch { }
+    }
+});
+
+await TestAsync("Remote worker generation fences stale heartbeats and completions", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-fence-remote-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote", Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote,
+            ExpectedPaths = ["src/a.cs"] };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        var settings = new FactorySettings { AllowPush = true };
+        var first = WorkerProtocol.Claim(store, settings, "worker-01");
+        Assert(first is not null);
+        var stale = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,
+            ExecutionGeneration = first!.Job.ExecutionGeneration, LeaseToken = first.Job.LeaseToken };
+        Assert(WorkerProtocol.Heartbeat(store, stale, settings));
+        store.UpdateJob(job.Id, j => j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        Assert(JobRecovery.QuarantineExpired(store, JobExecutionModes.Remote).Count == 1);
+        Assert(!WorkerProtocol.Heartbeat(store, stale, settings));
+        Assert(!await WorkerProtocol.CompleteAsync(store, stale, new RefusingWorkerVerifier()));
+        store.UpdateJob(job.Id, j => { j.State = JobStates.Queued; j.Stage = "operator_reviewed"; });
+        var second = WorkerProtocol.Claim(store, settings, "worker-01");
+        Assert(second is not null && second.Job.ExecutionGeneration > stale.ExecutionGeneration);
+        Assert(second!.Job.LeaseToken != stale.LeaseToken);
+        Assert(!WorkerProtocol.Heartbeat(store, stale, settings));
+        Assert(!await WorkerProtocol.CompleteAsync(store, stale, new RefusingWorkerVerifier()));
+        var current = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,
+            ExecutionGeneration = second.Job.ExecutionGeneration, LeaseToken = second.Job.LeaseToken };
+        Assert(WorkerProtocol.Heartbeat(store, current, settings));
+        Assert(await WorkerProtocol.CompleteAsync(store, current, new RefusingWorkerVerifier()));
+        Assert(store.Job(job.Id).State == JobStates.Blocked);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+
+await TestAsync("Old local runner cannot commit or complete after its generation is fenced", async () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-fence-live-" + Guid.NewGuid().ToString("N"));
+    var repo = Path.Combine(root, "repository");
+    Directory.CreateDirectory(repo);
+    void Git(params string[] args) =>
+        Commands.Require(Commands.Run("git", ["-C", repo, ..args], root), "git fixture");
+    try
+    {
+        Git("init", "-b", "master");
+        Git("config", "user.name", "Factory Tests");
+        Git("config", "user.email", "factory-tests@example.invalid");
+        File.WriteAllText(Path.Combine(repo, "README.md"), "Base");
+        Git("add", "README.md"); Git("commit", "-m", "Base");
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "fencing", Path = repo,
+            Checks = [new CheckCommand { Name = "git", Executable = "git",
+                Arguments = ["rev-parse", "HEAD"] }] };
+        var job = new FactoryJob { ProjectId = project.Id, Title = "Fenced",
+            ExpectedPaths = ["src/generated.txt"] };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var engine = new FactoryEngine(store, new FactorySettings { MaxParallel = 1 },
+            agent: new ExpireDuringRunAgent(store, job.Id));
+        await engine.RunQueueAsync(CancellationToken.None);
+        var blocked = store.Job(job.Id);
+        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "reconcile");
+        Assert(blocked.HeadSha == "" && blocked.PrUrl == "" && blocked.EvidenceFile == "",
+            "Stale execution persisted completion metadata");
+        Assert(blocked.Attempt == 1 && blocked.ExecutionGeneration >= 2);
+        Assert(store.Read().Events.Count(e => e.JobId == job.Id && e.Type == "reconciliation_required") == 1);
+        Assert(GitOperations.Head(blocked.Worktree) == GitOperations.Head(repo),
+            "Stale runner committed after losing its fence");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
 });
 
 var passed = results.Count(x => x.Passed);
@@ -1354,4 +1582,18 @@ internal sealed class FixedIntegrationPullReader(MergedPullRequest result) : IIn
 {
     public Task<MergedPullRequest> ReadAsync(string repository, int number, CancellationToken ct)
         => Task.FromResult(result);
+}
+
+internal sealed class ExpireDuringRunAgent(StateStore store, Guid jobId) : IAgentRuntime
+{
+    public Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
+    {
+        store.UpdateJob(jobId, j => j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        JobRecovery.QuarantineExpired(store);
+        Directory.CreateDirectory(Path.Combine(directory, "src"));
+        File.WriteAllText(Path.Combine(directory, "src", "generated.txt"), "Uncommitted stale change");
+        return Task.FromResult(new AgentRunResult { Success = true });
+    }
 }

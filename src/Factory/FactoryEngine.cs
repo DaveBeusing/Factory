@@ -34,51 +34,38 @@ public sealed class FactoryEngine
                 !DependencyGraph.DependenciesSatisfied(j, s.Jobs) || s.Paused) return false;
            var selected = JobScheduler.Select(s, _settings.MaxParallel, _executionMode);
            if (!selected.Any(x => x.Id == id)) return false;
-           j.State = JobStates.Preparing; j.Stage = "worktree"; j.Attempt++;
-           j.LeaseOwner = _workerId;
-           j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
-           j.StartedAt ??= DateTimeOffset.UtcNow; j.UpdatedAt = DateTimeOffset.UtcNow;
+           JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true);
            s.Events.Add(new FactoryEvent { JobId = id, Type = "claimed", Message = _workerId });
            return true;
         });
     }
 
-    private void Stage(Guid id, string state, string stage, string? error = null)
+    private void UpdateOwned(Guid id, ExecutionFence fence, Action<FactoryJob> change)
     {
-        _store.UpdateJob(id, job =>
+        _store.Change(state =>
+        {
+            var job = state.Jobs.Single(j => j.Id == id);
+            JobRecovery.Require(job, fence);
+            change(job);
+            job.UpdatedAt = DateTimeOffset.UtcNow;
+        });
+    }
+
+    private void EnsureOwned(Guid id, ExecutionFence fence) =>
+        JobRecovery.Require(_store.Job(id), fence);
+
+    private void Stage(Guid id, ExecutionFence fence, string state, string stage, string? error = null)
+    {
+        UpdateOwned(id, fence, job =>
         {
             job.State = state; job.Stage = stage;
-           if (error != null) job.Error = error;
+            if (error != null) job.Error = error;
+            JobRecovery.Checkpoint(job, stage);
         });
         _store.Event(id, "stage", state + "/" + stage);
     }
 
-    public IReadOnlyList<Guid> Recover()
-    {
-        return _store.Change(s =>
-        {
-            var changed = new List<Guid>();
-           foreach (var job in s.Jobs.Where(j => !string.IsNullOrEmpty(j.LeaseOwner) &&
-                j.LeaseUntil <= DateTimeOffset.UtcNow))
-            {
-                // Commit and publish are externally visible. Never blindly replay them.
-                if (job.Mode == "remote" || job.Stage is "commit" or "push" or "pr")
-                {
-                    job.State = JobStates.Blocked;
-                   job.Error = "Interrupted during Git side effects; inspect branch and PR before retry";
-               }
-                else
-                {
-                    job.State = JobStates.Queued;
-                   job.Error = "Recovered after expired worker lease; inspect existing worktree";
-               }
-                job.LeaseOwner = ""; job.LeaseUntil = null;
-               job.UpdatedAt = DateTimeOffset.UtcNow;
-               changed.Add(job.Id);
-           }
-            return (IReadOnlyList<Guid>)changed;
-        });
-    }
+    public IReadOnlyList<Guid> Recover() => JobRecovery.QuarantineExpired(_store);
 
     public async Task RunQueueAsync(CancellationToken ct)
     {
@@ -126,79 +113,121 @@ public sealed class FactoryEngine
     public async Task RunClaimedAsync(Guid id, CancellationToken ct)
     {
         var claimed = _store.Job(id);
-        if (!JobExecutionModes.Matches(claimed, _executionMode) ||
-            claimed.LeaseOwner != _workerId || claimed.LeaseUntil <= DateTimeOffset.UtcNow ||
-            !JobStates.Active.Contains(claimed.State))
+        var fence = new ExecutionFence(claimed.ExecutionGeneration, claimed.LeaseToken, _workerId);
+        if (!JobExecutionModes.Matches(claimed, _executionMode))
             throw new InvalidOperationException("Job is not claimed by this runner for its execution mode");
-        using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        JobRecovery.Require(claimed, fence);
+
+        using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
         var heartbeat = Task.Run(async () =>
         {
             while (!heartbeatCancel.IsCancellationRequested)
             {
-                try { await Task.Delay(TimeSpan.FromSeconds(Math.Max(5, _settings.LeaseSeconds / 3)), heartbeatCancel.Token); }
-                catch (OperationCanceledException) { break; }
-                _store.UpdateJob(id, j =>
+                try
                 {
-                    if (j.LeaseOwner == _workerId && JobStates.Active.Contains(j.State))
-                        j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
-               });
-           }
+                    await Task.Delay(TimeSpan.FromSeconds(Math.Max(5, _settings.LeaseSeconds / 3)),
+                        heartbeatCancel.Token);
+                }
+                catch (OperationCanceledException) { break; }
+                var renewed = _store.Change(state =>
+                {
+                    var job = state.Jobs.Single(j => j.Id == id);
+                    if (!JobRecovery.Matches(job, fence)) return false;
+                    job.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
+                    return true;
+                });
+                if (!renewed)
+                {
+                    executionCancel.Cancel();
+                    break;
+                }
+            }
         }, heartbeatCancel.Token);
-        try { await ExecuteAsync(id, ct); }
+        try { await ExecuteAsync(id, fence, executionCancel.Token); }
+        catch (LostExecutionLeaseException)
+        {
+            // The previous generation may not publish an outcome.
+        }
         catch (TokenBudgetExceededException ex)
         {
-            Stage(id, JobStates.Blocked, "budget", ex.Message);
+            if (JobRecovery.Matches(_store.Job(id), fence))
+                Stage(id, fence, JobStates.Blocked, "budget", ex.Message);
         }
         catch (ScopeViolationException ex)
         {
-            // Keep uncommitted changes for inspection and explicit contract amendment.
-            Stage(id, JobStates.Blocked, "scope", ex.Message);
-            _store.Event(id, "scope_violation", ex.Message);
+            if (JobRecovery.Matches(_store.Job(id), fence))
+            {
+                Stage(id, fence, JobStates.Blocked, "scope", ex.Message);
+                _store.Event(id, "scope_violation", ex.Message);
+            }
         }
         catch (OperationCanceledException)
         {
             var interrupted = _store.Job(id);
-           if (interrupted.Stage is "commit" or "push" or "pr")
-                Stage(id, JobStates.Blocked, "interrupted_git", "Git side effects were interrupted; inspect branch and PR before retry");
-           else
-                Stage(id, interrupted.RequestedState == JobStates.Stopped ? JobStates.Stopped : JobStates.Paused,
-                    "interrupted", "Execution interrupted; inspect worktree before resuming");
+            if (JobRecovery.Matches(interrupted, fence))
+            {
+                if (interrupted.Stage is "commit" or "push" or "pr")
+                    Stage(id, fence, JobStates.Blocked, "interrupted_git",
+                        "Git side effects interrupted; reconcile before retry");
+                else
+                    Stage(id, fence,
+                        interrupted.RequestedState == JobStates.Stopped ? JobStates.Stopped : JobStates.Paused,
+                        "interrupted", "Execution interrupted; inspect worktree before resuming");
+            }
         }
         catch (Exception ex)
         {
-            var stage = _store.Job(id).Stage;
-           Stage(id, stage is "commit" or "push" or "pr" ? JobStates.Blocked : JobStates.Failed, stage, ex.Message);
+            var current = _store.Job(id);
+            if (JobRecovery.Matches(current, fence))
+                Stage(id, fence, current.Stage is "commit" or "push" or "pr" ? JobStates.Blocked : JobStates.Failed,
+                    current.Stage, ex.Message);
         }
         finally
         {
+            executionCancel.Cancel();
             heartbeatCancel.Cancel();
-           try { await heartbeat; } catch (OperationCanceledException) { }
-            _store.UpdateJob(id, j =>
+            try { await heartbeat; } catch (OperationCanceledException) { }
+            _store.Change(state =>
             {
-                j.LeaseOwner = ""; j.LeaseUntil = null; j.FinishedAt = DateTimeOffset.UtcNow; j.RequestedState = "";
-           });
+                var job = state.Jobs.Single(j => j.Id == id);
+                if (job.ExecutionGeneration != fence.Generation ||
+                    job.LeaseToken != fence.Token || job.LeaseOwner != fence.Owner ||
+                    job.LeaseUntil <= DateTimeOffset.UtcNow)
+                    return;
+                job.LeaseOwner = "";
+                job.LeaseToken = "";
+                job.LeaseUntil = null;
+                job.FinishedAt = DateTimeOffset.UtcNow;
+                job.RequestedState = "";
+            });
         }
     }
 
-    private async Task ExecuteAsync(Guid id, CancellationToken ct)
+    private async Task ExecuteAsync(Guid id, ExecutionFence fence, CancellationToken ct)
     {
         var j = _store.Job(id);
+        EnsureOwned(id, fence);
         if (!JobExecutionModes.Matches(j, _executionMode))
             throw new InvalidOperationException("Job execution mode changed after claim");
         var p = _store.Read().Projects.Single(x => x.Id == j.ProjectId);
         if (p.Checks.Count == 0) throw new InvalidOperationException("Project checks missing; configure gates before execution");
         WorkPackageScope.ValidateDeclaration(j.ExpectedPaths);
         var runtime = new BudgetedAgentRuntime(
-            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk), _store, id);
+            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk), _store, id, fence);
         var qualityEngine = new QualityEngine(runtime);
         var worktree = _git.Prepare(p, j);
-        _store.UpdateJob(id, x => { x.Worktree = worktree; x.Branch = $"factory/{x.Id:N}"; });
+        UpdateOwned(id, fence, x =>
+        {
+            x.Worktree = worktree; x.Branch = $"factory/{x.Id:N}";
+            JobRecovery.Checkpoint(x, "worktree", GitOperations.Head(worktree));
+        });
         foreach (var plugin in _plugins) await plugin.BeforeJobAsync(p, _store.Job(id), ct);
         var report = new QualityResult();
         for (var round = 1; round <= Math.Max(1, j.MaxRounds); round++)
         {
             ct.ThrowIfCancellationRequested();
-           Stage(id, round == 1 ? JobStates.Building : JobStates.Reworking, "agent");
+           Stage(id, fence,round == 1 ? JobStates.Building : JobStates.Reworking, "agent");
            var existing = _store.Job(id);
            var description = round == 1 ? existing.Description :
                 "Address these failed checks and reviews, and rerun necessary tests. Findings: " + string.Join("; ", report.Findings);
@@ -209,9 +238,10 @@ public sealed class FactoryEngine
                 "Respect AGENTS.md and the existing architecture. Acceptance evidence is required. " +
                 $"Work package: {existing.Title}\n{description}";
            var run = await runtime.RunAsync(worktree, prompt, existing.SessionId, ct,
-                session => _store.UpdateJob(id, x => x.SessionId = session));
+                session => UpdateOwned(id, fence, x => x.SessionId = session));
             ct.ThrowIfCancellationRequested();
-           if (!run.Success) throw new InvalidOperationException("Agent failed: " + run.Error);
+           EnsureOwned(id, fence);
+            if (!run.Success) throw new InvalidOperationException("Agent failed: " + run.Error);
             // Only commit after the deterministic protected-path check for changed working files.
             var status = Commands.Require(Commands.Run("git", ["-C", worktree, "status", "--porcelain"], Environment.CurrentDirectory), "git status");
            if (string.IsNullOrWhiteSpace(status) && round == 1)
@@ -219,49 +249,60 @@ public sealed class FactoryEngine
            // Verify the complete Git delta before staging or committing.
             WorkPackageScope.ValidateWorktree(p, _store.Job(id));
            ct.ThrowIfCancellationRequested();
-           Stage(id, JobStates.Gating, "commit");
-           var sha = GitOperations.CommitIfNeeded(worktree, existing.Title);
-           _store.UpdateJob(id, x => x.HeadSha = sha);
+           Stage(id, fence,JobStates.Gating, "commit");
+           EnsureOwned(id, fence);
+            var sha = GitOperations.CommitIfNeeded(worktree, existing.Title);
+            UpdateOwned(id, fence, x =>
+            {
+                x.HeadSha = sha;
+                JobRecovery.Checkpoint(x, "commit", sha);
+            });
            ct.ThrowIfCancellationRequested();
-           Stage(id, JobStates.Gating, "checks");
+           Stage(id, fence,JobStates.Gating, "checks");
            report = await qualityEngine.GateAsync(p, _store.Job(id), ct);
+            EnsureOwned(id, fence);
            if (report.Passed)
             {
-                Stage(id, JobStates.Reviewing, "review");
+                Stage(id, fence,JobStates.Reviewing, "review");
                report = await qualityEngine.ReviewAsync(p, _store.Job(id), report, ct);
+               EnsureOwned(id, fence);
            }
             ct.ThrowIfCancellationRequested();
             // Checks and reviewers can also modify files; recheck the full worktree.
             WorkPackageScope.ValidateWorktree(p, _store.Job(id));
            foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id), report, ct);
-           var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
-           _store.UpdateJob(id, x => x.EvidenceFile = evidence);
+           EnsureOwned(id, fence);
+            var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
+            UpdateOwned(id, fence, x => x.EvidenceFile = evidence);
            if (report.Passed) break;
            _store.Event(id, "rework", string.Join("; ", report.Findings));
         }
         if (!report.Passed)
         {
-            Stage(id, JobStates.Blocked, "quality", "Quality gate did not pass within allotted rounds");
+            Stage(id, fence,JobStates.Blocked, "quality", "Quality gate did not pass within allotted rounds");
            return;
         }
         ct.ThrowIfCancellationRequested();
+        EnsureOwned(id, fence);
         WorkPackageScope.ValidateWorktree(p, _store.Job(id));
         if (!string.IsNullOrWhiteSpace(GitOperations.Git(worktree, "status", "--porcelain")))
             throw new ScopeViolationException(
                 "Worktree changed after quality verification; inspect and revalidate before integration");
         if (GitOperations.Head(worktree) != report.HeadSha)
             throw new ScopeViolationException("Commit changed after quality verification");
-        Stage(id, JobStates.AwaitingApproval, "integration");
+        Stage(id, fence,JobStates.AwaitingApproval, "integration");
         // Push is a side effect requiring explicit operator opt-in in settings plus remote mode.
         if (j.Mode == "remote" && _settings.AllowPush)
         {
             ct.ThrowIfCancellationRequested();
-           Stage(id, JobStates.AwaitingApproval, "push");
-           var pr = await GitOperations.PublishAsync(p, _store.Job(id), ct);
-           Stage(id, JobStates.PrReady, "pr");
-           _store.UpdateJob(id, x => x.PrUrl = pr);
+           Stage(id, fence,JobStates.AwaitingApproval, "push");
+           EnsureOwned(id, fence);
+            var pr = await GitOperations.PublishAsync(p, _store.Job(id), ct);
+            EnsureOwned(id, fence);
+            UpdateOwned(id, fence, x => x.PrUrl = pr);
+            Stage(id, fence, JobStates.PrReady, "pr");
         }
-        else Stage(id, JobStates.CompletedLocal, "await_manual_integration");
+        else Stage(id, fence,JobStates.CompletedLocal, "await_manual_integration");
         foreach (var plugin in _plugins) await plugin.AfterJobAsync(p, _store.Job(id), ct);
     }
 

@@ -25,6 +25,7 @@ public sealed class WorkerStatus
     public long TokensOut { get; set; }
     public long ExecutionGeneration { get; set; }
     public string LeaseToken { get; set; } = "";
+    public bool UsageComplete { get; set; }
 }
 
 public static class WorkerProtocol
@@ -51,26 +52,31 @@ public static class WorkerProtocol
             if (registered is null || !registered.Enabled || registered.Draining) return null;
             // Apply the same mode, dependency, budget, capacity and conflict gates as local runners.
             var selected = JobScheduler.Select(s, settings.MaxParallel, JobExecutionModes.Remote,
-                job => s.Projects.Any(p => p.Id == job.ProjectId && !string.IsNullOrWhiteSpace(p.Origin)));
+                job => s.Projects.Any(p => p.Id == job.ProjectId && !string.IsNullOrWhiteSpace(p.Origin)),
+                reservationTokens: settings.GoalReservationTokens);
             foreach (var job in selected)
             {
                 var project = s.Projects.Single(p => p.Id == job.ProjectId);
+                if (job.GoalId is not null &&
+                    GoalBudgetLedger.Allocation(s, job, settings.GoalReservationTokens) == 0)
+                    continue;
+                JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
+                    state: s, reservationTokens: settings.GoalReservationTokens);
                 FactoryGoal? goalCopy = null;
                 if (job.GoalId is { } goalId)
                 {
                     var goal = s.Goals.Single(g => g.Id == goalId);
-                    var spent = s.Jobs.Where(j => j.GoalId == goalId)
-                        .Aggregate(0L, (sum, j) => checked(sum + j.TokensIn + j.TokensOut));
-                    // Transfer the remaining goal allowance, including this job's prior usage.
-                    var others = spent - job.TokensIn - job.TokensOut;
+                    var reservation = GoalBudgetLedger.Current(s, job);
+                    // A delegated worker can only spend the capacity already reserved
+                    // atomically by the controller. Its own state is not authoritative.
                     goalCopy = new FactoryGoal
                     {
                         Id = goal.Id, ProjectId = goal.ProjectId, State = goal.State,
                         Objective = goal.Objective, AcceptanceCriteria = goal.AcceptanceCriteria.ToList(),
-                        TokenBudget = goal.TokenBudget - others, CreatedAt = goal.CreatedAt
+                        TokenBudget = checked(job.TokensIn + job.TokensOut + reservation.Reserved),
+                        CreatedAt = goal.CreatedAt
                     };
                 }
-               JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false);
                registered.Heartbeat = DateTimeOffset.UtcNow;
                s.Events.Add(new FactoryEvent { JobId = job.Id, Type = "remote_claim", Message = workerId });
                return new WorkerClaim
@@ -81,7 +87,10 @@ public static class WorkerProtocol
                     {
                         Runtime = settings.Runtime, Model = settings.Model,
                         MaxReviewRounds = settings.MaxReviewRounds, AllowPush = true,
-                        LeaseSeconds = settings.LeaseSeconds, MaxParallel = 1
+                        LeaseSeconds = settings.LeaseSeconds, MaxParallel = 1,
+                        GoalReservationTokens = job.GoalId is null
+                            ? settings.GoalReservationTokens
+                            : checked((int)Math.Min(int.MaxValue, GoalBudgetLedger.Current(s, job).Reserved))
                     }
                 };
            }
@@ -100,8 +109,19 @@ public static class WorkerProtocol
                 new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
                 return false;
            if (req.TokensIn < 0 || req.TokensOut < 0) return false;
-           j.TokensIn = Math.Max(j.TokensIn, req.TokensIn);
-           j.TokensOut = Math.Max(j.TokensOut, req.TokensOut);
+           var remaining = GoalBudgetLedger.Record(s, j, req.TokensIn, req.TokensOut,
+               req.UsageComplete);
+           if (remaining < 0)
+           {
+               GoalBudgetLedger.Hold(s, j, "remote worker exceeded its reserved budget");
+               j.ExecutionGeneration++;
+               j.State = JobStates.Blocked; j.Stage = "reconcile";
+               j.Error = "Remote worker budget exceeded; review observed usage";
+               j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null;
+               s.Events.Add(new FactoryEvent { JobId = j.Id, Type = "budget_overrun",
+                   Message = "Reported usage exceeds delegated reservation" });
+               return false;
+           }
            j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(settings.LeaseSeconds);
            return true;
         });
@@ -171,16 +191,16 @@ public static class WorkerProtocol
                 currentProject.Origin != project.Origin || currentProject.BaseBranch != project.BaseBranch)
                 return false;
 
-            // Token counters are observational only. They cannot affect PR authorization.
-            if (req.TokensIn >= 0) j.TokensIn = Math.Max(j.TokensIn, req.TokensIn);
-            if (req.TokensOut >= 0) j.TokensOut = Math.Max(j.TokensOut, req.TokensOut);
-            if (req.Job != null)
-            {
-                if (req.Job.TokensIn >= 0) j.TokensIn = Math.Max(j.TokensIn, req.Job.TokensIn);
-                if (req.Job.TokensOut >= 0) j.TokensOut = Math.Max(j.TokensOut, req.Job.TokensOut);
-            }
+            // Reported cumulative usage is debited under the same transaction as
+            // completion. Fenced stale completions never modify the budget ledger.
+            var reportedIn = Math.Max(req.TokensIn, req.Job?.TokensIn ?? 0);
+            var reportedOut = Math.Max(req.TokensOut, req.Job?.TokensOut ?? 0);
+            if (reportedIn < 0 || reportedOut < 0) return false;
+            var remaining = GoalBudgetLedger.Record(s, j, reportedIn, reportedOut,
+                req.UsageComplete);
 
-            if (verified is not null && successReported)
+            if (verified is not null && successReported &&
+                (j.GoalId is null || (req.UsageComplete && remaining >= 0)))
             {
                 j.State = JobStates.PrReady; j.Stage = "pr";
                 j.Branch = req.Job!.Branch; j.PrUrl = req.Job.PrUrl;
@@ -191,6 +211,9 @@ public static class WorkerProtocol
             }
             else
             {
+                if (j.GoalId is not null && (remaining < 0 || !req.UsageComplete) &&
+                    successReported && verified is not null)
+                    failure = "Unverified or exhausted final goal usage";
                 var scopeBlocked = req.Job is { State: JobStates.Blocked, Stage: "scope" } candidate &&
                     candidate.Id == j.Id && candidate.ProjectId == j.ProjectId &&
                     candidate.Attempt == j.Attempt && candidate.Mode == JobExecutionModes.Remote;
@@ -200,6 +223,7 @@ public static class WorkerProtocol
                 s.Events.Add(new FactoryEvent { JobId = j.Id,
                     Type = scopeBlocked ? "scope_violation" : "remote_rejected", Message = j.Error });
             }
+            GoalBudgetLedger.Settle(s, j);
             j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null;
             j.UpdatedAt = DateTimeOffset.UtcNow;
             j.FinishedAt = DateTimeOffset.UtcNow;
@@ -261,6 +285,7 @@ public static class RemoteWorker
                         {
                             report.TokensIn = current.TokensIn;
                             report.TokensOut = current.TokensOut;
+                            report.UsageComplete = current.UsageComplete;
                         }
                         using var response = await http.PostAsJsonAsync("api/worker/heartbeat",
                             report, heartbeatCancel.Token);
@@ -310,6 +335,9 @@ public static class RemoteWorker
                var engine = new FactoryEngine(localState, claim.Settings, executionMode: JobExecutionModes.Remote);
                await engine.RunQueueAsync(ct);
                report.Job = localState.Job(claim.Job.Id);
+               report.TokensIn = report.Job.TokensIn;
+               report.TokensOut = report.Job.TokensOut;
+               report.UsageComplete = report.Job.UsageComplete;
                if (!string.IsNullOrWhiteSpace(report.Job.EvidenceFile) && File.Exists(report.Job.EvidenceFile))
                     report.Evidence = await File.ReadAllTextAsync(report.Job.EvidenceFile, ct);
                report.Error = report.Job.Error;

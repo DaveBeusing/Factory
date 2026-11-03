@@ -447,7 +447,7 @@ These components assist engineering decisions; static and agent-generated analys
 | Checks | Executed before review and evidence generation |
 | Remote API | Separate administrator and worker-scoped bearer authentication; HTTPS required outside loopback |
 | Worker identity | Worker requests must carry a valid ID matching the authenticated worker credential |
-| Worker revocation | Disabled workers cannot register, claim jobs, or submit job updates |
+| Worker revocation | Disabled workers cannot register, claim jobs, or submit job updates; revoked project grants/capability evidence prevent affected lease renewal and completion |
 | Plugins | Trusted .NET assemblies, not sandboxed plugins |
 | Native checks | Execute with worker-user permissions |
 | Worktrees | Git isolation, **not** OS-level sandboxing |
@@ -466,6 +466,33 @@ Transfer the generated token securely to that specific worker; never distribute 
 $env:FACTORY_WORKER_TOKEN = '<token-for-worker-01>'
 .\dist\Factory.exe worker --server 'https://<host>:8443/' --workspace '<worker-directory>' --id worker-01
 ```
+
+**Project-scoped remote worker authorization:** An authenticated worker is not automatically authorized to execute any project. New and existing workers have **no project grants or verified capabilities** until the controller administrator provisions them. Authentication, registration, and platform self-reporting do not create or widen these privileges. Claims are filtered inside the controller's atomic scheduler transaction. An eligible remote job requires an active project, an explicit worker-to-project grant, and current controller-trusted evidence for **all** required execution capabilities. Revoking a grant or capability also denies subsequent heartbeats and completions for affected active leases, so an operator must reconcile interrupted work before retrying.
+
+After registering a project and a worker, inspect the project's GUID in the administrator-only `GET /api/state`. The administrator may replace the worker's **entire** authorization set using `PUT /api/workers/{id}/permissions` (administrator bearer token only):
+
+```powershell
+# Run from a trusted controller operator shell with an existing, securely loaded admin token.
+$controller = 'https://<controller-host>:8443'
+$projectId = '<registered-project-guid>'
+$permissions = @{
+    projectIds = @($projectId)
+    reason = 'Operator reviewed worker environment and project assignment'
+    verifiedCapabilities = @(
+        @{ capability = 'native-agent'; evidence = 'Operator reviewed native agent execution on the worker' }
+        @{ capability = 'git-cli'; evidence = 'Operator verified Git availability on the worker' }
+        @{ capability = 'runtime:exec'; evidence = 'Operator verified the configured exec adapter' }
+        @{ capability = 'native-checks'; evidence = 'Operator verified required native build checks' }
+    )
+} | ConvertTo-Json -Depth 6
+Invoke-RestMethod -Method Put -Uri "$controller/api/workers/worker-01/permissions" `
+    -Headers @{ Authorization = "Bearer $adminToken" } `
+    -ContentType 'application/json' -Body $permissions
+```
+
+The example assumes that the controller uses the `exec` runtime and the project has native checks. For `app-server`, attest `runtime:app-server` instead. If any check uses `containerImage`, `container-checks` is additionally required. Each remote claim always requires `native-agent`, `git-cli`, and the selected `runtime:...` capability. Project and job definitions can specify additional `requiredExecutionCapabilities` from this supported set; unknown capability names and missing or stale attestations block claims. Evidence expires **30 days** after administrator verification; re-verification is required. An empty `projectIds` and `verifiedCapabilities` pair revokes all worker authorizations. Provisioning replaces, rather than appends to, existing grants, so include every intended project when updating.
+
+Capability evidence in this version is an **administrator-reviewed attestation**, not a cryptographically verified measurement of the remote host. The controller does not trust capability claims from worker registration, but cannot independently prove OS sandboxing or ongoing tool integrity. Do not attest unsupported capabilities or describe native execution and Git worktrees as security isolation. Use separate OS-level restrictions and review capability evidence before authorizing a worker. The SQLite schema automatically advances from version 4 to 5 without granting existing workers any new permissions; back up `.factory` before upgrading. This is not a replacement for full human project RBAC.
 
 **Remote completion verification:** A worker's credential authenticates its identity, not its PR or quality claims. The controller accepts `pr_ready` only after querying GitHub for the PR's repository, base branch, expected `factory/<job-id>` head, and exact commit, and after checking successful **required GitHub checks** on that PR. Every configured project check name must correspond to a successful required GitHub check. Configure those required checks in GitHub branch protection/rulesets and use matching names; missing, pending, or failed checks block completion rather than implying success. Worker-provided quality evidence must also match the job ID, attempt, commit, check results, and review roles, but its contents remain explicitly labeled as **worker-reported**, not independently attested. Successful verification creates a controller-owned evidence record; rejected or unverifiable results remain blocked for inspection. GitHub CLI (`gh`) must be authenticated on the controller to read the repository and checks. Only GitHub-hosted origins currently support this verification flow. This does not merge, approve, or deploy a PR.\n\nWorker IDs must be 1–100 ASCII letters/digits/dots/underscores/hyphens and start with a letter or digit. The worker sends its ID in `X-Factory-Worker-Id`; the controller checks the derived credential and enforces matching IDs in register, claim, heartbeat, and completion payloads. These four worker operations use `POST /api/worker/{register|claim|heartbeat|complete}`. All other `/api` routes, including `/api/workers/register` and worker management actions, require the administrator token. Managed local workers receive their scoped token automatically. Factory also strips controller and worker API credentials from child agent, Git and quality-check processes.
 

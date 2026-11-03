@@ -1276,6 +1276,76 @@ await TestAsync("Budgeted runtime checks before every invocation and records rev
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Three concurrent goal claims never oversubscribe dynamic extensions", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-extensions-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "extension-concurrency" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 13000 };
+        var jobs = Enumerable.Range(0, 3).Select(_ => new FactoryJob
+            { ProjectId = project.Id, GoalId = goal.Id }).ToArray();
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.AddRange(jobs); });
+        foreach (var job in jobs)
+            store.Change(s => JobRecovery.Assign(s.Jobs.Single(j => j.Id == job.Id),
+                "local-" + job.Id, 120, local: true, state: s, reservationTokens: 4096));
+        var granted = jobs.Select(job => Task.Run(() => new StateStore(home).Change(s =>
+            GoalBudgetLedger.ExtendLocal(s, s.Jobs.Single(j => j.Id == job.Id),
+                increment: 4096, perJobLimit: 8192)))).ToArray();
+        Task.WhenAll(granted).GetAwaiter().GetResult();
+        var snapshot = new StateStore(home).Read();
+        Assert(granted.Sum(task => task.Result) == 712, "Extensions did not allocate remaining capacity exactly once");
+        Assert(GoalBudgetLedger.Liability(snapshot, goal.Id) == 13000,
+            "Concurrent extensions oversubscribed the goal");
+        Assert(snapshot.BudgetReservations.Count(r => r.State == GoalBudgetLedger.Active) == 3);
+        Assert(snapshot.Events.Count(e => e.Type == "budget_extended") == 1);
+        var winner = snapshot.Jobs.Single(j => snapshot.BudgetReservations.Any(r =>
+            r.JobId == j.Id && r.Reserved > 4096));
+        store.Change(s =>
+        {
+            var live = s.Jobs.Single(j => j.Id == winner.Id);
+            live.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1);
+        });
+        try
+        {
+            store.Change(s => GoalBudgetLedger.ExtendLocal(s,
+                s.Jobs.Single(j => j.Id == winner.Id), 4096, 8192));
+            throw new Exception("Expired worker extended its budget");
+        }
+        catch (LostExecutionLeaseException) { }
+        Assert(new StateStore(home).Read().BudgetReservations.Sum(r => r.Reserved) == 13000);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Budgeted runtime extends a live local reservation before exhaustion", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-runtime-extension-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "runtime-extension" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 1500 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "local-worker", 120,
+            local: true, state: s, reservationTokens: 512));
+        var scripted = new UsageTestRuntime();
+        scripted.Reports.Enqueue(new AgentTokenUsage(350, 50));
+        var runtime = new BudgetedAgentRuntime(scripted, store, job.Id, fence,
+            new GoalBudgetExtensionPolicy(512, 256, 1024));
+        await runtime.RunAsync(home, "first turn", "", CancellationToken.None);
+        var snapshot = store.Read();
+        var reservation = snapshot.BudgetReservations.Single();
+        Assert(reservation.Reserved == 1024 && reservation.Consumed == 400);
+        Assert(snapshot.Events.Any(e => e.Type == "budget_extended"));
+        Assert(GoalBudgetLedger.Available(snapshot, goal.Id) == 476,
+            "Unused goal capacity was incorrectly debited by reservation extension");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 await TestAsync("Budgeted runtime records failure usage and interrupts exhausted turns", async () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-budget-" + Guid.NewGuid().ToString("N"));

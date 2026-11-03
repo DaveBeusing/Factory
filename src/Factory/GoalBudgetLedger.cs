@@ -40,7 +40,6 @@ public static class GoalBudgetLedger
         var committed = Outstanding(state, goalId);
         var reservations = state.BudgetReservations.Where(r => r.GoalId == goalId).ToArray();
         var goalJobs = state.Jobs.Where(j => j.GoalId == goalId).ToArray();
-        var jobIds = goalJobs.Select(j => j.Id).ToHashSet();
         return new
         {
             goalId, total = goal.TokenBudget, consumed, committed,
@@ -57,11 +56,11 @@ public static class GoalBudgetLedger
                 j.TokensIn, j.TokensOut, totalConsumed = checked(j.TokensIn + j.TokensOut),
                 j.UsageComplete
             }).ToArray(),
-            // Operational events are retained up to the StateStore event limit.
-            // This is an observed history window, not an immutable billing ledger.
-            extensions = state.Events.Where(e => e.Type == "budget_extended" &&
-                    e.JobId.HasValue && jobIds.Contains(e.JobId.Value))
-                .Select(e => new { e.Id, e.JobId, e.At, e.Message }).ToArray(),
+            // Durable extension rows are independent of bounded operational events.
+            extensions = state.BudgetExtensions.Where(e => e.GoalId == goalId)
+                .Select(e => new { e.Id, e.JobId, e.ReservationId,
+                    e.ExecutionGeneration, e.WorkerId, e.Granted,
+                    e.AuthorizedTotal, e.At }).ToArray(),
             reservations = reservations.Select(r => new
                 {
                     r.Id, r.JobId, r.ExecutionGeneration, r.State,
@@ -133,6 +132,12 @@ public static class GoalBudgetLedger
         if (granted < BudgetedAgentRuntime.MinimumTurnAllowance) return 0;
         reservation.Reserved = checked(reservation.Reserved + granted);
         reservation.UpdatedAt = DateTimeOffset.UtcNow;
+        state.BudgetExtensions.Add(new GoalBudgetExtension
+        {
+            GoalId = reservation.GoalId, JobId = job.Id, ReservationId = reservation.Id,
+            ExecutionGeneration = job.ExecutionGeneration, WorkerId = job.LeaseOwner,
+            Granted = granted, AuthorizedTotal = reservation.Reserved
+        });
         state.Events.Add(new FactoryEvent
         {
             JobId = job.Id, Type = "budget_extended",

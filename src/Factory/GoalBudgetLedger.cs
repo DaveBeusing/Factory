@@ -17,11 +17,12 @@ public static class GoalBudgetLedger
         => state.BudgetReservations.Where(r => r.GoalId == goalId && r.State is Active or Held)
             .Aggregate(0L, (sum, r) => checked(sum + Math.Max(0, r.Reserved - r.Consumed)));
 
-    public static long Available(FactoryState state, Guid goalId)
+    public static long Available(FactoryState state, Guid goalId, Guid? claimingJobId = null)
     {
         var goal = state.Goals.Single(g => g.Id == goalId);
         // A legacy active runner without a reservation has unbounded unknown liability.
-        if (state.Jobs.Any(j => j.GoalId == goalId && JobStates.Active.Contains(j.State) &&
+        if (state.Jobs.Any(j => j.Id != claimingJobId && j.GoalId == goalId &&
+            JobStates.Active.Contains(j.State) &&
             !string.IsNullOrWhiteSpace(j.LeaseOwner) &&
             !state.BudgetReservations.Any(r => r.JobId == j.Id && r.State == Active &&
                 r.ExecutionGeneration == j.ExecutionGeneration)))
@@ -39,7 +40,7 @@ public static class GoalBudgetLedger
         if (goal?.State != "active") return 0;
         if (desired < BudgetedAgentRuntime.MinimumTurnAllowance)
             throw new ArgumentOutOfRangeException(nameof(desired));
-        var available = Available(state, id);
+        var available = Available(state, id, job.Id);
         var amount = Math.Min(available, desired);
         return amount >= BudgetedAgentRuntime.MinimumTurnAllowance ? amount : 0;
     }

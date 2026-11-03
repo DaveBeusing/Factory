@@ -57,15 +57,7 @@ public sealed class FactoryEngine
         JobRecovery.Require(_store.Job(id), fence);
 
     private void Stage(Guid id, ExecutionFence fence, string state, string stage, string? error = null)
-    {
-        UpdateOwned(id, fence, job =>
-        {
-            job.State = state; job.Stage = stage;
-            if (error != null) job.Error = error;
-            JobRecovery.Checkpoint(job, stage);
-        });
-        _store.Event(id, "stage", state + "/" + stage);
-    }
+        => _store.SetFencedStage(id, fence, state, stage, error);
 
     public IReadOnlyList<Guid> Recover() => JobRecovery.QuarantineExpired(_store);
 

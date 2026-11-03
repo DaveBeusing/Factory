@@ -100,7 +100,8 @@ public static class DashboardHost
             settings.MaxReviewRounds = input.MaxReviewRounds;
             settings.LeaseSeconds = input.LeaseSeconds;
             settings.PollSeconds = input.PollSeconds;
-            settings.GoalReservationTokens = input.GoalReservationTokens;
+            if (input.GoalReservationTokens.HasValue)
+                settings.GoalReservationTokens = input.GoalReservationTokens.Value;
             settings.AllowPush = input.AllowPush;
             settings.AutoMerge = false;
             var destination = Path.Combine(store.Home, "settings.json");
@@ -299,7 +300,8 @@ public sealed class BudgetReconciliationInput
 public sealed class SettingsInput
 {
     public int MaxParallel { get; set; } = 3;
-    public int GoalReservationTokens { get; set; } = GoalBudgetLedger.DefaultReservationTokens;
+    // Optional to preserve existing custom settings when older UI clients update settings.
+    public int? GoalReservationTokens { get; set; }
     public int MaxAgentSessions { get; set; } = 6;
     public int MaxReviewRounds { get; set; } = 3;
     public int LeaseSeconds { get; set; } = 120;

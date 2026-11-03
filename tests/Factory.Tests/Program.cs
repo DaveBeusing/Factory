@@ -1195,6 +1195,40 @@ Test("Relational state supports atomic concurrent writes", () =>
 });
 
 
+Test("Targeted SQLite operations preserve execution fencing and job children", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-targeted-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "targeted" };
+        var job = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["src/", "tests/"],
+            RequiredExecutionCapabilities = ["native-agent"] };
+        var worker = new WorkerInfo { Id = "heartbeat-target" };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); s.Workers.Add(worker); });
+        var fence = store.Change(s => JobRecovery.Assign(
+            s.Jobs.Single(j => j.Id == job.Id), "target-worker", 120, local: true));
+        var loaded = store.Job(job.Id);
+        Assert(loaded.ExpectedPaths.SequenceEqual(job.ExpectedPaths));
+        Assert(loaded.RequiredExecutionCapabilities.SequenceEqual(job.RequiredExecutionCapabilities));
+        Assert(store.RenewLease(job.Id, fence, 180), "Live fenced lease renewal failed");
+        Assert(!store.RenewLease(job.Id, fence with { Generation = fence.Generation - 1 }, 180),
+            "Superseded generation renewed an execution lease");
+        Assert(!store.RenewLease(job.Id, fence with { Owner = "other-worker" }, 180),
+            "Foreign worker renewed an execution lease");
+        Assert(store.TouchWorkerHeartbeat(worker.Id));
+        Assert((DateTimeOffset.UtcNow - store.Read().Workers.Single().Heartbeat).TotalSeconds < 10);
+        store.Change(s => s.Workers.Single().Enabled = false);
+        Assert(!store.TouchWorkerHeartbeat(worker.Id), "Disabled worker updated heartbeat");
+        store.Change(s => s.Jobs.Single().LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        Assert(!store.RenewLease(job.Id, fence, 120), "Expired lease renewed");
+        store.Event(job.Id, "targeted_test", "persisted without aggregate mutation");
+        Assert(store.Read().Events.Any(e => e.JobId == job.Id &&
+            e.Type == "targeted_test"), "Targeted event was not committed");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("App-server token usage counts deltas on resumed threads", () =>
 {
     var tracker = new AppServerTokenTracker();

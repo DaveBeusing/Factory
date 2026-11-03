@@ -84,15 +84,23 @@ public static class DashboardHost
         {
             settings.MaxParallel, settings.MaxAgentSessions, settings.MaxReviewRounds,
             settings.LeaseSeconds, settings.PollSeconds, settings.AllowPush, settings.AutoMerge, settings.Runtime,
-            settings.GoalReservationTokens
+            settings.GoalReservationTokens, settings.GoalExtensionIncrementTokens,
+            settings.GoalExtensionThresholdTokens, settings.MaxJobReservationTokens
         }));
         app.MapPut("/api/settings", (SettingsInput input) =>
         {
             if (input.MaxParallel is < 1 or > 32 || input.MaxAgentSessions is < 1 or > 64 ||
                 input.MaxReviewRounds is < 1 or > 10 || input.LeaseSeconds is < 30 or > 3600 ||
                 input.PollSeconds is < 1 or > 300 ||
-                input.GoalReservationTokens is < 256 or > 65536)
+                input.GoalReservationTokens is < 256 or > 65536 ||
+                input.GoalExtensionIncrementTokens is < 256 or > 65536 ||
+                input.GoalExtensionThresholdTokens is < 0 or > 65536 ||
+                input.MaxJobReservationTokens is < 256 or > 1000000)
                 return (IResult)Results.BadRequest(new { error = "Settings out of range" });
+            var initial = input.GoalReservationTokens ?? settings.GoalReservationTokens;
+            var max = input.MaxJobReservationTokens ?? settings.MaxJobReservationTokens;
+            if (max < initial)
+                return (IResult)Results.BadRequest(new { error = "Per-job reservation limit must be >= initial allocation" });
             if (input.AutoMerge)
                 return (IResult)Results.BadRequest(new { error = "Automatic merging is not supported; merge through a manually approved PR" });
             settings.MaxParallel = input.MaxParallel;
@@ -102,6 +110,12 @@ public static class DashboardHost
             settings.PollSeconds = input.PollSeconds;
             if (input.GoalReservationTokens.HasValue)
                 settings.GoalReservationTokens = input.GoalReservationTokens.Value;
+            if (input.GoalExtensionIncrementTokens.HasValue)
+                settings.GoalExtensionIncrementTokens = input.GoalExtensionIncrementTokens.Value;
+            if (input.GoalExtensionThresholdTokens.HasValue)
+                settings.GoalExtensionThresholdTokens = input.GoalExtensionThresholdTokens.Value;
+            if (input.MaxJobReservationTokens.HasValue)
+                settings.MaxJobReservationTokens = input.MaxJobReservationTokens.Value;
             settings.AllowPush = input.AllowPush;
             settings.AutoMerge = false;
             var destination = Path.Combine(store.Home, "settings.json");
@@ -111,7 +125,8 @@ public static class DashboardHost
             store.Event(null, "settings_updated", "Execution settings updated through Mission Control");
             return Results.Ok(new { settings.MaxParallel, settings.MaxAgentSessions, settings.MaxReviewRounds,
                 settings.LeaseSeconds, settings.PollSeconds, settings.AllowPush, settings.AutoMerge,
-                settings.GoalReservationTokens });
+                settings.GoalReservationTokens, settings.GoalExtensionIncrementTokens,
+                settings.GoalExtensionThresholdTokens, settings.MaxJobReservationTokens });
         });
         app.MapGet("/api/plans", () => Results.Ok(store.Read().Goals.Select(g =>
             new { g.Id, g.ProjectId, g.State, g.Objective, Plan = MissionControlManager.ReadPlan(store, g.Id) })));
@@ -306,6 +321,9 @@ public sealed class SettingsInput
     public int MaxParallel { get; set; } = 3;
     // Optional to preserve existing custom settings when older UI clients update settings.
     public int? GoalReservationTokens { get; set; }
+    public int? GoalExtensionIncrementTokens { get; set; }
+    public int? GoalExtensionThresholdTokens { get; set; }
+    public int? MaxJobReservationTokens { get; set; }
     public int MaxAgentSessions { get; set; } = 6;
     public int MaxReviewRounds { get; set; } = 3;
     public int LeaseSeconds { get; set; } = 120;

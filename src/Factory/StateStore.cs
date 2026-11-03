@@ -150,6 +150,7 @@ public sealed class StateStore
                 ALTER TABLE jobs ADD COLUMN execution_generation INTEGER NOT NULL DEFAULT 0;
                 ALTER TABLE jobs ADD COLUMN lease_token TEXT NOT NULL DEFAULT '';
                 ALTER TABLE jobs ADD COLUMN worker_process_id INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE jobs ADD COLUMN worker_machine_name TEXT NOT NULL DEFAULT '';
                 ALTER TABLE jobs ADD COLUMN worker_process_started_at TEXT;
                 ALTER TABLE jobs ADD COLUMN checkpoint_stage TEXT NOT NULL DEFAULT '';
                 ALTER TABLE jobs ADD COLUMN checkpoint_commit TEXT NOT NULL DEFAULT '';

@@ -50,7 +50,7 @@ public static class Program
 Factory | C# / .NET 10
   version | doctor | init <repo> --name NAME [--base master] [--checks-json PATH]
   enqueue --project NAME --title TITLE --description TEXT [--mode local|remote] [--paths file1,file2]
-  run | recover | status | pause | resume | verify <job-guid>
+  run | recover | reconcile <job-guid> --reviewed --reason TEXT | status | pause | resume | verify <job-guid>
   goal add --project NAME --objective TEXT [--criteria TEXT] [--budget TOKENS]
   plan --goal GUID | adopt --goal GUID [--mode local|remote]
   graph --project NAME | impact --project NAME --file RELATIVE_PATH
@@ -145,6 +145,11 @@ Environment: FACTORY_HOME overrides the local state directory.
             }
             case "run": await engine.RunQueueAsync(CancellationToken.None); return 0;
             case "recover": Print(engine.Recover()); return 0;
+            case "reconcile":
+                if (args.Length < 2 || !args.Contains("--reviewed", StringComparer.Ordinal))
+                    throw new ArgumentException("Use reconcile <job-guid> --reviewed --reason TEXT");
+                Print(JobRecovery.ReconcileLocal(store, GuidArg(args[1]), true, Required(args, "reason")));
+                return 0;
             case "status":
                 Print(new { store.Read().Projects, store.Read().Jobs, store.Read().Goals, store.Read().Workers }); return 0;
             case "pause": store.Change(s => s.Paused = true); Console.WriteLine("Queue paused"); return 0;

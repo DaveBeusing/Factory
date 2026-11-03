@@ -156,8 +156,49 @@ function formGoal(id){const g=state.goals.find(g=>g.id===id);if(!g&&!state.proje
 function formJob(id){const j=state.jobs.find(j=>j.id===id);if(!j&&!state.projects.length){notify('Register a project first',true);return}const v=j||{projectId:state.projects[0].id,goalId:'',title:'',description:'',mode:'local',risk:'medium',priority:50,dependsOn:[],expectedPaths:[]};let html=field('projectId','Project',v.projectId,'select',projectOptions())+field('goalId','Linked goal (optional)',v.goalId||'','select',goalOptions())+field('title','Title',v.title)+field('description','Work package description',v.description,'textarea')+`<div class="field-row">${field('mode','Execution',v.mode,'select',[['local','Local'],['remote','Remote']])}${field('risk','Risk',v.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}</div>`+field('priority','Priority (0-100)',v.priority,'number')+field('expectedPaths','Expected paths (one per line)',v.expectedPaths.join('\n'),'textarea')+field('dependsOn','Dependencies (job IDs, one per line)',v.dependsOn.join('\n'),'textarea');
  openForm(j?'Edit job':'Create job','Execution starts only when dependencies and policies allow it.',html,async f=>{const x=values(f);await mutate(j?`jobs/${j.id}`:'jobs',j?'PUT':'POST',{projectId:x.projectId,goalId:x.goalId||null,title:x.title,description:x.description,mode:x.mode,risk:x.risk,priority:Number(x.priority),expectedPaths:lines(x.expectedPaths),dependsOn:lines(x.dependsOn)})},j?'Save job':'Queue job')}
 function formWorker(id){const w=state.workers.find(w=>w.id===id);openForm(w?'Configure worker':'Register worker','Remote workers authenticate with the Factory token. Local workers may be launched directly from this dashboard.',field('id','Unique worker ID',w?.id||'')+field('platform','Platform / capabilities',w?.platform||'remote'),async f=>{const x=values(f);if(w&&x.id!==w.id)throw Error('Worker ID cannot be changed');await mutate('workers/register','POST',x)},w?'Save worker':'Register worker')}
-function formSettings(){let html=`<div class="field-row">${field('maxParallel','Global concurrency',settings.maxParallel||3,'number')}${field('maxAgentSessions','Agent sessions',settings.maxAgentSessions||6,'number')}${field('maxReviewRounds','Review rounds',settings.maxReviewRounds||3,'number')}${field('leaseSeconds','Lease duration (s)',settings.leaseSeconds||120,'number')}${field('pollSeconds','Polling interval (s)',settings.pollSeconds||3,'number')}</div>`+field('allowPush','Allow remote pushes',settings.allowPush,'checkbox')+field('autoMerge','Allow automatic merging',settings.autoMerge,'checkbox');
- openForm('Execution settings','Changes affect future scheduling. Push and merge remain sensitive actions.',html,async f=>{const x=values(f);const body={maxParallel:Number(x.maxParallel),maxAgentSessions:Number(x.maxAgentSessions),maxReviewRounds:Number(x.maxReviewRounds),leaseSeconds:Number(x.leaseSeconds),pollSeconds:Number(x.pollSeconds),allowPush:f.elements.allowPush.checked,autoMerge:f.elements.autoMerge.checked};if((body.allowPush&&!settings.allowPush)||(body.autoMerge&&!settings.autoMerge)){if(!confirm('Enable publishing or automatic merging? Ensure repository policies and approvals are configured.'))return}await mutate('settings','PUT',body);await fetchSettings()},'Apply settings')}
+function formSettings(){
+ const supportsExtensions=Number.isFinite(settings.goalExtensionIncrementTokens)&&
+   Number.isFinite(settings.maxJobReservationTokens);
+ let html=`<div class="field-row">${field('maxParallel','Global concurrency',settings.maxParallel||3,'number')}
+ ${field('maxAgentSessions','Agent sessions',settings.maxAgentSessions||6,'number')}
+ ${field('maxReviewRounds','Review rounds',settings.maxReviewRounds||3,'number')}
+ ${field('leaseSeconds','Lease duration (s)',settings.leaseSeconds||120,'number')}
+ ${field('pollSeconds','Polling interval (s)',settings.pollSeconds||3,'number')}</div>`;
+ if(Number.isFinite(settings.goalReservationTokens))
+  html+=field('goalReservationTokens','Initial goal reservation (tokens)',
+   settings.goalReservationTokens,'number',[],'Initial tokens committed when a goal-funded job is claimed.');
+ if(supportsExtensions)
+  html+=`<h3>Dynamic goal allocations</h3><div class="field-row">
+   ${field('goalExtensionIncrementTokens','Extension increment (tokens)',settings.goalExtensionIncrementTokens,'number')}
+   ${field('goalExtensionThresholdTokens','Low-water threshold (tokens)',settings.goalExtensionThresholdTokens,'number')}
+   ${field('maxJobReservationTokens','Maximum per-job allocation (tokens)',settings.maxJobReservationTokens,'number')}
+   </div><p class="subtext">Controller-approved goal reservations, not provider account allowances.</p>`;
+ html+=field('allowPush','Allow remote pushes',settings.allowPush,'checkbox')+
+  field('autoMerge','Allow automatic merging',settings.autoMerge,'checkbox');
+ openForm('Execution settings','Changes affect future scheduling. Push and merge remain sensitive actions.',
+  html,async f=>{
+   const x=values(f);
+   const body={maxParallel:Number(x.maxParallel),maxAgentSessions:Number(x.maxAgentSessions),
+    maxReviewRounds:Number(x.maxReviewRounds),leaseSeconds:Number(x.leaseSeconds),
+    pollSeconds:Number(x.pollSeconds),allowPush:f.elements.allowPush.checked,
+    autoMerge:f.elements.autoMerge.checked};
+   for(const key of ['goalReservationTokens','goalExtensionIncrementTokens',
+    'goalExtensionThresholdTokens','maxJobReservationTokens'])
+    if(Object.hasOwn(x,key)){
+     const value=Number(x[key]);
+     if(!Number.isSafeInteger(value)||value<0)throw Error('Budget allocations require nonnegative integers');
+     body[key]=value;
+    }
+   if(body.maxJobReservationTokens!==undefined && body.goalReservationTokens!==undefined &&
+      body.maxJobReservationTokens<body.goalReservationTokens)
+    throw Error('Per-job allocation limit must be at least the initial reservation');
+   if((body.allowPush&&!settings.allowPush)||(body.autoMerge&&!settings.autoMerge)){
+    if(!confirm('Enable publishing or automatic merging? Ensure repository policies and approvals are configured.'))return;
+   }
+   await mutate('settings','PUT',body);
+   await fetchSettings();
+  },'Apply settings');
+}
 async function confirmControl(type,id,action){const label={activate:'Activate',pause:'Pause',disable:'Disable',archive:'Archive',stop:'Stop',resume:'Resume',retry:'Retry',complete:'Complete',drain:'Drain',enable:'Enable'}[action]||action;
  let html=`<p class="subtext">${esc(label)} ${esc(type)}? The action will be recorded in the audit trail.</p>`+field('reason','Reason (optional)','','textarea');if(type==='worker'&&action==='stop')html+='<p class="subtext">Stops only a locally managed, idle worker process. Drain first if work is active.</p>';if(type==='job'&&['resume','retry'].includes(action)){const j=state.jobs.find(j=>j.id===id);if(j?.startedAt)html+=field('reviewed','I inspected the existing worktree and side effects',false,'checkbox')}
  openForm(`${label} ${type}`,action==='pause'&&type==='queue'?'Active jobs continue; new scheduling pauses.':'Confirm this operational action.',html,async f=>{const x=values(f);const body={action,reason:x.reason||'',reviewed:!!f.elements.reviewed?.checked};if(type==='job'&&['resume','retry'].includes(action)&&state.jobs.find(j=>j.id===id)?.startedAt&&!body.reviewed)throw Error('Worktree review acknowledgement required');await mutate(`${type}s/${encodeURIComponent(id)}/action`,'POST',body);if(type==='worker')await fetchManagedWorkers()},label)}

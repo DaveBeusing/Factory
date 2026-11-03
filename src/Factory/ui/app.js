@@ -212,6 +212,18 @@ async function renderGoalBudget(goalId){
   }).join('');
   const jobs=new Set(state.jobs.filter(j=>j.goalId===goalId).map(j=>j.id));
   const events=state.events.filter(e=>jobs.has(e.jobId)&&['budget_reserved','budget_extended','budget_held','budget_released','budget_reconciled','budget_overrun'].includes(e.type));
+  // Extended job accounting is optional until the budget API change is integrated.
+  const accountedJobs=Array.isArray(budget.jobs)?budget.jobs:state.jobs.filter(j=>j.goalId===goalId).map(j=>({
+   id:j.id,state:j.state,stage:j.stage,worker:j.leaseOwner||null,
+   tokensIn:j.tokensIn,tokensOut:j.tokensOut,usageComplete:j.usageComplete
+  }));
+  const usageRows=accountedJobs.map(entry=>{
+   const job=state.jobs.find(j=>j.id===entry.id);
+   const total=Number(entry.tokensIn||0)+Number(entry.tokensOut||0);
+   return `<tr><td><strong>${esc(shorten(job?.title||entry.id,45))}</strong><small>${esc((entry.state||'unknown')+' / '+(entry.stage||'unknown'))}</small></td>
+    <td>${esc(entry.worker||'No active owner')}</td><td>${nf(entry.tokensIn)}</td><td>${nf(entry.tokensOut)}</td>
+    <td>${nf(total)}</td><td>${entry.usageComplete?badge('reported'):badge('unconfirmed')}</td></tr>`;
+  }).join('');
   $('inspector-goal-budget').innerHTML=`<div class="budget-breakdown">
     <div><small>Total budget</small><strong>${nf(total)}</strong></div><div><small>Observed consumption</small><strong>${nf(used)}</strong></div>
     <div><small>Active liabilities</small><strong>${nf(active)}</strong></div><div><small>Held liabilities</small><strong>${nf(held)}</strong></div>
@@ -220,7 +232,11 @@ async function renderGoalBudget(goalId){
    <p class="subtext">Goal-budget accounting is separate from provider account allowances. Final usage that is unknown must remain unsettled.</p>
    <h3>Reservations</h3>${rows.length?table(['Job','Status','Reserved','Consumed','Outstanding'],records):'<p class="subtext">No reservations reported.</p>'}
    ${held>0?`<button class="button button-muted" data-act="budget-reconcile" data-id="${goalId}">Review held usage</button>`:''}
-   <h3>Budget activity</h3>${eventItems(events,20)}`;
+   <h3>Per-job reported usage</h3>
+   ${usageRows?table(['Job','Current owner','Input','Output','Total','Final usage'],usageRows):'<p class="subtext">No linked job usage reported.</p>'}
+   <p class="subtext">Owner is the current lease assignment, not a complete historical worker attribution. Unconfirmed final usage is not a provider-account allowance.</p>
+   <h3>Budget activity</h3>${eventItems(events,20)}
+   <p class="subtext">Operational events are subject to controller retention limits; absence of an older extension event does not prove it never occurred.</p>`;
  }catch(error){
   if(inspectorKey==='goal:'+goalId&&$('inspector-goal-budget'))
    $('inspector-goal-budget').innerHTML=`<p class="subtext" role="alert">Budget details unavailable: ${esc(error.message)}</p><button class="button button-muted" data-act="budget-refresh" data-id="${goalId}">Retry</button>`;

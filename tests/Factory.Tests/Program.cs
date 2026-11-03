@@ -1378,6 +1378,7 @@ await TestAsync("Expired local lease is quarantined and cannot be replayed", asy
 Test("Reconciliation checks process identity, worktree, and committed checkpoints", () =>
 {
     var root = Path.Combine(Path.GetTempPath(), "factory-fence-reconcile-" + Guid.NewGuid().ToString("N"));
+    var home = Path.Combine(Path.GetTempPath(), "factory-fence-state-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(root);
     void Git(params string[] args) =>
         Commands.Require(Commands.Run("git", ["-C", root, ..args], root), "git fixture");
@@ -1388,7 +1389,6 @@ Test("Reconciliation checks process identity, worktree, and committed checkpoint
         Git("config", "user.email", "factory-tests@example.invalid");
         File.WriteAllText(Path.Combine(root, "README.md"), "initial");
         Git("add", "README.md"); Git("commit", "-m", "Initial");
-        var home = Path.Combine(root, "state");
         var store = new StateStore(home);
         var project = new ProjectInfo { Name = "recovery", Path = root };
         var job = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["README.md"] };
@@ -1427,7 +1427,11 @@ Test("Reconciliation checks process identity, worktree, and committed checkpoint
             new ExecutionFence(before, "", "owner")), "Old owner regained control");
         Assert(next.Token.Length > 0 && next.Owner == "new-owner");
     }
-    finally { try { Directory.Delete(root, true); } catch { } }
+    finally
+    {
+        try { Directory.Delete(root, true); } catch { }
+        try { Directory.Delete(home, true); } catch { }
+    }
 });
 
 await TestAsync("Remote worker generation fences stale heartbeats and completions", async () =>

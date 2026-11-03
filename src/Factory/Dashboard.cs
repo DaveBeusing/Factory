@@ -83,13 +83,15 @@ public static class DashboardHost
         app.MapGet("/api/settings", () => Results.Ok(new
         {
             settings.MaxParallel, settings.MaxAgentSessions, settings.MaxReviewRounds,
-            settings.LeaseSeconds, settings.PollSeconds, settings.AllowPush, settings.AutoMerge, settings.Runtime
+            settings.LeaseSeconds, settings.PollSeconds, settings.AllowPush, settings.AutoMerge, settings.Runtime,
+            settings.GoalReservationTokens
         }));
         app.MapPut("/api/settings", (SettingsInput input) =>
         {
             if (input.MaxParallel is < 1 or > 32 || input.MaxAgentSessions is < 1 or > 64 ||
                 input.MaxReviewRounds is < 1 or > 10 || input.LeaseSeconds is < 30 or > 3600 ||
-                input.PollSeconds is < 1 or > 300)
+                input.PollSeconds is < 1 or > 300 ||
+                input.GoalReservationTokens is < 256 or > 65536)
                 return (IResult)Results.BadRequest(new { error = "Settings out of range" });
             if (input.AutoMerge)
                 return (IResult)Results.BadRequest(new { error = "Automatic merging is not supported; merge through a manually approved PR" });
@@ -98,6 +100,7 @@ public static class DashboardHost
             settings.MaxReviewRounds = input.MaxReviewRounds;
             settings.LeaseSeconds = input.LeaseSeconds;
             settings.PollSeconds = input.PollSeconds;
+            settings.GoalReservationTokens = input.GoalReservationTokens;
             settings.AllowPush = input.AllowPush;
             settings.AutoMerge = false;
             var destination = Path.Combine(store.Home, "settings.json");
@@ -106,7 +109,8 @@ public static class DashboardHost
             File.Move(temporary, destination, true);
             store.Event(null, "settings_updated", "Execution settings updated through Mission Control");
             return Results.Ok(new { settings.MaxParallel, settings.MaxAgentSessions, settings.MaxReviewRounds,
-                settings.LeaseSeconds, settings.PollSeconds, settings.AllowPush, settings.AutoMerge });
+                settings.LeaseSeconds, settings.PollSeconds, settings.AllowPush, settings.AutoMerge,
+                settings.GoalReservationTokens });
         });
         app.MapGet("/api/plans", () => Results.Ok(store.Read().Goals.Select(g =>
             new { g.Id, g.ProjectId, g.State, g.Objective, Plan = MissionControlManager.ReadPlan(store, g.Id) })));
@@ -142,6 +146,11 @@ public static class DashboardHost
         app.MapPut("/api/projects/{id:guid}", (Guid id, ProjectInput input) => Results.Ok(MissionControlManager.UpdateProject(store, id, input)));
         app.MapPost("/api/projects/{id:guid}/action", (Guid id, ControlInput input) =>
             Results.Ok(MissionControlManager.SetProjectStatus(store, id, input.Action)));
+        app.MapGet("/api/goals/{id:guid}/budget", (Guid id) =>
+            Results.Ok(GoalBudgetLedger.Summary(store.Read(), id)));
+        app.MapPost("/api/goals/{id:guid}/budget/reconcile", (Guid id, BudgetReconciliationInput input) =>
+            Results.Ok(GoalBudgetLedger.Reconcile(store, id, input.ReservationId,
+                input.FinalTokensIn, input.FinalTokensOut, input.Reviewed, input.Reason)));
         app.MapPost("/api/goals", (GoalInput input) => Results.Created("/api/state", MissionControlManager.CreateGoal(store, input)));
         app.MapPut("/api/goals/{id:guid}", (Guid id, GoalInput input) => Results.Ok(MissionControlManager.UpdateGoal(store, id, input)));
         app.MapPost("/api/goals/{id:guid}/action", (Guid id, ControlInput input) =>
@@ -278,9 +287,19 @@ public sealed class PlanAdoptInput
     public string Mode { get; set; } = "local";
 }
 
+public sealed class BudgetReconciliationInput
+{
+    public Guid ReservationId { get; set; }
+    public long FinalTokensIn { get; set; }
+    public long FinalTokensOut { get; set; }
+    public bool Reviewed { get; set; }
+    public string Reason { get; set; } = "";
+}
+
 public sealed class SettingsInput
 {
     public int MaxParallel { get; set; } = 3;
+    public int GoalReservationTokens { get; set; } = GoalBudgetLedger.DefaultReservationTokens;
     public int MaxAgentSessions { get; set; } = 6;
     public int MaxReviewRounds { get; set; } = 3;
     public int LeaseSeconds { get; set; } = 120;

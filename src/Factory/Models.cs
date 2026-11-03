@@ -17,6 +17,7 @@ public sealed class FactoryState
     public List<ProjectInfo> Projects { get; set; } = [];
     public List<FactoryJob> Jobs { get; set; } = [];
     public List<GoalBudgetReservation> BudgetReservations { get; set; } = [];
+    public List<GoalBudgetExtension> BudgetExtensions { get; set; } = [];
     public List<FactoryGoal> Goals { get; set; } = [];
     public List<FactoryEvent> Events { get; set; } = [];
     public List<KnowledgeItem> Knowledge { get; set; } = [];
@@ -99,6 +100,23 @@ public sealed class FactoryJob
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? FinishedAt { get; set; }
+}
+
+/// <summary>
+/// Durable controller-authorized reservation extension. This is separate from
+/// the bounded operational event feed and contains no lease credentials.
+/// </summary>
+public sealed class GoalBudgetExtension
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid GoalId { get; set; }
+    public Guid JobId { get; set; }
+    public Guid ReservationId { get; set; }
+    public long ExecutionGeneration { get; set; }
+    public string WorkerId { get; set; } = "";
+    public long Granted { get; set; }
+    public long AuthorizedTotal { get; set; }
+    public DateTimeOffset At { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class GoalBudgetReservation

@@ -378,6 +378,10 @@ public static class MissionControlManager
             Require(s.Workers.Any(w => w.Id == id), "Worker must be registered first");
             Require(input.ProjectIds.All(pid => s.Projects.Any(p => p.Id == pid)),
                 "Unknown project grant");
+            // Changing project grants must not silently renew old capability attestations.
+            var previousProofs = s.WorkerCapabilityProofs
+                .Where(p => p.WorkerId == id)
+                .ToDictionary(p => p.Capability, StringComparer.Ordinal);
             s.WorkerProjectGrants.RemoveAll(g => g.WorkerId == id);
             s.WorkerCapabilityProofs.RemoveAll(p => p.WorkerId == id);
             foreach (var projectId in input.ProjectIds)
@@ -389,11 +393,15 @@ public static class MissionControlManager
                 s.WorkerCapabilityProofs.Add(new WorkerCapabilityProof
                 {
                     WorkerId = id, Capability = capability.Capability,
-                    Evidence = capability.Evidence.Trim(), VerifiedAt = DateTimeOffset.UtcNow
+                    Evidence = capability.Evidence.Trim(),
+                    VerifiedAt = previousProofs.TryGetValue(capability.Capability, out var prior) &&
+                        string.Equals(prior.Evidence, capability.Evidence.Trim(), StringComparison.Ordinal)
+                        ? prior.VerifiedAt : DateTimeOffset.UtcNow
                 });
-            Log(s, null, "worker_authorization", id + ": " + input.Reason.Trim() +
-                " (projects=" + input.ProjectIds.Count + ", capabilities=" +
-                input.VerifiedCapabilities.Count + ")");
+            var audit = id + ": " + input.Reason.Trim() +
+                " (projects=" + string.Join(",", input.ProjectIds.Select(p => p.ToString("N"))) +
+                "; capabilities=" + string.Join(",", input.VerifiedCapabilities.Select(p => p.Capability)) + ")";
+            Log(s, null, "worker_authorization", audit[..Math.Min(audit.Length, 2000)]);
             return new WorkerPermissionsResult
             {
                 WorkerId = id, ProjectIds = input.ProjectIds.ToList(),

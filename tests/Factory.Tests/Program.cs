@@ -361,8 +361,24 @@ Test("Remote execution requires current trusted capability evidence", () =>
             "Expired capability verification was trusted");
 
         GrantRemoteWorker(store, "limited-worker", project.Id);
+        Assert(WorkerProtocol.Claim(store, settings, "limited-worker") is null,
+            "Unchanged evidence text improperly renewed an expired attestation");
+        var evidence = store.Read().WorkerCapabilityProofs
+            .Where(p => p.WorkerId == "limited-worker")
+            .Select(p => new VerifiedWorkerCapabilityInput
+            {
+                Capability = p.Capability,
+                Evidence = p.Capability == "container-checks"
+                    ? p.Evidence + "; reverified after expiration" : p.Evidence
+            }).ToList();
+        MissionControlManager.SetWorkerPermissions(store, "limited-worker", new WorkerPermissionsInput
+        {
+            ProjectIds = [project.Id],
+            Reason = "Operator reverified expired container capability",
+            VerifiedCapabilities = evidence
+        });
         Assert(WorkerProtocol.Claim(store, settings, "limited-worker")?.Job.Id == job.Id,
-            "Verified worker was not allowed to claim an eligible job");
+            "Reverified worker was not allowed to claim an eligible job");
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

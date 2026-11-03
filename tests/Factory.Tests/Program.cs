@@ -1569,10 +1569,6 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
                 DROP TABLE worker_capability_proofs;
                 DROP TABLE projects_required_execution_capabilities;
                 DROP TABLE jobs_required_execution_capabilities;
-                DROP TABLE worker_project_grants;
-                DROP TABLE worker_capability_proofs;
-                DROP TABLE projects_required_execution_capabilities;
-                DROP TABLE jobs_required_execution_capabilities;
                 DROP TABLE goal_budget_reservations;
                 ALTER TABLE jobs DROP COLUMN usage_complete;
                 ALTER TABLE jobs DROP COLUMN execution_generation;
@@ -1950,6 +1946,10 @@ Test("SQLite 3 migration quarantines unreserved goal runners and holds budget", 
             db.Open();
             using var cmd = db.CreateCommand();
             cmd.CommandText = """
+                DROP TABLE worker_project_grants;
+                DROP TABLE worker_capability_proofs;
+                DROP TABLE projects_required_execution_capabilities;
+                DROP TABLE jobs_required_execution_capabilities;
                 DROP TABLE goal_budget_reservations;
                 ALTER TABLE jobs DROP COLUMN usage_complete;
                 PRAGMA user_version=3;

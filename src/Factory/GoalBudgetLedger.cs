@@ -33,6 +33,25 @@ public static class GoalBudgetLedger
     public static long Liability(FactoryState state, Guid goalId)
         => checked(Spent(state, goalId) + Outstanding(state, goalId));
 
+    public static object Summary(FactoryState state, Guid goalId)
+    {
+        var goal = state.Goals.Single(g => g.Id == goalId);
+        var consumed = Spent(state, goalId);
+        var committed = Outstanding(state, goalId);
+        return new
+        {
+            goalId, total = goal.TokenBudget, consumed, committed,
+            available = Available(state, goalId),
+            reservations = state.BudgetReservations.Where(r => r.GoalId == goalId)
+                .Select(r => new
+                {
+                    r.Id, r.JobId, r.ExecutionGeneration, r.State,
+                    r.Reserved, r.Consumed,
+                    outstanding = Math.Max(0, r.Reserved - r.Consumed)
+                }).ToArray()
+        };
+    }
+
     public static long Allocation(FactoryState state, FactoryJob job, int desired)
     {
         if (job.GoalId is not { } id) return 0;
@@ -146,14 +165,16 @@ public static class GoalBudgetLedger
     /// <summary>
     /// Explicit audited settlement. Uncertain worker usage is never silently forgiven.
     /// </summary>
-    public static GoalBudgetReservation Reconcile(StateStore store, Guid reservationId,
+    public static GoalBudgetReservation Reconcile(StateStore store, Guid goalId, Guid reservationId,
         long finalTokensIn, long finalTokensOut, bool reviewed, string reason)
     {
-        if (!reviewed || reason.Trim().Length < 10)
+        if (!reviewed || string.IsNullOrWhiteSpace(reason) || reason.Trim().Length < 10)
             throw new InvalidOperationException("Independent usage reconciliation requires review and justification");
         return store.Change(state =>
         {
             var reservation = state.BudgetReservations.Single(r => r.Id == reservationId);
+            if (reservation.GoalId != goalId)
+                throw new InvalidOperationException("Reservation belongs to a different goal");
             if (reservation.State != Held)
                 throw new InvalidOperationException("Only held reservations can be reconciled");
             var job = state.Jobs.Single(j => j.Id == reservation.JobId);

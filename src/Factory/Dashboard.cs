@@ -148,6 +148,9 @@ public static class DashboardHost
             Results.Ok(MissionControlManager.SetGoalStatus(store, id, input.Action)));
         app.MapPost("/api/jobs", (JobInput input) => Results.Created("/api/state", MissionControlManager.CreateJob(store, input, settings)));
         app.MapPut("/api/jobs/{id:guid}", (Guid id, JobInput input) => Results.Ok(MissionControlManager.UpdateJob(store, id, input)));
+        // An explicit administrator-approved amendment is required for blocked scope violations.
+        app.MapPost("/api/jobs/{id:guid}/scope-amendment", (Guid id, ScopeAmendmentInput input) =>
+            Results.Ok(MissionControlManager.AmendScope(store, id, input)));
         app.MapPost("/api/jobs/{id:guid}/action", (Guid id, ControlInput input) =>
             Results.Ok(MissionControlManager.ControlJob(store, id, input)));
         app.MapPost("/api/jobs/{id:guid}/start", (Guid id) =>

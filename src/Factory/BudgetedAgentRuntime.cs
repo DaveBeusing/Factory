@@ -3,9 +3,9 @@ namespace Factory;
 public sealed class TokenBudgetExceededException(string message) : InvalidOperationException(message) { }
 
 /// <summary>
-/// Accounts for all builder and reviewer turns, including streamed partial usage,
-/// before allowing the next turn. Serializes turns within a job to prevent its
-/// reviewers racing the same remaining goal budget.
+/// Every turn consumes an independently reserved share of the goal allowance.
+/// Transactional debits and execution fencing prevent concurrent jobs from
+/// spending the same available budget. Turns of one job remain serialized.
 /// </summary>
 public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, Guid jobId,
     ExecutionFence? fence = null) : IAgentRuntime
@@ -20,48 +20,45 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
         await _turnLock.WaitAsync(cancellation);
         try
         {
-            var state = store.Read();
-            var job = state.Jobs.Single(j => j.Id == jobId);
-            if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
-            long? remaining = null;
-            if (job.GoalId is { } goalId)
+            var remaining = store.Change(state =>
             {
-                var goal = state.Goals.Single(g => g.Id == goalId);
-                if (goal.State != "active")
+                var job = state.Jobs.Single(j => j.Id == jobId);
+                if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
+                if (job.GoalId is { } goalId &&
+                    state.Goals.Single(g => g.Id == goalId).State != "active")
                     throw new TokenBudgetExceededException("Goal is not active");
-                var spent = state.Jobs.Where(j => j.GoalId == goalId)
-                    .Aggregate(0L, (sum, j) => checked(sum + j.TokensIn + j.TokensOut));
-                remaining = goal.TokenBudget - spent;
-                if (remaining < MinimumTurnAllowance)
-                    throw new TokenBudgetExceededException(
-                        $"Insufficient goal budget for another turn ({Math.Max(0, remaining.Value)} remaining, " +
-                        $"{MinimumTurnAllowance} minimum).");
-            }
+                return GoalBudgetLedger.BeginTurn(state, job);
+            });
 
             using var scope = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             long recordedIn = 0, recordedOut = 0;
             bool budgetReached = false;
             bool sawUsage = false;
+
             void Record(AgentTokenUsage usage)
             {
                 if (usage.InputTokens < recordedIn || usage.OutputTokens < recordedOut)
-                    return; // Ignore old or duplicated cumulative snapshots.
+                    return; // An old or repeated cumulative snapshot is not a debit.
                 var inputDelta = usage.InputTokens - recordedIn;
                 var outputDelta = usage.OutputTokens - recordedOut;
                 if (inputDelta == 0 && outputDelta == 0 && sawUsage) return;
+
+                var currentRemaining = store.Change(state =>
+                {
+                    var job = state.Jobs.Single(j => j.Id == jobId);
+                    if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
+                    return GoalBudgetLedger.Record(state, job,
+                        checked(job.TokensIn + inputDelta),
+                        checked(job.TokensOut + outputDelta));
+                });
+
                 recordedIn = usage.InputTokens;
                 recordedOut = usage.OutputTokens;
                 sawUsage = true;
-                if (inputDelta != 0 || outputDelta != 0)
-                    store.Change(state =>
-                    {
-                        var current = state.Jobs.Single(j => j.Id == jobId);
-                        if (fence is { } currentFence) JobRecovery.Require(current, currentFence);
-                        current.TokensIn = checked(current.TokensIn + inputDelta);
-                        current.TokensOut = checked(current.TokensOut + outputDelta);
-                    });
                 onUsage?.Invoke(usage);
-                if (remaining.HasValue && usage.Total >= remaining.Value)
+
+                if (remaining != long.MaxValue &&
+                    (usage.Total >= remaining || currentRemaining <= 0))
                 {
                     budgetReached = true;
                     scope.Cancel();
@@ -74,17 +71,28 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                     onSession, readOnly, Record);
                 if (result.UsageReported)
                     Record(new AgentTokenUsage(result.InputTokens, result.OutputTokens));
+
+                // A partial usage notification cannot prove the final total.
+                if (!result.UsageReported && remaining != long.MaxValue)
+                    throw new TokenBudgetExceededException("Agent did not report final token usage; budget remains held");
+
+                if (result.UsageReported && remaining != long.MaxValue && !budgetReached)
+                    store.Change(state =>
+                    {
+                        var job = state.Jobs.Single(j => j.Id == jobId);
+                        if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
+                        GoalBudgetLedger.Current(state, job);
+                        job.UsageComplete = true;
+                    });
+
                 if (budgetReached)
-                    throw new TokenBudgetExceededException("Goal token budget reached during execution");
-                // Unknown usage must not silently permit unlimited further turns.
-                if (remaining.HasValue && !sawUsage)
-                    throw new TokenBudgetExceededException("Agent did not report token usage; budget cannot be verified");
+                    throw new TokenBudgetExceededException("Job reservation exhausted during execution");
                 if (fence is { } finalFence) JobRecovery.Require(store.Job(jobId), finalFence);
                 return result;
             }
             catch (OperationCanceledException) when (budgetReached && !cancellation.IsCancellationRequested)
             {
-                throw new TokenBudgetExceededException("Goal token budget reached during execution");
+                throw new TokenBudgetExceededException("Job reservation exhausted during execution");
             }
         }
         finally { _turnLock.Release(); }

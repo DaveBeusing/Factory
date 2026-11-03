@@ -52,7 +52,12 @@ public static class WorkerProtocol
             if (registered is null || !registered.Enabled || registered.Draining) return null;
             // Apply the same mode, dependency, budget, capacity and conflict gates as local runners.
             var selected = JobScheduler.Select(s, settings.MaxParallel, JobExecutionModes.Remote,
-                job => s.Projects.Any(p => p.Id == job.ProjectId && !string.IsNullOrWhiteSpace(p.Origin)),
+                job =>
+                {
+                    var project = s.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
+                    return project is not null && !string.IsNullOrWhiteSpace(project.Origin) &&
+                        WorkerAuthorization.CanExecute(s, registered, project, job, settings);
+                },
                 reservationTokens: settings.GoalReservationTokens);
             foreach (var job in selected)
             {
@@ -102,13 +107,21 @@ public static class WorkerProtocol
         => store.Change(s =>
         {
             var worker = s.Workers.FirstOrDefault(w => w.Id == req.WorkerId);
-           if (worker != null) worker.Heartbeat = DateTimeOffset.UtcNow;
-           if (req.JobId == Guid.Empty) return worker != null;
-           var j = s.Jobs.FirstOrDefault(j => j.Id == req.JobId);
-           if (j == null || !JobRecovery.Matches(j,
+            if (worker is null || !worker.Enabled) return false;
+            if (req.JobId == Guid.Empty)
+            {
+                worker.Heartbeat = DateTimeOffset.UtcNow;
+                return true;
+            }
+            var j = s.Jobs.FirstOrDefault(j => j.Id == req.JobId);
+            var project = j is null ? null : s.Projects.FirstOrDefault(p => p.Id == j.ProjectId);
+            if (j is null || project is null ||
+                !WorkerAuthorization.CanContinue(s, worker, project, j, settings) ||
+                !JobRecovery.Matches(j,
                 new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
                 return false;
            if (req.TokensIn < 0 || req.TokensOut < 0) return false;
+           worker.Heartbeat = DateTimeOffset.UtcNow;
            var remaining = GoalBudgetLedger.Record(s, j, req.TokensIn, req.TokensOut,
                req.UsageComplete);
            if (remaining < 0)
@@ -127,12 +140,19 @@ public static class WorkerProtocol
         });
 
     public static async Task<bool> CompleteAsync(StateStore store, WorkerStatus req,
-        IWorkerResultVerifier verifier, CancellationToken ct = default)
+        IWorkerResultVerifier verifier, CancellationToken ct = default,
+        FactorySettings? settings = null)
     {
         // Worker-supplied fields cannot authorize a new claim or extend a foreign lease.
         var state = store.Read();
         var claimed = state.Jobs.FirstOrDefault(j => j.Id == req.JobId);
-        if (claimed is null || claimed.Mode != JobExecutionModes.Remote ||
+        var worker = state.Workers.FirstOrDefault(w => w.Id == req.WorkerId);
+        var executionSettings = settings ?? new FactorySettings();
+        var claimProject = claimed is null ? null :
+            state.Projects.FirstOrDefault(p => p.Id == claimed.ProjectId);
+        if (claimed is null || worker is null || claimProject is null ||
+            !WorkerAuthorization.CanContinue(state, worker, claimProject, claimed, executionSettings) ||
+            claimed.Mode != JobExecutionModes.Remote ||
             !JobRecovery.Matches(claimed,
                 new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
             return false;
@@ -180,7 +200,10 @@ public static class WorkerProtocol
         {
             var j = s.Jobs.FirstOrDefault(x => x.Id == req.JobId);
             var currentProject = s.Projects.FirstOrDefault(p => p.Id == claimed.ProjectId);
-            if (j is null || j.Mode != JobExecutionModes.Remote ||
+            var currentWorker = s.Workers.FirstOrDefault(w => w.Id == req.WorkerId);
+            if (j is null || currentWorker is null || currentProject is null ||
+                !WorkerAuthorization.CanContinue(s, currentWorker, currentProject, j, executionSettings) ||
+                j.Mode != JobExecutionModes.Remote ||
                 !JobRecovery.Matches(j,
                     new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)) ||
                 j.Attempt != claimed.Attempt || j.ProjectId != claimed.ProjectId ||

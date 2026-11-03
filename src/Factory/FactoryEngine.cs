@@ -34,51 +34,38 @@ public sealed class FactoryEngine
                 !DependencyGraph.DependenciesSatisfied(j, s.Jobs) || s.Paused) return false;
            var selected = JobScheduler.Select(s, _settings.MaxParallel, _executionMode);
            if (!selected.Any(x => x.Id == id)) return false;
-           j.State = JobStates.Preparing; j.Stage = "worktree"; j.Attempt++;
-           j.LeaseOwner = _workerId;
-           j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
-           j.StartedAt ??= DateTimeOffset.UtcNow; j.UpdatedAt = DateTimeOffset.UtcNow;
+           JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true);
            s.Events.Add(new FactoryEvent { JobId = id, Type = "claimed", Message = _workerId });
            return true;
         });
     }
 
-    private void Stage(Guid id, string state, string stage, string? error = null)
+    private void UpdateOwned(Guid id, ExecutionFence fence, Action<FactoryJob> change)
     {
-        _store.UpdateJob(id, job =>
+        _store.Change(state =>
+        {
+            var job = state.Jobs.Single(j => j.Id == id);
+            JobRecovery.Require(job, fence);
+            change(job);
+            job.UpdatedAt = DateTimeOffset.UtcNow;
+        });
+    }
+
+    private void EnsureOwned(Guid id, ExecutionFence fence) =>
+        JobRecovery.Require(_store.Job(id), fence);
+
+    private void Stage(Guid id, ExecutionFence fence, string state, string stage, string? error = null)
+    {
+        UpdateOwned(id, fence, job =>
         {
             job.State = state; job.Stage = stage;
-           if (error != null) job.Error = error;
+            if (error != null) job.Error = error;
+            JobRecovery.Checkpoint(job, stage);
         });
         _store.Event(id, "stage", state + "/" + stage);
     }
 
-    public IReadOnlyList<Guid> Recover()
-    {
-        return _store.Change(s =>
-        {
-            var changed = new List<Guid>();
-           foreach (var job in s.Jobs.Where(j => !string.IsNullOrEmpty(j.LeaseOwner) &&
-                j.LeaseUntil <= DateTimeOffset.UtcNow))
-            {
-                // Commit and publish are externally visible. Never blindly replay them.
-                if (job.Mode == "remote" || job.Stage is "commit" or "push" or "pr")
-                {
-                    job.State = JobStates.Blocked;
-                   job.Error = "Interrupted during Git side effects; inspect branch and PR before retry";
-               }
-                else
-                {
-                    job.State = JobStates.Queued;
-                   job.Error = "Recovered after expired worker lease; inspect existing worktree";
-               }
-                job.LeaseOwner = ""; job.LeaseUntil = null;
-               job.UpdatedAt = DateTimeOffset.UtcNow;
-               changed.Add(job.Id);
-           }
-            return (IReadOnlyList<Guid>)changed;
-        });
-    }
+    public IReadOnlyList<Guid> Recover() => JobRecovery.QuarantineExpired(_store);
 
     public async Task RunQueueAsync(CancellationToken ct)
     {

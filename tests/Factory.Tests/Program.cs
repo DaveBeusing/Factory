@@ -1324,6 +1324,8 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
             db.Open();
             using var cmd = db.CreateCommand();
             cmd.CommandText = """
+                DROP TABLE goal_budget_reservations;
+                ALTER TABLE jobs DROP COLUMN usage_complete;
                 ALTER TABLE jobs DROP COLUMN execution_generation;
                 ALTER TABLE jobs DROP COLUMN lease_token;
                 ALTER TABLE jobs DROP COLUMN worker_process_id;
@@ -1525,6 +1527,194 @@ await TestAsync("Old local runner cannot commit or complete after its generation
             "Stale runner committed after losing its fence");
     }
     finally { try { Directory.Delete(root, true); } catch { } }
+});
+
+await TestAsync("Concurrent SQLite claims reserve the same goal budget atomically", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-goal-ledger-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var state = new StateStore(home);
+        var project = new ProjectInfo { Name = "parallel", MaxParallel = 8 };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 8192 };
+        var jobs = Enumerable.Range(0, 4).Select(i => new FactoryJob
+        {
+            ProjectId = project.Id, GoalId = goal.Id, Title = "Parallel " + i,
+            ExpectedPaths = ["src/file" + i + ".cs"]
+        }).ToArray();
+        state.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.AddRange(jobs); });
+
+        var claimed = await Task.WhenAll(jobs.Select(async job =>
+            await Task.Run(() =>
+            {
+                try
+                {
+                    return new StateStore(home).Change(s =>
+                    {
+                        var current = s.Jobs.Single(j => j.Id == job.Id);
+                        JobRecovery.Assign(current, "runner-" + job.Id, 120, true, s, 4096);
+                        return true;
+                    });
+                }
+                catch (TokenBudgetExceededException) { return false; }
+            })));
+
+        Assert(claimed.Count(value => value) == 2, "Concurrent reservations exceeded 8192 tokens");
+        var snapshot = new StateStore(home).Read();
+        Assert(snapshot.BudgetReservations.Count == 2 &&
+            snapshot.BudgetReservations.All(r => r.Reserved == 4096 && r.State == GoalBudgetLedger.Active));
+        Assert(GoalBudgetLedger.Available(snapshot, goal.Id) == 0);
+        Assert(GoalBudgetLedger.Liability(snapshot, goal.Id) == goal.TokenBudget);
+        Assert(snapshot.Jobs.Count(j => j.State == JobStates.Preparing) == 2);
+        Assert(snapshot.Jobs.Count(j => j.State == JobStates.Queued) == 2);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Goal ledger debits, releases, holds and reconciles unused allowance", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-goal-release-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "accounting" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 10000 };
+        var first = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        var second = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(first); s.Jobs.Add(second); });
+        store.Change(s =>
+        {
+            JobRecovery.Assign(s.Jobs.Single(j => j.Id == first.Id), "a", 120, true, s, 4000);
+            JobRecovery.Assign(s.Jobs.Single(j => j.Id == second.Id), "b", 120, true, s, 4000);
+        });
+        Assert(GoalBudgetLedger.Available(store.Read(), goal.Id) == 2000);
+        store.Change(s =>
+        {
+            var j = s.Jobs.Single(j => j.Id == first.Id);
+            Assert(GoalBudgetLedger.Record(s, j, 900, 100) == 3000);
+            j.UsageComplete = true;
+            j.State = JobStates.CompletedLocal;
+            GoalBudgetLedger.Settle(s, j);
+            j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null;
+        });
+        var afterRelease = store.Read();
+        Assert(GoalBudgetLedger.Available(afterRelease, goal.Id) == 5000);
+        Assert(afterRelease.BudgetReservations.Single(r => r.JobId == first.Id).State ==
+            GoalBudgetLedger.Released);
+        store.Change(s =>
+        {
+            var j = s.Jobs.Single(j => j.Id == second.Id);
+            Assert(GoalBudgetLedger.Record(s, j, 200, 50, false) == 3750);
+            GoalBudgetLedger.Hold(s, j, "incomplete provider usage");
+            j.State = JobStates.Blocked;
+            j.Stage = "reconcile";
+            j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null;
+        });
+        var uncertain = store.Read();
+        Assert(GoalBudgetLedger.Available(uncertain, goal.Id) == 5000);
+        Assert(GoalBudgetLedger.Liability(uncertain, goal.Id) == 5000);
+        var held = uncertain.BudgetReservations.Single(r => r.JobId == second.Id);
+        try
+        {
+            GoalBudgetLedger.Reconcile(store, goal.Id, held.Id, 200, 50, false, "reviewed final usage");
+            throw new Exception("Unreviewed budget reconciliation was accepted");
+        }
+        catch (InvalidOperationException) { }
+        GoalBudgetLedger.Reconcile(store, goal.Id, held.Id, 200, 50, true,
+            "Verified usage from provider record");
+        var reconciled = store.Read();
+        Assert(GoalBudgetLedger.Available(reconciled, goal.Id) == 8750);
+        Assert(reconciled.BudgetReservations.Single(r => r.Id == held.Id).State == GoalBudgetLedger.Released);
+        Assert(reconciled.Events.Any(e => e.Type == "budget_reconciled"));
+        try
+        {
+            MissionControlManager.UpdateGoal(store, goal.Id, new GoalInput
+            {
+                ProjectId = project.Id, Objective = "Lower budget", TokenBudget = 100
+            });
+            throw new Exception("Lowered budget below committed usage");
+        }
+        catch (InvalidOperationException) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Expired goal reservation remains held and stale generation cannot debit it", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-goal-expiry-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "expired" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 4096 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
+        ExecutionFence old = default;
+        store.Change(s =>
+        {
+            var current = s.Jobs.Single();
+            old = JobRecovery.Assign(current, "local", 120, true, s, 4096);
+            current.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1);
+        });
+        Assert(JobRecovery.QuarantineExpired(store).SequenceEqual([job.Id]));
+        var state = store.Read();
+        Assert(state.Jobs.Single().State == JobStates.Blocked);
+        Assert(state.BudgetReservations.Single().State == GoalBudgetLedger.Held);
+        Assert(GoalBudgetLedger.Available(state, goal.Id) == 0);
+        Assert(!JobRecovery.Matches(state.Jobs.Single(), old));
+        try
+        {
+            store.Change(s =>
+            {
+                JobRecovery.Require(s.Jobs.Single(), old);
+                GoalBudgetLedger.Record(s, s.Jobs.Single(), 10, 0);
+            });
+            throw new Exception("Stale runner modified a held reservation");
+        }
+        catch (LostExecutionLeaseException) { }
+        Assert(store.Job(job.Id).TokensIn == 0);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("SQLite 3 migration quarantines unreserved goal runners and holds budget", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-goal-migration-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "upgrade" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 2000 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id, TokensIn = 200 };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job);
+            var current = s.Jobs.Single();
+            current.State = JobStates.Building; current.LeaseOwner = "old-runner";
+            current.LeaseToken = "old-lease"; current.ExecutionGeneration = 7;
+            current.LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(1);
+        });
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                DROP TABLE goal_budget_reservations;
+                ALTER TABLE jobs DROP COLUMN usage_complete;
+                PRAGMA user_version=3;
+                """;
+            cmd.ExecuteNonQuery();
+        }
+        var migrated = new StateStore(home);
+        var state = migrated.Read();
+        Assert(state.Jobs.Single().ExecutionGeneration == 8 &&
+            state.Jobs.Single().State == JobStates.Blocked && state.Jobs.Single().Stage == "reconcile");
+        Assert(state.BudgetReservations.Single().State == GoalBudgetLedger.Held);
+        Assert(state.BudgetReservations.Single().Reserved == 1800);
+        Assert(GoalBudgetLedger.Available(state, goal.Id) == 0);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
 });
 
 var passed = results.Count(x => x.Passed);

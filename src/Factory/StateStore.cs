@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed class StateStore
 {
-    private const int DatabaseVersion = 3;
+    private const int DatabaseVersion = 4;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -23,6 +23,7 @@ public sealed class StateStore
         new("projects", nameof(FactoryState.Projects), typeof(ProjectInfo)),
         new("goals", nameof(FactoryState.Goals), typeof(FactoryGoal)),
         new("jobs", nameof(FactoryState.Jobs), typeof(FactoryJob)),
+        new("goal_budget_reservations", nameof(FactoryState.BudgetReservations), typeof(GoalBudgetReservation)),
         new("knowledge_items", nameof(FactoryState.Knowledge), typeof(KnowledgeItem)),
         new("graph_nodes", nameof(FactoryState.Graph), typeof(GraphNode)),
         new("evaluations", nameof(FactoryState.Evaluations), typeof(EvaluationResult)),
@@ -131,6 +132,30 @@ public sealed class StateStore
         command.ExecuteNonQuery();
     }
 
+    private static void CreateBudgetReservationTable(SqliteConnection db, SqliteTransaction tx)
+    {
+        Execute(db, tx, """
+            CREATE TABLE goal_budget_reservations(
+                position INTEGER NOT NULL,
+                id TEXT PRIMARY KEY,
+                goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE NO ACTION,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE NO ACTION,
+                execution_generation INTEGER NOT NULL,
+                lease_token TEXT NOT NULL,
+                base_usage INTEGER NOT NULL,
+                reserved INTEGER NOT NULL CHECK(reserved>=0),
+                consumed INTEGER NOT NULL CHECK(consumed>=0),
+                state TEXT NOT NULL CHECK(state IN ('active','held','released')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX idx_goal_reservations_goal_state
+                ON goal_budget_reservations(goal_id,state);
+            CREATE INDEX idx_goal_reservations_job_generation
+                ON goal_budget_reservations(job_id,execution_generation);
+            """);
+    }
+
     private static void Initialize(SqliteConnection db)
     {
         // Serialize first-time initialization across concurrently starting processes.
@@ -142,20 +167,72 @@ public sealed class StateStore
             tx.Commit();
             return;
         }
-        if (schemaVersion == 2)
+        if (schemaVersion is 2 or 3)
         {
-            // Additive upgrade for shipped relational state: never discard jobs or leases.
-            // Existing in-flight work is quarantined by recovery before scheduling.
+            if (schemaVersion == 2)
+            {
+                Execute(db, tx, """
+                    ALTER TABLE jobs ADD COLUMN execution_generation INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE jobs ADD COLUMN lease_token TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE jobs ADD COLUMN worker_process_id INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE jobs ADD COLUMN worker_machine_name TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE jobs ADD COLUMN worker_process_started_at TEXT;
+                    ALTER TABLE jobs ADD COLUMN checkpoint_stage TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE jobs ADD COLUMN checkpoint_commit TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE jobs ADD COLUMN checkpoint_at TEXT;
+                    """);
+            }
+            Execute(db, tx, "ALTER TABLE jobs ADD COLUMN usage_complete INTEGER NOT NULL DEFAULT 0;");
+            CreateBudgetReservationTable(db, tx);
+            // Pre-ledger in-flight work has unbounded/unknown usage. Fence it and hold
+            // all remaining capacity until an operator reconciles its final usage.
+            using (var current = Command(db, tx, """
+                SELECT j.id, j.goal_id, j.execution_generation, j.lease_token, j.tokens_in, j.tokens_out
+                FROM jobs j WHERE j.goal_id IS NOT NULL AND j.lease_owner != ''
+                AND j.state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval')
+                ORDER BY j.goal_id, j.position;
+                """))
+            using (var reader = current.ExecuteReader())
+            {
+                var legacy = new List<(string Id, string Goal, long Generation, string Token, long Used)>();
+                while (reader.Read())
+                    legacy.Add((reader.GetString(0), reader.GetString(1), reader.GetInt64(2),
+                        reader.GetString(3), checked(reader.GetInt64(4) + reader.GetInt64(5))));
+                var position = 0;
+                foreach (var group in legacy.GroupBy(x => x.Goal))
+                {
+                    using var remainingCommand = Command(db, tx, """
+                        SELECT g.token_budget - COALESCE(SUM(j.tokens_in + j.tokens_out),0)
+                        FROM goals g LEFT JOIN jobs j ON j.goal_id = g.id
+                        WHERE g.id = $goal GROUP BY g.id;
+                        """, ("$goal", group.Key));
+                    var available = Math.Max(0, Convert.ToInt64(remainingCommand.ExecuteScalar(),
+                        CultureInfo.InvariantCulture));
+                    foreach (var item in group)
+                    {
+                        var held = available;
+                        available = 0;
+                        Execute(db, tx, """
+                            INSERT INTO goal_budget_reservations(
+                              position,id,goal_id,job_id,execution_generation,lease_token,
+                              base_usage,reserved,consumed,state,created_at,updated_at)
+                            VALUES($position,$id,$goal,$job,$generation,$token,$base,$reserved,0,
+                                   'held',$now,$now);
+                            """,
+                            ("$position", position++), ("$id", Guid.NewGuid()),
+                            ("$goal", group.Key), ("$job", item.Id), ("$generation", item.Generation),
+                            ("$token", item.Token), ("$base", item.Used),
+                            ("$reserved", held), ("$now", DateTimeOffset.UtcNow));
+                    }
+                }
+            }
             Execute(db, tx, """
-                ALTER TABLE jobs ADD COLUMN execution_generation INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE jobs ADD COLUMN lease_token TEXT NOT NULL DEFAULT '';
-                ALTER TABLE jobs ADD COLUMN worker_process_id INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE jobs ADD COLUMN worker_machine_name TEXT NOT NULL DEFAULT '';
-                ALTER TABLE jobs ADD COLUMN worker_process_started_at TEXT;
-                ALTER TABLE jobs ADD COLUMN checkpoint_stage TEXT NOT NULL DEFAULT '';
-                ALTER TABLE jobs ADD COLUMN checkpoint_commit TEXT NOT NULL DEFAULT '';
-                ALTER TABLE jobs ADD COLUMN checkpoint_at TEXT;
-                PRAGMA user_version=3;
+                UPDATE jobs SET state='blocked', stage='reconcile',
+                    error='Pre-ledger execution needs budget and process reconciliation',
+                    execution_generation=execution_generation+1, lease_owner='',lease_token='',lease_until=NULL
+                WHERE goal_id IS NOT NULL AND lease_owner != ''
+                AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+                PRAGMA user_version=4;
                 """);
             tx.Commit();
             return;
@@ -194,6 +271,11 @@ public sealed class StateStore
                 definitions.Add("FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE NO ACTION");
             if (map.Type == typeof(FactoryJob))
                 definitions.Add("FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE NO ACTION");
+            if (map.Type == typeof(GoalBudgetReservation))
+            {
+                definitions.Add("FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE NO ACTION");
+                definitions.Add("FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE NO ACTION");
+            }
             if (map.Type == typeof(GraphNode))
                 definitions.Add("UNIQUE(project_id, file)");
             Execute(db, tx, "CREATE TABLE " + Q(map.Table) + "(" + string.Join(", ", definitions) + ");");
@@ -236,13 +318,15 @@ public sealed class StateStore
             );
             CREATE INDEX idx_jobs_project_state ON jobs(project_id,state);
             CREATE INDEX idx_jobs_goal ON jobs(goal_id);
+            CREATE INDEX idx_goal_reservations_goal_state ON goal_budget_reservations(goal_id,state);
+            CREATE INDEX idx_goal_reservations_job_generation ON goal_budget_reservations(job_id,execution_generation);
             CREATE INDEX idx_jobs_lease ON jobs(lease_owner,lease_until);
             CREATE INDEX idx_goals_project ON goals(project_id,state);
             CREATE INDEX idx_events_time ON events(at);
             CREATE INDEX idx_knowledge_project ON knowledge_items(project_id);
             CREATE INDEX idx_releases_project ON releases(project_id);
             CREATE INDEX idx_workers_heartbeat ON workers(heartbeat);
-            PRAGMA user_version=3;
+            PRAGMA user_version=4;
             """);
         tx.Commit();
     }

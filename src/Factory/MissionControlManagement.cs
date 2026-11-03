@@ -151,6 +151,8 @@ public static class MissionControlManager
             var g = s.Goals.Single(x => x.Id == id);
             Require(g.State != "archived", "Archived goal is read-only");
             Require(g.ProjectId == input.ProjectId, "Cannot move goal to another project");
+            Require(input.TokenBudget >= GoalBudgetLedger.Liability(s, id),
+                "Goal budget cannot be lowered below consumed and reserved tokens");
             g.Objective = input.Objective.Trim(); g.AcceptanceCriteria = input.AcceptanceCriteria; g.TokenBudget = input.TokenBudget;
             Log(s, null, "goal_updated", g.Objective); return g;
         });

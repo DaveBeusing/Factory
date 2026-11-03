@@ -16,6 +16,7 @@ public sealed class FactoryState
     public int Schema { get; set; } = 1;
     public List<ProjectInfo> Projects { get; set; } = [];
     public List<FactoryJob> Jobs { get; set; } = [];
+    public List<GoalBudgetReservation> BudgetReservations { get; set; } = [];
     public List<FactoryGoal> Goals { get; set; } = [];
     public List<FactoryEvent> Events { get; set; } = [];
     public List<KnowledgeItem> Knowledge { get; set; } = [];
@@ -87,10 +88,27 @@ public sealed class FactoryJob
     public string EvidenceFile { get; set; } = "";
     public long TokensIn { get; set; }
     public long TokensOut { get; set; }
+    // Only a confirmed final provider usage report permits releasing unused funds.
+    public bool UsageComplete { get; set; }
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? FinishedAt { get; set; }
+}
+
+public sealed class GoalBudgetReservation
+{
+    public Guid Id { get; set; } = Guid.NewGuid();
+    public Guid GoalId { get; set; }
+    public Guid JobId { get; set; }
+    public long ExecutionGeneration { get; set; }
+    public string LeaseToken { get; set; } = "";
+    public long BaseUsage { get; set; }
+    public long Reserved { get; set; }
+    public long Consumed { get; set; }
+    public string State { get; set; } = "active";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+    public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
 }
 
 public sealed class FactoryGoal
@@ -167,6 +185,8 @@ public sealed class WorkerInfo
 public sealed class FactorySettings
 {
     public int MaxParallel { get; set; } = 3;
+    // Maximum per-job authorization. Reservations are atomic and never exceed free goal capacity.
+    public int GoalReservationTokens { get; set; } = GoalBudgetLedger.DefaultReservationTokens;
     public int MaxAgentSessions { get; set; } = 6;
     public int LeaseSeconds { get; set; } = 120;
     public int MaxReviewRounds { get; set; } = 3;

@@ -56,16 +56,22 @@ public sealed class JobScheduler
 {
     // Execution mode is part of the eligibility contract; the safe default is local.
     public static IReadOnlyList<FactoryJob> Select(FactoryState state, int limit,
-        string executionMode = JobExecutionModes.Local, Func<FactoryJob, bool>? eligibility = null)
+        string executionMode = JobExecutionModes.Local, Func<FactoryJob, bool>? eligibility = null,
+        int reservationTokens = GoalBudgetLedger.DefaultReservationTokens)
     {
         if (!JobExecutionModes.IsSupported(executionMode))
             throw new ArgumentException("Unsupported execution mode", nameof(executionMode));
+        if (reservationTokens < BudgetedAgentRuntime.MinimumTurnAllowance)
+            throw new ArgumentOutOfRangeException(nameof(reservationTokens));
         if (state.Paused || limit <= 0) return [];
         var active = state.Jobs.Where(j => JobStates.Active.Contains(j.State) &&
             j.LeaseUntil > DateTimeOffset.UtcNow).ToList();
         var chosen = new List<FactoryJob>();
         var capacity = Math.Max(0, limit - active.Count);
         var counts = active.GroupBy(j => j.ProjectId).ToDictionary(g => g.Key, g => g.Count());
+        // Plan hypothetical reservations so selection cannot oversubscribe a goal
+        // even before each selected job is atomically claimed in SQLite.
+        var planned = new Dictionary<Guid, long>();
         foreach (var job in state.Jobs.Where(j => j.State == JobStates.Queued &&
             JobExecutionModes.Matches(j, executionMode) && (eligibility is null || eligibility(j)))
             .OrderByDescending(j => j.Priority)
@@ -73,20 +79,21 @@ public sealed class JobScheduler
         {
             if (chosen.Count >= capacity) break;
            if (!DependencyGraph.DependenciesSatisfied(job, state.Jobs)) continue;
-           if (job.GoalId.HasValue)
-            {
-                var goal = state.Goals.FirstOrDefault(g => g.Id == job.GoalId);
-               if (goal == null || goal.State != "active" ||
-                    state.Jobs.Where(j => j.GoalId == job.GoalId)
-                        .Aggregate(0L, (sum, j) => checked(sum + j.TokensIn + j.TokensOut)) >
-                        goal.TokenBudget - BudgetedAgentRuntime.MinimumTurnAllowance) continue;
-               // One active job per goal, including remote claims. Avoid concurrent budget overspend.
-                if (active.Concat(chosen).Any(j => j.GoalId == job.GoalId)) continue;
+           long allocation = 0;
+           if (job.GoalId is { } goalId)
+           {
+               allocation = GoalBudgetLedger.Allocation(state, job, reservationTokens);
+               var available = allocation == 0 ? 0 :
+                   GoalBudgetLedger.Available(state, goalId) - planned.GetValueOrDefault(goalId);
+               allocation = Math.Min(allocation, Math.Max(0, available));
+               if (allocation < BudgetedAgentRuntime.MinimumTurnAllowance) continue;
            }
             var project = state.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
            if (project == null || project.Status != "active" || counts.GetValueOrDefault(job.ProjectId) >= project.MaxParallel) continue;
            if (active.Concat(chosen).Any(j => DependencyGraph.Conflict(job, j))) continue;
            chosen.Add(job);
+           if (job.GoalId is { } selectedGoal)
+               planned[selectedGoal] = checked(planned.GetValueOrDefault(selectedGoal) + allocation);
            counts[job.ProjectId] = counts.GetValueOrDefault(job.ProjectId) + 1;
         }
         return chosen;

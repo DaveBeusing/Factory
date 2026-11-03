@@ -13,10 +13,14 @@ public sealed class LostExecutionLeaseException(string message) : InvalidOperati
 /// </summary>
 public static class JobRecovery
 {
-    public static ExecutionFence Assign(FactoryJob job, string owner, int leaseSeconds, bool local)
+    public static ExecutionFence Assign(FactoryJob job, string owner, int leaseSeconds, bool local,
+        FactoryState? state = null, int reservationTokens = GoalBudgetLedger.DefaultReservationTokens)
     {
         if (job.State != JobStates.Queued || !string.IsNullOrEmpty(job.LeaseOwner))
             throw new InvalidOperationException("Job is not claimable");
+        if (job.GoalId.HasValue &&
+            (state is null || GoalBudgetLedger.Allocation(state, job, reservationTokens) == 0))
+            throw new TokenBudgetExceededException("No atomic budget reservation available for this goal");
         job.ExecutionGeneration = checked(job.ExecutionGeneration + 1);
         job.LeaseToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
         job.LeaseOwner = owner;
@@ -41,6 +45,8 @@ public static class JobRecovery
         }
         job.StartedAt ??= DateTimeOffset.UtcNow;
         job.UpdatedAt = DateTimeOffset.UtcNow;
+        if (job.GoalId is not null)
+            GoalBudgetLedger.Reserve(state!, job, reservationTokens);
         return new ExecutionFence(job.ExecutionGeneration, job.LeaseToken, owner);
     }
 
@@ -75,6 +81,7 @@ public static class JobRecovery
                 j.LeaseUntil <= DateTimeOffset.UtcNow &&
                 JobStates.Active.Contains(j.State)))
             {
+                GoalBudgetLedger.Hold(s, job, "expired worker lease");
                 var previousOwner = job.LeaseOwner;
                 var previousGeneration = job.ExecutionGeneration;
                 job.ExecutionGeneration = checked(previousGeneration + 1); // fence old owner first

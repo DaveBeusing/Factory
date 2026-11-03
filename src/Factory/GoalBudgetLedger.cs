@@ -90,6 +90,38 @@ public static class GoalBudgetLedger
         return reservation;
     }
 
+    /// <summary>
+    /// Extend an existing local execution reservation inside the caller's SQLite write
+    /// transaction. The active lease, generation, goal and configured per-job cap
+    /// remain authoritative; remote workers cannot mint their own allowance.
+    /// </summary>
+    public static long ExtendLocal(FactoryState state, FactoryJob job, int increment, int perJobLimit)
+    {
+        if (job.GoalId is null) return 0;
+        if (increment < BudgetedAgentRuntime.MinimumTurnAllowance ||
+            perJobLimit < BudgetedAgentRuntime.MinimumTurnAllowance)
+            throw new ArgumentOutOfRangeException(nameof(increment));
+        if (job.LeaseOwner.StartsWith("remote:", StringComparison.Ordinal))
+            throw new InvalidOperationException("Remote reservations require controller authorization");
+        JobRecovery.Require(job, new ExecutionFence(
+            job.ExecutionGeneration, job.LeaseToken, job.LeaseOwner));
+        var reservation = Current(state, job);
+        if (state.Goals.Single(g => g.Id == job.GoalId.Value).State != "active")
+            throw new TokenBudgetExceededException("Goal is not active");
+        var room = Math.Max(0L, perJobLimit - reservation.Reserved);
+        var available = Available(state, job.GoalId.Value);
+        var granted = Math.Min(Math.Min(room, available), increment);
+        if (granted < BudgetedAgentRuntime.MinimumTurnAllowance) return 0;
+        reservation.Reserved = checked(reservation.Reserved + granted);
+        reservation.UpdatedAt = DateTimeOffset.UtcNow;
+        state.Events.Add(new FactoryEvent
+        {
+            JobId = job.Id, Type = "budget_extended",
+            Message = $"Generation {job.ExecutionGeneration}; +{granted} tokens; reservation {reservation.Id}; total {reservation.Reserved}"
+        });
+        return granted;
+    }
+
     public static GoalBudgetReservation Current(FactoryState state, FactoryJob job)
     {
         if (job.GoalId is null) throw new InvalidOperationException("Job has no goal budget");

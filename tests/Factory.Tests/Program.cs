@@ -311,6 +311,7 @@ await TestAsync("Remote scope block reaches the controller as amendable scope", 
         Assert(await WorkerProtocol.CompleteAsync(store, new WorkerStatus
         {
             WorkerId = "worker-01", JobId = job.Id, Job = reported,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,
             Error = reported.Error
         }, new RefusingWorkerVerifier()));
         var blocked = store.Job(job.Id);
@@ -795,7 +796,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 2, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 3, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "releases", "knowledge_items", "graph_nodes", "evaluations",
@@ -805,6 +806,10 @@ Test("Relational SQLite schema contains no JSON state table", () =>
                 "Missing relational table: " + table);
         Assert(Count("SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='project_id';") == 1);
         Assert(Count("SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='state';") == 1);
+        foreach (var field in new[] { "execution_generation", "lease_token", "worker_process_id",
+            "worker_process_started_at", "checkpoint_stage", "checkpoint_commit", "checkpoint_at" })
+            Assert(Count($"SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='{field}';") == 1,
+                "Missing durable recovery field: " + field);
         Assert(Count("SELECT COUNT(*) FROM pragma_foreign_key_list('jobs') WHERE \"table\"='projects';") == 1);
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_jobs_project_state';") == 1);
     }
@@ -1129,12 +1134,14 @@ await TestAsync("Remote goal claims retain remaining budget and failed usage", a
         Assert(claim!.Job.TokensIn == 20);
         Assert(WorkerProtocol.Heartbeat(store, new WorkerStatus
         {
-            WorkerId = "worker-01", JobId = job.Id, TokensIn = 70, TokensOut = 15
+            WorkerId = "worker-01", JobId = job.Id, TokensIn = 70, TokensOut = 15,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken
         }, new FactorySettings()));
         Assert(store.Job(job.Id).TokensIn == 70 && store.Job(job.Id).TokensOut == 15);
         Assert(await WorkerProtocol.CompleteAsync(store, new WorkerStatus
         {
             WorkerId = "worker-01", JobId = job.Id,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,
             Job = new FactoryJob { State = JobStates.Blocked, TokensIn = 95, TokensOut = 33 }
         }, new RefusingWorkerVerifier()));
         Assert(store.Job(job.Id).TokensIn == 95 && store.Job(job.Id).TokensOut == 33);
@@ -1243,7 +1250,8 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
             Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
             Branch = $"factory/{job.Id:N}", PrUrl = "https://github.com/example/repo/pull/1" };
         var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = finished,
-            Evidence = "{\"forged\":true}", TokensIn = 10 };
+            Evidence = "{\"forged\":true}", TokensIn = 10,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken };
         Assert(await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier()));
         var blocked = store.Job(job.Id);
         Assert(blocked.State == JobStates.Blocked && blocked.Stage == "remote_verification_failed");
@@ -1274,7 +1282,8 @@ await TestAsync("Controller-verified remote results are atomically bound to the 
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
             Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
             Branch = $"factory/{job.Id:N}", PrUrl = "https://github.com/example/repo/pull/1" };
-        var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = finished };
+        var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id, Job = finished,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken };
         Assert(await WorkerProtocol.CompleteAsync(store, status,
             new FixedWorkerVerifier(new VerifiedWorkerResult("{\"verifiedBy\":\"test\"}"))));
         var ready = store.Job(job.Id);

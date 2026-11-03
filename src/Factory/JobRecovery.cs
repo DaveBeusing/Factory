@@ -30,11 +30,13 @@ public static class JobRecovery
         {
             using var process = Process.GetCurrentProcess();
             job.WorkerProcessId = process.Id;
+            job.WorkerMachineName = Environment.MachineName;
             job.WorkerProcessStartedAt = new DateTimeOffset(process.StartTime.ToUniversalTime());
         }
         else
         {
             job.WorkerProcessId = 0;
+            job.WorkerMachineName = "";
             job.WorkerProcessStartedAt = null;
         }
         job.StartedAt ??= DateTimeOffset.UtcNow;
@@ -94,7 +96,9 @@ public static class JobRecovery
     private static void EnsurePreviousRunnerStopped(FactoryJob job)
     {
         if (job.Mode != JobExecutionModes.Local || job.WorkerProcessId <= 0 ||
-            job.WorkerProcessStartedAt is null)
+            job.WorkerProcessStartedAt is null ||
+            string.IsNullOrWhiteSpace(job.WorkerMachineName) ||
+            !job.WorkerMachineName.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Previous runner identity is unknown; manual recovery required");
         try
         {
@@ -148,6 +152,7 @@ public static class JobRecovery
             if (j.State != JobStates.Blocked || j.Stage != "reconcile" ||
                 j.ExecutionGeneration != snapshot.ExecutionGeneration ||
                 j.WorkerProcessId != snapshot.WorkerProcessId ||
+                j.WorkerMachineName != snapshot.WorkerMachineName ||
                 j.CheckpointStage != snapshot.CheckpointStage ||
                 j.CheckpointCommit != snapshot.CheckpointCommit ||
                 j.Worktree != snapshot.Worktree || !string.IsNullOrEmpty(j.LeaseOwner))

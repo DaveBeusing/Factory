@@ -271,6 +271,15 @@ public static class DashboardHost
                 return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
             return WorkerProtocol.Heartbeat(store, req, settings) ? (IResult)Results.Ok() : Results.Conflict();
         });
+        app.MapPost("/api/worker/budget/extend", (HttpContext ctx, WorkerBudgetExtensionRequest req) =>
+        {
+            if (!WorkerAuthentication.MatchesIdentity(
+                    ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
+                return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
+            var grant = WorkerProtocol.ExtendBudget(store, settings, req);
+            return grant is null ? (IResult)Results.Conflict(new
+                { error = "No active authorized remote execution or extension capacity" }) : Results.Ok(grant);
+        });
         app.MapPost("/api/worker/complete", async (HttpContext ctx, WorkerStatus req, CancellationToken ct) =>
         {
             if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))

@@ -194,6 +194,63 @@ function jobInspectorDetails(j,kv){
  </div>`;
 }
 
+
+async function renderGoalBudget(goalId){
+ const target=$('inspector-goal-budget');
+ if(!target||inspectorKey!=='goal:'+goalId)return;
+ try{
+  const budget=await api('goals/'+goalId+'/budget');
+  if(inspectorKey!=='goal:'+goalId||!$('inspector-goal-budget'))return;
+  const nf=x=>Number(x||0).toLocaleString();
+  const rows=budget.reservations||[];
+  const active=rows.filter(r=>r.state==='active').reduce((a,r)=>a+Number(r.outstanding||0),0);
+  const held=rows.filter(r=>r.state==='held').reduce((a,r)=>a+Number(r.outstanding||0),0);
+  const total=Number(budget.total||0),used=Number(budget.consumed||0),committed=Number(budget.committed||0);
+  const percent=total>0?Math.min(100,Math.max(0,100*(used+committed)/total)):0;
+  const records=rows.map(r=>{const j=state.jobs.find(j=>j.id===r.jobId);
+   return `<tr><td>${esc(j?shorten(j.title,38):r.jobId.slice(0,8))}<small>Generation ${esc(r.executionGeneration)}</small></td><td>${badge(r.state)}</td><td>${nf(r.reserved)}</td><td>${nf(r.consumed)}</td><td>${nf(r.outstanding)}</td></tr>`;
+  }).join('');
+  const jobs=new Set(state.jobs.filter(j=>j.goalId===goalId).map(j=>j.id));
+  const events=state.events.filter(e=>jobs.has(e.jobId)&&['budget_reserved','budget_extended','budget_held','budget_released','budget_reconciled','budget_overrun'].includes(e.type));
+  $('inspector-goal-budget').innerHTML=`<div class="budget-breakdown">
+    <div><small>Total budget</small><strong>${nf(total)}</strong></div><div><small>Observed consumption</small><strong>${nf(used)}</strong></div>
+    <div><small>Active liabilities</small><strong>${nf(active)}</strong></div><div><small>Held liabilities</small><strong>${nf(held)}</strong></div>
+    <div><small>Unreserved capacity</small><strong>${nf(budget.available)}</strong></div>
+   </div><div class="progress-track" role="meter" aria-label="Consumed and reserved goal capacity" aria-valuenow="${percent.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${percent.toFixed(1)}%"></div></div>
+   <p class="subtext">Goal-budget accounting is separate from provider account allowances. Final usage that is unknown must remain unsettled.</p>
+   <h3>Reservations</h3>${rows.length?table(['Job','Status','Reserved','Consumed','Outstanding'],records):'<p class="subtext">No reservations reported.</p>'}
+   ${held>0?`<button class="button button-muted" data-act="budget-reconcile" data-id="${goalId}">Review held usage</button>`:''}
+   <h3>Budget activity</h3>${eventItems(events,20)}`;
+ }catch(error){
+  if(inspectorKey==='goal:'+goalId&&$('inspector-goal-budget'))
+   $('inspector-goal-budget').innerHTML=`<p class="subtext" role="alert">Budget details unavailable: ${esc(error.message)}</p><button class="button button-muted" data-act="budget-refresh" data-id="${goalId}">Retry</button>`;
+ }
+}
+async function reconcileGoalBudget(goalId){
+ const budget=await api('goals/'+goalId+'/budget');
+ const held=(budget.reservations||[]).filter(r=>r.state==='held');
+ if(!held.length){notify('No held reservations to reconcile');return}
+ const options=held.map(r=>[r.id,(state.jobs.find(j=>j.id===r.jobId)?.title||r.jobId)+' · '+r.outstanding+' outstanding']);
+ const first=held[0],job=state.jobs.find(j=>j.id===first.jobId);
+ openForm('Reconcile held usage','Administrator action. Only independently verified final provider usage can release unknown liabilities.',
+  field('reservationId','Held reservation',first.id,'select',options)+
+  field('finalTokensIn','Final input tokens',job?.tokensIn||0,'number')+
+  field('finalTokensOut','Final output tokens',job?.tokensOut||0,'number')+
+  field('reason','Evidence and review justification','','textarea')+
+  field('reviewed','I independently verified the final usage',false,'checkbox'),
+  async form=>{
+   const x=values(form),input=Number(x.finalTokensIn),output=Number(x.finalTokensOut);
+   if(!form.elements.reviewed.checked||x.reason.trim().length<10||
+      !Number.isSafeInteger(input)||!Number.isSafeInteger(output)||input<0||output<0)
+    throw Error('Verified nonnegative integer totals and a justification of at least 10 characters are required');
+   if(!confirm('Release unused reserved capacity based on independently verified final usage? This action is recorded.'))return;
+   await mutate(`goals/${goalId}/budget/reconcile`,'POST',{
+     reservationId:x.reservationId,finalTokensIn:input,finalTokensOut:output,reviewed:true,reason:x.reason.trim()
+   });
+   await renderGoalBudget(goalId);
+  },'Confirm reconciliation');
+}
+
 function showInspector(){inspector=true;$('inspector').classList.add('open');$('inspector').setAttribute('aria-hidden','false');$('inspector-backdrop').classList.add('open')}
 function closeInspector(){inspector=null;$('inspector').classList.remove('open');$('inspector').setAttribute('aria-hidden','true');$('inspector-backdrop').classList.remove('open')}
 function inspectorPanel(title,body){$('inspector-title').textContent=title;$('inspector-body').innerHTML=body;showInspector()}

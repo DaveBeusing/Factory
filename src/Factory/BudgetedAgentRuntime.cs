@@ -23,6 +23,9 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
             var remaining = store.Change(state =>
             {
                 var job = state.Jobs.Single(j => j.Id == jobId);
+                if (job.GoalId.HasValue && fence is null)
+                    throw new InvalidOperationException(
+                        "A goal-funded agent invocation requires a fenced worker claim");
                 if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
                 if (job.GoalId is { } goalId &&
                     state.Goals.Single(g => g.Id == goalId).State != "active")

@@ -389,7 +389,7 @@ await TestAsync("Scope violation blocks before commit and requires approved amen
     var root = Path.Combine(Path.GetTempPath(), "factory-scope-e2e-" + Guid.NewGuid().ToString("N"));
     var repo = Path.Combine(root, "repository");
     Directory.CreateDirectory(repo);
-    void Git(params string[] args) =>
+    string Git(params string[] args) =>
         Commands.Require(Commands.Run("git", ["-C", repo, ..args], root, 90), "git fixture");
     try
     {

@@ -1013,7 +1013,7 @@ Test("App-server token usage counts deltas on resumed threads", () =>
 Test("Same-goal disjoint packages schedule concurrently within reserved capacity", () =>
 {
     var project = new ProjectInfo { MaxParallel = 5 };
-    var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 12000 };
+    var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 8192 };
     var active = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,
         State = JobStates.Queued, ExpectedPaths = ["src/a.cs"] };
     var queued = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id,

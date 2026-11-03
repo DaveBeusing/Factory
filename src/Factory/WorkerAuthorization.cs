@@ -44,10 +44,12 @@ public static class WorkerAuthorization
         state.Workers.Any(w => w.Id == workerId && w.Enabled) &&
         state.WorkerProjectGrants.Any(g => g.WorkerId == workerId && g.ProjectId == projectId);
 
-    public static bool CanExecute(FactoryState state, WorkerInfo worker,
+    // In-flight work remains allowed while draining, but not after a project
+    // grant, worker identity or required capability evidence is revoked.
+    public static bool CanContinue(FactoryState state, WorkerInfo worker,
         ProjectInfo project, FactoryJob job, FactorySettings settings)
     {
-        if (!worker.Enabled || worker.Draining || job.ProjectId != project.Id ||
+        if (!worker.Enabled || job.ProjectId != project.Id ||
             !CanAccessProject(state, worker.Id, project.Id))
             return false;
 
@@ -65,4 +67,8 @@ public static class WorkerAuthorization
 
         return required.IsSubsetOf(verified);
     }
+
+    public static bool CanExecute(FactoryState state, WorkerInfo worker,
+        ProjectInfo project, FactoryJob job, FactorySettings settings) =>
+        !worker.Draining && CanContinue(state, worker, project, job, settings);
 }

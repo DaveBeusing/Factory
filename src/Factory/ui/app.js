@@ -237,7 +237,8 @@ function jobInspectorDetails(j,kv){
  ${kv('Held reservations',held.length)}${kv('Final provider usage',j.usageComplete?'Reported':'Not confirmed')}
  ${kv('Evidence artifact',j.evidenceFile?'Path recorded':'Unavailable')}
  </div>
- <p class="subtext">Individual check and review verdicts are unavailable in the current job-state API; a recorded path does not prove they passed.</p>
+ <h3>Build checks and independent reviews</h3>
+ <div id="inspector-job-quality" aria-live="polite"><p class="subtext">Loading commit-bound quality evidence...</p></div>
  <h3>Recovery assessment</h3><div class="recovery-assessment">
  <strong>Next safe step</strong><p>${esc(next)}</p>
  <p>Last durable checkpoint: ${esc(j.checkpointStage||'Unavailable')} · ${esc(j.checkpointCommit||'No commit recorded')} · ${esc(dateTime(j.checkpointAt))}</p>
@@ -246,6 +247,34 @@ function jobInspectorDetails(j,kv){
  </div>`;
 }
 
+
+async function renderJobQuality(jobId){
+ const target=$('inspector-job-quality');
+ if(!target||inspectorKey!=='job:'+jobId)return;
+ try{
+  const evidence=await api('jobs/'+jobId+'/quality');
+  if(inspectorKey!=='job:'+jobId||!$('inspector-job-quality'))return;
+  const checks=(evidence.checks||[]).map(c=>`<tr><td>${esc(c.name)}</td>
+   <td>${esc(c.exitCode)}</td><td>${badge(c.passed?'passed':'failed')}</td></tr>`).join('');
+  const reviews=(evidence.reviews||[]).map(r=>`<tr><td>${esc(r.role)}</td>
+   <td>${badge(r.verdict==='PASS'?'passed':'changes required')}</td></tr>`).join('');
+  const findings=(evidence.findings||[]).map(f=>`<li>${esc(f)}</li>`).join('');
+  const current=evidence.current===true;
+  const overall=current?evidence.status:'stale';
+  $('inspector-job-quality').innerHTML=`
+   <p class="subtext">Evidence commit: ${esc(evidence.commit||'Unknown')}
+   · ${current?'Matches current recorded job head':'Not verified for current job head'}</p>
+   <p>${badge(overall)} ${evidence.verifiedAt?' · Captured '+esc(dateTime(evidence.verifiedAt)):''}</p>
+   ${checks?table(['Check','Exit code','Result'],checks):'<p class="subtext">No check reports available.</p>'}
+   ${reviews?table(['Review role','Verdict'],reviews):'<p class="subtext">No review verdicts available.</p>'}
+   ${findings?`<h4>Findings</h4><ul>${findings}</ul>`:''}
+   <p class="subtext">This view summarizes persisted evidence only. A textual reviewer verdict is not an independent security certification.</p>`;
+ }catch(error){
+  if(inspectorKey==='job:'+jobId&&$('inspector-job-quality'))
+   $('inspector-job-quality').innerHTML=`<p class="subtext" role="status">Quality evidence unavailable: ${esc(error.message)}</p>
+    <button class="button button-muted" data-act="quality-refresh" data-id="${jobId}">Retry</button>`;
+ }
+}
 
 async function renderGoalBudget(goalId){
  const target=$('inspector-goal-budget');
@@ -346,8 +375,9 @@ function inspect(type,id){const entity=(type==='project'?state.projects:type==='
  inspectorPanel((type==='job'?entity.title:type==='goal'?shorten(entity.objective,40):type==='project'?entity.name:entity.id),body);
   inspectorKey=type+':'+id;
   if(type==='goal')renderGoalBudget(id);
+  if(type==='job')renderJobQuality(id);
 }
-async function act(action,id,index){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;
+async function act(action,id,index){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
  case'queue-run':case'queue-pause':case'queue-resume':case'queue-stop':await runQueue(action.slice(6));break;
  case'verify':await verify(id);break;
  case'job-start':await mutate(`jobs/${id}/start`,'POST',{});break;

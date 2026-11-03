@@ -96,6 +96,9 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     Assert(script.Contains("goals/'+goalId+'/budget", StringComparison.Ordinal));
     Assert(script.Contains("budget/reconcile", StringComparison.Ordinal));
     Assert(script.Contains("jobInspectorDetails(j,kv)", StringComparison.Ordinal));
+    Assert(script.Contains("renderJobQuality(jobId)", StringComparison.Ordinal));
+    Assert(script.Contains("jobs/'+jobId+'/quality", StringComparison.Ordinal));
+    Assert(script.Contains("Not verified for current job head", StringComparison.Ordinal));
     Assert(script.Contains("Per-job reported usage", StringComparison.Ordinal));
     Assert(script.Contains("Controller-authorized extension history", StringComparison.Ordinal));
     Assert(script.Contains("goalExtensionIncrementTokens", StringComparison.Ordinal));

@@ -149,6 +149,12 @@ public sealed class FactoryEngine
         {
             Stage(id, JobStates.Blocked, "budget", ex.Message);
         }
+        catch (ScopeViolationException ex)
+        {
+            // Keep uncommitted changes for inspection and explicit contract amendment.
+            Stage(id, JobStates.Blocked, "scope", ex.Message);
+            _store.Event(id, "scope_violation", ex.Message);
+        }
         catch (OperationCanceledException)
         {
             var interrupted = _store.Job(id);
@@ -181,6 +187,7 @@ public sealed class FactoryEngine
             throw new InvalidOperationException("Job execution mode changed after claim");
         var p = _store.Read().Projects.Single(x => x.Id == j.ProjectId);
         if (p.Checks.Count == 0) throw new InvalidOperationException("Project checks missing; configure gates before execution");
+        WorkPackageScope.ValidateDeclaration(j.ExpectedPaths);
         var runtime = new BudgetedAgentRuntime(
             _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk), _store, id);
         var qualityEngine = new QualityEngine(runtime);
@@ -196,6 +203,8 @@ public sealed class FactoryEngine
            var description = round == 1 ? existing.Description :
                 "Address these failed checks and reviews, and rerun necessary tests. Findings: " + string.Join("; ", report.Findings);
            var prompt = "Implement only the requested work package. Work only in this Git worktree. " +
+                "Allowed paths: " + string.Join(", ", existing.ExpectedPaths) + ". " +
+                "Changes outside these paths require an approved contract amendment. " +
                 "Do not commit, push, merge, deploy or modify protected factory infrastructure. " +
                 "Respect AGENTS.md and the existing architecture. Acceptance evidence is required. " +
                 $"Work package: {existing.Title}\n{description}";
@@ -207,12 +216,8 @@ public sealed class FactoryEngine
             var status = Commands.Require(Commands.Run("git", ["-C", worktree, "status", "--porcelain"], Environment.CurrentDirectory), "git status");
            if (string.IsNullOrWhiteSpace(status) && round == 1)
                 throw new InvalidOperationException("Builder made no file changes");
-           var changedStatus = Commands.Run("git", ["-C", worktree, "status", "--porcelain", "--untracked-files=all"], Environment.CurrentDirectory);
-           if (!changedStatus.Ok) throw new InvalidOperationException(changedStatus.Error);
-           var modified = changedStatus.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
-                .Select(line => line.Length >= 4 ? line[3..].Trim().Trim('"') : "")
-                .Where(file => file.Length > 0).ToArray();
-           GitOperations.EnforcePaths(modified, p.ProtectedPaths);
+           // Verify the complete Git delta before staging or committing.
+            WorkPackageScope.ValidateWorktree(p, _store.Job(id));
            ct.ThrowIfCancellationRequested();
            Stage(id, JobStates.Gating, "commit");
            var sha = GitOperations.CommitIfNeeded(worktree, existing.Title);
@@ -226,6 +231,8 @@ public sealed class FactoryEngine
                report = await qualityEngine.ReviewAsync(p, _store.Job(id), report, ct);
            }
             ct.ThrowIfCancellationRequested();
+            // Checks and reviewers can also modify files; recheck the full worktree.
+            WorkPackageScope.ValidateWorktree(p, _store.Job(id));
            foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id), report, ct);
            var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
            _store.UpdateJob(id, x => x.EvidenceFile = evidence);
@@ -238,6 +245,12 @@ public sealed class FactoryEngine
            return;
         }
         ct.ThrowIfCancellationRequested();
+        WorkPackageScope.ValidateWorktree(p, _store.Job(id));
+        if (!string.IsNullOrWhiteSpace(GitOperations.Git(worktree, "status", "--porcelain")))
+            throw new ScopeViolationException(
+                "Worktree changed after quality verification; inspect and revalidate before integration");
+        if (GitOperations.Head(worktree) != report.HeadSha)
+            throw new ScopeViolationException("Commit changed after quality verification");
         Stage(id, JobStates.AwaitingApproval, "integration");
         // Push is a side effect requiring explicit operator opt-in in settings plus remote mode.
         if (j.Mode == "remote" && _settings.AllowPush)

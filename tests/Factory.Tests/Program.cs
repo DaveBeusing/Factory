@@ -1478,6 +1478,43 @@ await TestAsync("Remote worker generation fences stale heartbeats and completion
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+
+await TestAsync("Old local runner cannot commit or complete after its generation is fenced", async () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-fence-live-" + Guid.NewGuid().ToString("N"));
+    var repo = Path.Combine(root, "repository");
+    Directory.CreateDirectory(repo);
+    void Git(params string[] args) =>
+        Commands.Require(Commands.Run("git", ["-C", repo, ..args], root), "git fixture");
+    try
+    {
+        Git("init", "-b", "master");
+        Git("config", "user.name", "Factory Tests");
+        Git("config", "user.email", "factory-tests@example.invalid");
+        File.WriteAllText(Path.Combine(repo, "README.md"), "Base");
+        Git("add", "README.md"); Git("commit", "-m", "Base");
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "fencing", Path = repo,
+            Checks = [new CheckCommand { Name = "git", Executable = "git",
+                Arguments = ["rev-parse", "HEAD"] }] };
+        var job = new FactoryJob { ProjectId = project.Id, Title = "Fenced",
+            ExpectedPaths = ["src/generated.txt"] };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var engine = new FactoryEngine(store, new FactorySettings { MaxParallel = 1 },
+            agent: new ExpireDuringRunAgent(store, job.Id));
+        await engine.RunQueueAsync(CancellationToken.None);
+        var blocked = store.Job(job.Id);
+        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "reconcile");
+        Assert(blocked.HeadSha == "" && blocked.PrUrl == "" && blocked.EvidenceFile == "",
+            "Stale execution persisted completion metadata");
+        Assert(blocked.Attempt == 1 && blocked.ExecutionGeneration >= 2);
+        Assert(store.Read().Events.Count(e => e.JobId == job.Id && e.Type == "reconciliation_required") == 1);
+        Assert(GitOperations.Head(blocked.Worktree) == GitOperations.Head(repo),
+            "Stale runner committed after losing its fence");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
 var passed = results.Count(x => x.Passed);
 Console.WriteLine($"{passed}/{results.Count} passed");
 return passed == results.Count ? 0 : 1;
@@ -1545,4 +1582,18 @@ internal sealed class FixedIntegrationPullReader(MergedPullRequest result) : IIn
 {
     public Task<MergedPullRequest> ReadAsync(string repository, int number, CancellationToken ct)
         => Task.FromResult(result);
+}
+
+internal sealed class ExpireDuringRunAgent(StateStore store, Guid jobId) : IAgentRuntime
+{
+    public Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
+    {
+        store.UpdateJob(jobId, j => j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        JobRecovery.QuarantineExpired(store);
+        Directory.CreateDirectory(Path.Combine(directory, "src"));
+        File.WriteAllText(Path.Combine(directory, "src", "generated.txt"), "Uncommitted stale change");
+        return Task.FromResult(new AgentRunResult { Success = true });
+    }
 }

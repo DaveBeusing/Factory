@@ -17,6 +17,9 @@ Reduce full aggregate materialization for frequent, narrowly scoped operations w
 - Idle worker heartbeat updates conditional on an enabled registration
 - Targeted job reads including persisted ordered child collections
 - Atomic fenced lifecycle stage updates and stage events in one transaction (without loading the aggregate)
+- Targeted fenced token debits that update a job and its active goal reservation in one SQLite transaction; observed overrun is preserved
+- Existing agent runtime now calls focused debits for fenced executions and records verified final usage without aggregate mutation
+- Representative same-fixture console benchmark of focused versus snapshot token updates (timings are observations, not a performance guarantee)
 - Rollback and stale lease denial tests for stage changes
 - Local runner and idle worker protocol integration
 - Concurrency and denial tests for targeted operations
@@ -24,9 +27,9 @@ Reduce full aggregate materialization for frequent, narrowly scoped operations w
 ### Out of scope in this increment
 
 - Atomic SQL job claiming with goal budget reservation
-- Job-specific remote usage accounting without aggregate reads
+- Job-specific remote protocol heartbeat accounting without aggregate reads (remote authorization and capability checks still use controller state)
 - Transactional budget settlement/reconciliation rewrite
-- Broader query projections and measured performance benchmarks
+- Broader query projections and statistically robust multi-process performance evaluation
 - Schema migration (none is necessary for these operations)
 
 ## Consistency and recovery
@@ -35,7 +38,7 @@ Every write uses a SQLite transaction with the existing WAL, foreign-key and tim
 
 ## Validation
 
-The console test suite includes targeted job retrieval, worker heartbeat authorization, generation/owner/expiration denial, atomic stage events, and failure-injected rollback. Execute:
+The console test suite includes targeted job retrieval, worker heartbeat authorization, generation/owner/expiration denial, atomic stage events, targeted cumulative token accounting, observed overrun, failure-injected rollback and a representative benchmark. Benchmark output records measured times on the CI runner; a single warm fixture must not be presented as a comprehensive performance study. Execute:
 
 ```powershell
 dotnet restore Factory.slnx
@@ -43,4 +46,4 @@ dotnet build Factory.slnx --configuration Release --no-restore
 dotnet run --project tests/Factory.Tests/Factory.Tests.csproj --configuration Release --no-restore
 ```
 
-**Remaining exit gates:** CI confirmation, actual performance comparison, crash/failure injection, independent persistence/security review, and migration/backup regression evidence. This increment must not be represented as full WP-02 completion.
+**Remaining exit gates:** Successful latest-head CI, controlled multi-process performance profiling, process-crash/failure injection, independent persistence/security review, and migration/backup regression evidence. The new token-accounting runtime path overlaps the BudgetedAgentRuntime changes in WP-01; **integrate WP-02 first, then explicitly resolve/retest WP-01** rather than combining branches without review. This increment must not be represented as full WP-02 completion.

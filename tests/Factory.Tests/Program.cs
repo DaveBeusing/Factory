@@ -1081,7 +1081,10 @@ await TestAsync("Budgeted runtime records failure usage and interrupts exhausted
         var scripted = new UsageTestRuntime { ReportFailure = true };
         scripted.Reports.Enqueue(new AgentTokenUsage(50, 20));
         scripted.Reports.Enqueue(new AgentTokenUsage(270, 100));
-        var runtime = new BudgetedAgentRuntime(scripted, store, job.Id);
+        var fence = store.Change(s =>
+            JobRecovery.Assign(s.Jobs.Single(j => j.Id == job.Id), "budget-failure", 120,
+                local: true, state: s));
+        var runtime = new BudgetedAgentRuntime(scripted, store, job.Id, fence);
         var failed = await runtime.RunAsync(home, "fail", "", CancellationToken.None);
         Assert(!failed.Success);
         Assert(store.Job(job.Id).TokensIn == 50 && store.Job(job.Id).TokensOut == 20);
@@ -1346,7 +1349,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 3);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 4);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

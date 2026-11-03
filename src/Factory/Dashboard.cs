@@ -186,6 +186,10 @@ public static class DashboardHost
         });
         // Registration through Mission Control is administrator-only.
         app.MapPost("/api/workers/register", (WorkerInput input) => Results.Ok(MissionControlManager.RegisterWorker(store, input)));
+        // Only the administrator credential can replace a worker's project grants
+        // and independently reviewed capability evidence. Worker tokens cannot reach this route.
+        app.MapPut("/api/workers/{id}/permissions", (string id, WorkerPermissionsInput input) =>
+            Results.Ok(MissionControlManager.SetWorkerPermissions(store, id, input)));
         // Remote workers have a distinct API namespace with worker-scoped credentials.
         app.MapPost("/api/worker/register", (HttpContext ctx, WorkerInput input) =>
         {
@@ -260,7 +264,7 @@ public static class DashboardHost
                 return (IResult)Results.BadRequest(new { error = "Evidence too large" });
             // Do not persist worker-supplied evidence or PR metadata before independent verification.
             var accepted = await WorkerProtocol.CompleteAsync(store, req,
-                new GitHubWorkerResultVerifier(), ct);
+                new GitHubWorkerResultVerifier(), ct, settings: settings);
             return accepted ? (IResult)Results.Ok() : Results.Conflict();
         });
         await app.RunAsync(cancellationToken);

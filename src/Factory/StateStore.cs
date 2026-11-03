@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed class StateStore
 {
-    private const int DatabaseVersion = 4;
+    private const int DatabaseVersion = 5;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -29,6 +29,8 @@ public sealed class StateStore
         new("evaluations", nameof(FactoryState.Evaluations), typeof(EvaluationResult)),
         new("releases", nameof(FactoryState.Releases), typeof(ReleaseInfo)),
         new("workers", nameof(FactoryState.Workers), typeof(WorkerInfo)),
+        new("worker_project_grants", nameof(FactoryState.WorkerProjectGrants), typeof(WorkerProjectGrant)),
+        new("worker_capability_proofs", nameof(FactoryState.WorkerCapabilityProofs), typeof(WorkerCapabilityProof)),
         new("events", nameof(FactoryState.Events), typeof(FactoryEvent))
     ];
 
@@ -156,6 +158,47 @@ public sealed class StateStore
             """);
     }
 
+    private static void UpgradeWorkerAuthorization(SqliteConnection db, SqliteTransaction tx)
+    {
+        // Existing worker identities get no grants or trusted capability evidence.
+        // The upgrade intentionally leaves every remote worker unprivileged.
+        Execute(db, tx, """
+            CREATE TABLE worker_project_grants(
+                position INTEGER NOT NULL,
+                id TEXT PRIMARY KEY,
+                worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE
+            );
+            CREATE TABLE worker_capability_proofs(
+                position INTEGER NOT NULL,
+                id TEXT PRIMARY KEY,
+                worker_id TEXT NOT NULL REFERENCES workers(id) ON DELETE CASCADE,
+                capability TEXT NOT NULL,
+                evidence TEXT NOT NULL,
+                verified_at TEXT NOT NULL
+            );
+            CREATE TABLE projects_required_execution_capabilities(
+                owner_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY(owner_id,position),
+                FOREIGN KEY(owner_id) REFERENCES projects(id) ON DELETE CASCADE
+            );
+            CREATE TABLE jobs_required_execution_capabilities(
+                owner_id TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                value TEXT NOT NULL,
+                PRIMARY KEY(owner_id,position),
+                FOREIGN KEY(owner_id) REFERENCES jobs(id) ON DELETE CASCADE
+            );
+            CREATE UNIQUE INDEX idx_worker_project_grants_unique
+                ON worker_project_grants(worker_id,project_id);
+            CREATE UNIQUE INDEX idx_worker_capability_proofs_unique
+                ON worker_capability_proofs(worker_id,capability);
+            PRAGMA user_version=5;
+            """);
+    }
+
     private static void Initialize(SqliteConnection db)
     {
         // Serialize first-time initialization across concurrently starting processes.
@@ -234,6 +277,13 @@ public sealed class StateStore
                 AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
                 PRAGMA user_version=4;
                 """);
+            UpgradeWorkerAuthorization(db, tx);
+            tx.Commit();
+            return;
+        }
+        if (schemaVersion == 4)
+        {
+            UpgradeWorkerAuthorization(db, tx);
             tx.Commit();
             return;
         }
@@ -278,6 +328,8 @@ public sealed class StateStore
             }
             if (map.Type == typeof(GraphNode))
                 definitions.Add("UNIQUE(project_id, file)");
+            if (map.Type == typeof(WorkerProjectGrant) || map.Type == typeof(WorkerCapabilityProof))
+                definitions.Add("FOREIGN KEY(worker_id) REFERENCES workers(id) ON DELETE CASCADE");
             Execute(db, tx, "CREATE TABLE " + Q(map.Table) + "(" + string.Join(", ", definitions) + ");");
             foreach (var property in Collections(map))
             {
@@ -326,7 +378,11 @@ public sealed class StateStore
             CREATE INDEX idx_knowledge_project ON knowledge_items(project_id);
             CREATE INDEX idx_releases_project ON releases(project_id);
             CREATE INDEX idx_workers_heartbeat ON workers(heartbeat);
-            PRAGMA user_version=4;
+            CREATE UNIQUE INDEX idx_worker_project_grants_unique
+                ON worker_project_grants(worker_id,project_id);
+            CREATE UNIQUE INDEX idx_worker_capability_proofs_unique
+                ON worker_capability_proofs(worker_id,capability);
+            PRAGMA user_version=5;
             """);
         tx.Commit();
     }

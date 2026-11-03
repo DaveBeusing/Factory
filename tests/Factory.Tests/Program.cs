@@ -11,6 +11,25 @@ void Assert(bool condition, string message = "Assertion failed")
     if (!condition) throw new Exception(message);
 }
 
+// Provisioning is an administrator operation, never part of worker self-registration.
+void GrantRemoteWorker(StateStore store, string workerId, params Guid[] projectIds)
+{
+    MissionControlManager.SetWorkerPermissions(store, workerId, new WorkerPermissionsInput
+    {
+        ProjectIds = projectIds.ToList(),
+        Reason = "Fixture operator verified worker capabilities",
+        VerifiedCapabilities =
+        [
+            new() { Capability = "native-agent", Evidence = "Reviewed native agent execution in test fixture" },
+            new() { Capability = "git-cli", Evidence = "Reviewed Git CLI installation in test fixture" },
+            new() { Capability = "runtime:exec", Evidence = "Reviewed exec adapter in test fixture" },
+            new() { Capability = "runtime:app-server", Evidence = "Reviewed app server adapter in test fixture" },
+            new() { Capability = "native-checks", Evidence = "Reviewed native checks in test fixture" },
+            new() { Capability = "container-checks", Evidence = "Reviewed container checks in test fixture" }
+        ]
+    });
+}
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -180,6 +199,10 @@ Test("Worker credentials cannot authenticate to administrator endpoints", () =>
     Assert(WorkerAuthentication.Authorized("GET", "/api/state", Bearer(settings.ApiToken), null, settings));
     Assert(!WorkerAuthentication.Authorized("POST", "/api/worker/claim",
         Bearer(settings.ApiToken), "builder-01", settings));
+    Assert(!WorkerAuthentication.Authorized("PUT", "/api/workers/builder-01/permissions",
+        Bearer(token), "builder-01", settings), "Worker token could elevate its own grants");
+    Assert(WorkerAuthentication.Authorized("PUT", "/api/workers/builder-01/permissions",
+        Bearer(settings.ApiToken), null, settings));
 });
 
 Test("Worker credentials are bound to identities and worker routes fail closed", () =>
@@ -215,6 +238,187 @@ Test("Unregistered and disabled workers cannot claim jobs", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Remote claims cannot cross project grants or gain access through registration", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-project-auth-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var a = new ProjectInfo { Name = "allowed", Origin = "https://example.invalid/a" };
+        var b = new ProjectInfo { Name = "forbidden", Origin = "https://example.invalid/b" };
+        var authorizedJob = new FactoryJob { ProjectId = a.Id, Mode = JobExecutionModes.Remote,
+            Priority = 10, ExpectedPaths = ["src/a.cs"] };
+        var forbiddenJob = new FactoryJob { ProjectId = b.Id, Mode = JobExecutionModes.Remote,
+            Priority = 100, ExpectedPaths = ["src/b.cs"] };
+        store.Change(state =>
+        {
+            state.Projects.Add(a); state.Projects.Add(b);
+            state.Jobs.Add(authorizedJob); state.Jobs.Add(forbiddenJob);
+        });
+        var settings = new FactorySettings { AllowPush = true };
+        MissionControlManager.RegisterWorker(store, new WorkerInput { Id = "scoped-worker" });
+        Assert(WorkerProtocol.Claim(store, settings, "scoped-worker") is null,
+            "Registration implicitly granted access");
+
+        GrantRemoteWorker(store, "scoped-worker", a.Id);
+        var grantSnapshot = new StateStore(home).Read();
+        Assert(grantSnapshot.WorkerProjectGrants.Single().ProjectId == a.Id);
+        Assert(grantSnapshot.WorkerCapabilityProofs.Count == 6,
+            "Trusted capability evidence was not persisted");
+
+        // Re-registration is under worker credentials, not administrator privileges.
+        MissionControlManager.RegisterWorker(store,
+            new WorkerInput { Id = "scoped-worker", Platform = "spoofed-platform" });
+        Assert(store.Read().WorkerProjectGrants.Count == 1 &&
+            store.Read().WorkerProjectGrants.Single().ProjectId == a.Id,
+            "Re-registration changed project grants");
+
+        var claim = WorkerProtocol.Claim(store, settings, "scoped-worker");
+        Assert(claim is not null && claim.Job.Id == authorizedJob.Id &&
+            claim.Project.Id == a.Id, "Claim escaped authorized project");
+        Assert(store.Job(forbiddenJob.Id).State == JobStates.Queued &&
+            store.Job(forbiddenJob.Id).Attempt == 0, "Foreign project job was reserved");
+        Assert(WorkerProtocol.Claim(store, settings, "scoped-worker") is null,
+            "Worker claimed an unauthorized project after exhausting its queue");
+
+        MissionControlManager.RegisterWorker(store, new WorkerInput { Id = "other-worker" });
+        GrantRemoteWorker(store, "other-worker", b.Id);
+        var forged = new WorkerStatus
+        {
+            WorkerId = "other-worker", JobId = authorizedJob.Id,
+            ExecutionGeneration = claim!.Job.ExecutionGeneration,
+            LeaseToken = claim.Job.LeaseToken
+        };
+        Assert(!WorkerProtocol.Heartbeat(store, forged, settings),
+            "Cross-project heartbeat updated another worker's lease");
+        Assert(!WorkerProtocol.CompleteAsync(store, forged,
+            new RefusingWorkerVerifier()).GetAwaiter().GetResult(),
+            "Cross-project completion was accepted");
+
+        // Revocation affects existing leases as well as future claims.
+        MissionControlManager.SetWorkerPermissions(store, "scoped-worker",
+            new WorkerPermissionsInput
+            {
+                Reason = "Operator revoked access to the project"
+            });
+        var formerLease = new WorkerStatus
+        {
+            WorkerId = "scoped-worker", JobId = authorizedJob.Id,
+            ExecutionGeneration = claim.Job.ExecutionGeneration,
+            LeaseToken = claim.Job.LeaseToken
+        };
+        Assert(!WorkerProtocol.Heartbeat(store, formerLease, settings),
+            "Revoked worker retained heartbeat privileges");
+        Assert(!WorkerProtocol.CompleteAsync(store, formerLease,
+            new RefusingWorkerVerifier()).GetAwaiter().GetResult(),
+            "Revoked worker completed a previously assigned job");
+        Assert(store.Job(authorizedJob.Id).State != JobStates.PrReady);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Remote execution requires current trusted capability evidence", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-capability-auth-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo
+        {
+            Name = "isolated-checks", Origin = "https://example.invalid/c",
+            RequiredExecutionCapabilities = ["container-checks"],
+            Checks = [new CheckCommand
+            {
+                Name = "container", Executable = "dotnet", ContainerImage = "example/dotnet:latest"
+            }]
+        };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote,
+            RequiredExecutionCapabilities = ["container-checks"] };
+        store.Change(state =>
+        {
+            state.Projects.Add(project); state.Jobs.Add(job);
+            state.Workers.Add(new WorkerInfo { Id = "limited-worker" });
+        });
+        var settings = new FactorySettings { AllowPush = true };
+        MissionControlManager.SetWorkerPermissions(store, "limited-worker", new WorkerPermissionsInput
+        {
+            ProjectIds = [project.Id], Reason = "Verified only native worker capabilities",
+            VerifiedCapabilities =
+            [
+                new() { Capability = "native-agent", Evidence = "Verified native execution manually" },
+                new() { Capability = "git-cli", Evidence = "Verified Git CLI manually" },
+                new() { Capability = "runtime:exec", Evidence = "Verified exec adapter manually" }
+            ]
+        });
+        Assert(WorkerProtocol.Claim(store, settings, "limited-worker") is null,
+            "Worker without required container capability took job");
+
+        GrantRemoteWorker(store, "limited-worker", project.Id);
+        store.Change(state => state.WorkerCapabilityProofs.Single(p =>
+            p.WorkerId == "limited-worker" && p.Capability == "container-checks")
+            .VerifiedAt = DateTimeOffset.UtcNow.AddDays(-31));
+        Assert(WorkerProtocol.Claim(store, settings, "limited-worker") is null,
+            "Expired capability verification was trusted");
+
+        GrantRemoteWorker(store, "limited-worker", project.Id);
+        Assert(WorkerProtocol.Claim(store, settings, "limited-worker") is null,
+            "Unchanged evidence text improperly renewed an expired attestation");
+        var evidence = store.Read().WorkerCapabilityProofs
+            .Where(p => p.WorkerId == "limited-worker")
+            .Select(p => new VerifiedWorkerCapabilityInput
+            {
+                Capability = p.Capability,
+                Evidence = p.Capability == "container-checks"
+                    ? p.Evidence + "; reverified after expiration" : p.Evidence
+            }).ToList();
+        MissionControlManager.SetWorkerPermissions(store, "limited-worker", new WorkerPermissionsInput
+        {
+            ProjectIds = [project.Id],
+            Reason = "Operator reverified expired container capability",
+            VerifiedCapabilities = evidence
+        });
+        Assert(WorkerProtocol.Claim(store, settings, "limited-worker")?.Job.Id == job.Id,
+            "Reverified worker was not allowed to claim an eligible job");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Unknown worker capabilities and foreign grants are rejected", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-grants-invalid-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        MissionControlManager.RegisterWorker(store, new WorkerInput { Id = "untrusted-worker" });
+        void Reject(WorkerPermissionsInput input)
+        {
+            try
+            {
+                MissionControlManager.SetWorkerPermissions(store, "untrusted-worker", input);
+                throw new Exception("Unsafe worker grant accepted");
+            }
+            catch (InvalidOperationException) { }
+        }
+        Reject(new WorkerPermissionsInput
+        {
+            ProjectIds = [Guid.NewGuid()], Reason = "Unknown project must not be granted"
+        });
+        Reject(new WorkerPermissionsInput
+        {
+            Reason = "Capability has no actual controller evidence",
+            VerifiedCapabilities = [new() { Capability = "native-agent" }]
+        });
+        Reject(new WorkerPermissionsInput
+        {
+            Reason = "Unverifiable requested isolation capability",
+            VerifiedCapabilities = [new() { Capability = "isolated-agent", Evidence = "Unsupported mode" }]
+        });
+        Assert(store.Read().WorkerProjectGrants.Count == 0 &&
+            store.Read().WorkerCapabilityProofs.Count == 0, "Invalid grants were persisted");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Remote claims never take local jobs", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-mode-claim-" + Guid.NewGuid().ToString("N"));
@@ -231,6 +435,7 @@ Test("Remote claims never take local jobs", () =>
             s.Projects.Add(project); s.Jobs.Add(local); s.Jobs.Add(remote);
             s.Workers.Add(new WorkerInfo { Id = "remote-worker" });
         });
+        GrantRemoteWorker(store, "remote-worker", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "remote-worker");
         Assert(claim?.Job.Id == remote.Id, "Remote worker did not select its eligible job");
         Assert(store.Job(local.Id).State == JobStates.Queued && store.Job(local.Id).Attempt == 0,
@@ -300,6 +505,7 @@ await TestAsync("Remote scope block reaches the controller as amendable scope", 
             s.Projects.Add(project); s.Jobs.Add(job);
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
         Assert(claim is not null);
         var reported = new FactoryJob
@@ -796,10 +1002,12 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 4, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 5, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
-            "workers", "releases", "knowledge_items", "graph_nodes", "evaluations",
+            "workers", "worker_project_grants", "worker_capability_proofs",
+            "projects_required_execution_capabilities", "jobs_required_execution_capabilities",
+            "releases", "knowledge_items", "graph_nodes", "evaluations",
             "project_checks", "project_check_arguments", "jobs_depends_on",
             "projects_protected_paths", "goals_acceptance_criteria", "evaluations_failures" })
             Assert(Count($"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';") == 1,
@@ -1144,6 +1352,7 @@ await TestAsync("Remote goal claims retain remaining budget and failed usage", a
             s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(earlier); s.Jobs.Add(job);
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
         Assert(claim?.Goal is not null && claim.Goal.TokenBudget == 750);
         Assert(claim!.Job.TokensIn == 20);
@@ -1259,6 +1468,7 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
             s.Projects.Add(project); s.Jobs.Add(job);
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
         Assert(claim != null);
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
@@ -1292,6 +1502,7 @@ await TestAsync("Controller-verified remote results are atomically bound to the 
             s.Projects.Add(project); s.Jobs.Add(job);
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
         Assert(claim != null);
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
@@ -1312,6 +1523,49 @@ await TestAsync("Controller-verified remote results are atomically bound to the 
 });
 
 
+Test("SQLite 4 upgrade preserves workers without granting remote access", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-worker-upgrade-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "existing", Origin = "https://example.invalid/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(state =>
+        {
+            state.Projects.Add(project);
+            state.Jobs.Add(job);
+            state.Workers.Add(new WorkerInfo { Id = "legacy-worker" });
+        });
+
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                DROP TABLE worker_project_grants;
+                DROP TABLE worker_capability_proofs;
+                DROP TABLE projects_required_execution_capabilities;
+                DROP TABLE jobs_required_execution_capabilities;
+                PRAGMA user_version=4;
+                """;
+            cmd.ExecuteNonQuery();
+        }
+
+        var migrated = new StateStore(home);
+        Assert(migrated.Read().Workers.Single().Id == "legacy-worker");
+        Assert(migrated.Read().WorkerProjectGrants.Count == 0 &&
+            migrated.Read().WorkerCapabilityProofs.Count == 0);
+        Assert(WorkerProtocol.Claim(migrated, new FactorySettings { AllowPush = true },
+            "legacy-worker") is null, "Migration granted privileges to an existing worker");
+        GrantRemoteWorker(migrated, "legacy-worker", project.Id);
+        Assert(WorkerProtocol.Claim(migrated, new FactorySettings { AllowPush = true },
+            "legacy-worker")?.Job.Id == job.Id);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-recovery-migrate-" + Guid.NewGuid().ToString("N"));
@@ -1327,6 +1581,10 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
             db.Open();
             using var cmd = db.CreateCommand();
             cmd.CommandText = """
+                DROP TABLE worker_project_grants;
+                DROP TABLE worker_capability_proofs;
+                DROP TABLE projects_required_execution_capabilities;
+                DROP TABLE jobs_required_execution_capabilities;
                 DROP TABLE goal_budget_reservations;
                 ALTER TABLE jobs DROP COLUMN usage_complete;
                 ALTER TABLE jobs DROP COLUMN execution_generation;
@@ -1349,7 +1607,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 4);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 5);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -1471,6 +1729,7 @@ await TestAsync("Remote worker generation fences stale heartbeats and completion
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
         var settings = new FactorySettings { AllowPush = true };
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var first = WorkerProtocol.Claim(store, settings, "worker-01");
         Assert(first is not null);
         var stale = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,
@@ -1703,6 +1962,10 @@ Test("SQLite 3 migration quarantines unreserved goal runners and holds budget", 
             db.Open();
             using var cmd = db.CreateCommand();
             cmd.CommandText = """
+                DROP TABLE worker_project_grants;
+                DROP TABLE worker_capability_proofs;
+                DROP TABLE projects_required_execution_capabilities;
+                DROP TABLE jobs_required_execution_capabilities;
                 DROP TABLE goal_budget_reservations;
                 ALTER TABLE jobs DROP COLUMN usage_complete;
                 PRAGMA user_version=3;
@@ -1785,6 +2048,8 @@ Test("Remote workers can concurrently claim reserved shares of one goal", () =>
         });
         var settings = new FactorySettings { AllowPush = true, MaxParallel = 2,
             GoalReservationTokens = 8000 };
+        GrantRemoteWorker(store, "worker-a", project.Id);
+        GrantRemoteWorker(store, "worker-b", project.Id);
         var first = WorkerProtocol.Claim(store, settings, "worker-a");
         var second = WorkerProtocol.Claim(store, settings, "worker-b");
         Assert(first is not null && second is not null && first.Job.Id != second.Job.Id,
@@ -1816,6 +2081,7 @@ await TestAsync("Unverified remote final usage holds budget until reviewed recon
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
         var settings = new FactorySettings { AllowPush = true };
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, settings, "worker-01");
         Assert(claim is not null);
         var claimed = claim!.Job;
@@ -1865,6 +2131,7 @@ await TestAsync("Remote reservation overrun fences worker and preserves actual u
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
         var settings = new FactorySettings { AllowPush = true };
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, settings, "worker-01");
         Assert(claim is not null);
         var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,

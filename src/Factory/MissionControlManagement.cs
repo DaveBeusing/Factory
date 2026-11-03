@@ -10,6 +10,7 @@ public sealed class ProjectInput
     public string BaseBranch { get; set; } = "master";
     public int MaxParallel { get; set; } = 2;
     public List<CheckCommand> Checks { get; set; } = [];
+    public List<string> RequiredExecutionCapabilities { get; set; } = [];
     public List<string>? ProtectedPaths { get; set; }
 }
 public sealed class GoalInput
@@ -30,6 +31,7 @@ public sealed class JobInput
     public int Priority { get; set; } = 50;
     public List<Guid> DependsOn { get; set; } = [];
     public List<string> ExpectedPaths { get; set; } = [];
+    public List<string> RequiredExecutionCapabilities { get; set; } = [];
 }
 public sealed class ScopeAmendmentInput
 {
@@ -42,6 +44,23 @@ public sealed class WorkerInput
 {
     public string Id { get; set; } = "";
     public string Platform { get; set; } = "remote";
+}
+public sealed class VerifiedWorkerCapabilityInput
+{
+    public string Capability { get; set; } = "";
+    public string Evidence { get; set; } = "";
+}
+public sealed class WorkerPermissionsInput
+{
+    public List<Guid> ProjectIds { get; set; } = [];
+    public List<VerifiedWorkerCapabilityInput> VerifiedCapabilities { get; set; } = [];
+    public string Reason { get; set; } = "";
+}
+public sealed class WorkerPermissionsResult
+{
+    public string WorkerId { get; set; } = "";
+    public List<Guid> ProjectIds { get; set; } = [];
+    public List<string> VerifiedCapabilities { get; set; } = [];
 }
 public sealed class ControlInput
 {
@@ -79,8 +98,10 @@ public static class MissionControlManager
         var path = GitOperations.RepositoryRoot(input.Path);
         GitOperations.Git(path, "rev-parse", "--verify", input.BaseBranch);
         ValidateChecks(input.Checks);
+        ValidateExecutionCapabilities(input.RequiredExecutionCapabilities);
         var p = new ProjectInfo { Name = input.Name.Trim(), Path = path, BaseBranch = input.BaseBranch,
-            Origin = GitOperations.Origin(path) ?? "", MaxParallel = input.MaxParallel, Checks = input.Checks };
+            Origin = GitOperations.Origin(path) ?? "", MaxParallel = input.MaxParallel, Checks = input.Checks,
+            RequiredExecutionCapabilities = input.RequiredExecutionCapabilities };
         if (input.ProtectedPaths != null) p.ProtectedPaths = NormalizePaths(input.ProtectedPaths);
         store.Change(s =>
         {
@@ -96,6 +117,7 @@ public static class MissionControlManager
         var path = GitOperations.RepositoryRoot(input.Path);
         GitOperations.Git(path, "rev-parse", "--verify", input.BaseBranch);
         ValidateChecks(input.Checks);
+        ValidateExecutionCapabilities(input.RequiredExecutionCapabilities);
         return store.Change(s =>
         {
             var p = s.Projects.Single(x => x.Id == id);
@@ -105,9 +127,17 @@ public static class MissionControlManager
             p.Name = input.Name.Trim(); p.Path = path; p.BaseBranch = input.BaseBranch;
             p.Origin = GitOperations.Origin(path) ?? "";
             p.MaxParallel = input.MaxParallel; p.Checks = input.Checks;
+            p.RequiredExecutionCapabilities = input.RequiredExecutionCapabilities;
             if (input.ProtectedPaths != null) p.ProtectedPaths = NormalizePaths(input.ProtectedPaths);
             Log(s, null, "project_updated", p.Name); return p;
         });
+    }
+    private static void ValidateExecutionCapabilities(List<string>? capabilities)
+    {
+        Require(capabilities is { Count: <= 16 } &&
+            capabilities.All(WorkerAuthorization.IsKnownCapability) &&
+            capabilities.Distinct(StringComparer.Ordinal).Count() == capabilities.Count,
+            "Execution capabilities must be distinct supported capability names");
     }
     private static void ValidateChecks(List<CheckCommand>? checks)
     {
@@ -182,7 +212,8 @@ public static class MissionControlManager
         return store.AddJob(new FactoryJob { ProjectId = input.ProjectId, GoalId = input.GoalId,
             Title = input.Title.Trim(), Description = input.Description.Trim(), Priority = input.Priority, Risk = input.Risk,
             Mode = input.Mode, MaxRounds = settings.MaxReviewRounds, DependsOn = input.DependsOn,
-            ExpectedPaths = input.ExpectedPaths });
+            ExpectedPaths = input.ExpectedPaths,
+            RequiredExecutionCapabilities = input.RequiredExecutionCapabilities });
     }
     public static FactoryJob UpdateJob(StateStore store, Guid id, JobInput input)
     {
@@ -196,13 +227,14 @@ public static class MissionControlManager
             Require(input.DependsOn.All(x => x != id && s.Jobs.Any(a => a.Id == x && a.ProjectId == j.ProjectId)), "Unknown or cross-project dependency");
             Require(j.Attempt == 0 || j.ExpectedPaths.SequenceEqual(input.ExpectedPaths),
                 "Executed work-package scope can only change through an explicit reviewed scope amendment");
-            var before = (j.Title, j.Description, j.Priority, j.Risk, j.Mode, j.GoalId, j.DependsOn, j.ExpectedPaths);
+            var before = (j.Title, j.Description, j.Priority, j.Risk, j.Mode, j.GoalId, j.DependsOn, j.ExpectedPaths, j.RequiredExecutionCapabilities);
             j.Title = input.Title.Trim(); j.Description = input.Description.Trim(); j.Priority = input.Priority;
             j.Risk = input.Risk; j.Mode = input.Mode; j.GoalId = input.GoalId;
             j.DependsOn = input.DependsOn; j.ExpectedPaths = input.ExpectedPaths;
+            j.RequiredExecutionCapabilities = input.RequiredExecutionCapabilities;
             if (DependencyGraph.WouldCycle(s.Jobs))
             {
-                (j.Title, j.Description, j.Priority, j.Risk, j.Mode, j.GoalId, j.DependsOn, j.ExpectedPaths) = before;
+                (j.Title, j.Description, j.Priority, j.Risk, j.Mode, j.GoalId, j.DependsOn, j.ExpectedPaths, j.RequiredExecutionCapabilities) = before;
                 throw new InvalidOperationException("Dependency cycle detected");
             }
             j.UpdatedAt = DateTimeOffset.UtcNow;
@@ -211,6 +243,7 @@ public static class MissionControlManager
     }
     private static void ValidateJob(JobInput j)
     {
+        ValidateExecutionCapabilities(j.RequiredExecutionCapabilities);
         Require(!string.IsNullOrWhiteSpace(j.Title) && j.Title.Length <= 200 && !string.IsNullOrWhiteSpace(j.Description) && j.Description.Length <= 12000,
             "Title and description required");
         Require((j.Mode is "local" or "remote") && (j.Risk is "low" or "medium" or "high"), "Invalid mode or risk");
@@ -318,6 +351,63 @@ public static class MissionControlManager
             if (w.Heartbeat == default) w.Heartbeat = DateTimeOffset.MinValue;
             // Registration alone is not proof that the remote process is connected.
             Log(s, null, "worker_registered", w.Id); return w;
+        });
+    }
+    // Administrator-only entry point. Worker registration must never create or alter grants.
+    public static WorkerPermissionsResult SetWorkerPermissions(StateStore store, string id,
+        WorkerPermissionsInput input)
+    {
+        Require(WorkerAuthentication.IsValidWorkerId(id), "Invalid worker identity");
+        Require(input.Reason is { Length: >= 8 and <= 500 } &&
+            !string.IsNullOrWhiteSpace(input.Reason), "A change reason is required");
+        Require(input.ProjectIds is { Count: <= 64 } &&
+            input.ProjectIds.All(p => p != Guid.Empty) &&
+            input.ProjectIds.Distinct().Count() == input.ProjectIds.Count,
+            "Project grants must be unique valid project IDs");
+        Require(input.VerifiedCapabilities is { Count: <= 16 } &&
+            input.VerifiedCapabilities.All(p => p is not null &&
+                WorkerAuthorization.IsKnownCapability(p.Capability) &&
+                p.Evidence is { Length: >= 8 and <= 2000 } &&
+                !string.IsNullOrWhiteSpace(p.Evidence)) &&
+            input.VerifiedCapabilities.Select(p => p.Capability)
+                .Distinct(StringComparer.Ordinal).Count() == input.VerifiedCapabilities.Count,
+            "Capabilities require unique known names and administrator-verified evidence");
+
+        return store.Change(s =>
+        {
+            Require(s.Workers.Any(w => w.Id == id), "Worker must be registered first");
+            Require(input.ProjectIds.All(pid => s.Projects.Any(p => p.Id == pid)),
+                "Unknown project grant");
+            // Changing project grants must not silently renew old capability attestations.
+            var previousProofs = s.WorkerCapabilityProofs
+                .Where(p => p.WorkerId == id)
+                .ToDictionary(p => p.Capability, StringComparer.Ordinal);
+            s.WorkerProjectGrants.RemoveAll(g => g.WorkerId == id);
+            s.WorkerCapabilityProofs.RemoveAll(p => p.WorkerId == id);
+            foreach (var projectId in input.ProjectIds)
+                s.WorkerProjectGrants.Add(new WorkerProjectGrant
+                {
+                    WorkerId = id, ProjectId = projectId
+                });
+            foreach (var capability in input.VerifiedCapabilities)
+                s.WorkerCapabilityProofs.Add(new WorkerCapabilityProof
+                {
+                    WorkerId = id, Capability = capability.Capability,
+                    Evidence = capability.Evidence.Trim(),
+                    VerifiedAt = previousProofs.TryGetValue(capability.Capability, out var prior) &&
+                        string.Equals(prior.Evidence, capability.Evidence.Trim(), StringComparison.Ordinal)
+                        ? prior.VerifiedAt : DateTimeOffset.UtcNow
+                });
+            var audit = id + ": " + input.Reason.Trim() +
+                " (projects=" + string.Join(",", input.ProjectIds.Select(p => p.ToString("N"))) +
+                "; capabilities=" + string.Join(",", input.VerifiedCapabilities.Select(p => p.Capability)) + ")";
+            Log(s, null, "worker_authorization", audit[..Math.Min(audit.Length, 2000)]);
+            return new WorkerPermissionsResult
+            {
+                WorkerId = id, ProjectIds = input.ProjectIds.ToList(),
+                VerifiedCapabilities = input.VerifiedCapabilities
+                    .Select(c => c.Capability).ToList()
+            };
         });
     }
     public static WorkerInfo ControlWorker(StateStore store, string id, string action)

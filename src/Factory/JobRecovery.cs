@@ -63,12 +63,13 @@ public static class JobRecovery
         job.CheckpointAt = DateTimeOffset.UtcNow;
     }
 
-    public static IReadOnlyList<Guid> QuarantineExpired(StateStore store)
+    public static IReadOnlyList<Guid> QuarantineExpired(StateStore store, string? mode = null)
     {
         return store.Change(s =>
         {
             var ids = new List<Guid>();
-            foreach (var job in s.Jobs.Where(j => !string.IsNullOrEmpty(j.LeaseOwner) &&
+            foreach (var job in s.Jobs.Where(j => (mode is null || j.Mode == mode) &&
+                !string.IsNullOrEmpty(j.LeaseOwner) &&
                 j.LeaseUntil <= DateTimeOffset.UtcNow &&
                 JobStates.Active.Contains(j.State)))
             {

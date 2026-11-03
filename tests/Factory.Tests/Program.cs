@@ -11,6 +11,25 @@ void Assert(bool condition, string message = "Assertion failed")
     if (!condition) throw new Exception(message);
 }
 
+// Provisioning is an administrator operation, never part of worker self-registration.
+void GrantRemoteWorker(StateStore store, string workerId, params Guid[] projectIds)
+{
+    MissionControlManager.SetWorkerPermissions(store, workerId, new WorkerPermissionsInput
+    {
+        ProjectIds = projectIds.ToList(),
+        Reason = "Fixture operator verified worker capabilities",
+        VerifiedCapabilities =
+        [
+            new() { Capability = "native-agent", Evidence = "Reviewed native agent execution in test fixture" },
+            new() { Capability = "git-cli", Evidence = "Reviewed Git CLI installation in test fixture" },
+            new() { Capability = "runtime:exec", Evidence = "Reviewed exec adapter in test fixture" },
+            new() { Capability = "runtime:app-server", Evidence = "Reviewed app server adapter in test fixture" },
+            new() { Capability = "native-checks", Evidence = "Reviewed native checks in test fixture" },
+            new() { Capability = "container-checks", Evidence = "Reviewed container checks in test fixture" }
+        ]
+    });
+}
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -180,6 +199,10 @@ Test("Worker credentials cannot authenticate to administrator endpoints", () =>
     Assert(WorkerAuthentication.Authorized("GET", "/api/state", Bearer(settings.ApiToken), null, settings));
     Assert(!WorkerAuthentication.Authorized("POST", "/api/worker/claim",
         Bearer(settings.ApiToken), "builder-01", settings));
+    Assert(!WorkerAuthentication.Authorized("PUT", "/api/workers/builder-01/permissions",
+        Bearer(token), "builder-01", settings), "Worker token could elevate its own grants");
+    Assert(WorkerAuthentication.Authorized("PUT", "/api/workers/builder-01/permissions",
+        Bearer(settings.ApiToken), null, settings));
 });
 
 Test("Worker credentials are bound to identities and worker routes fail closed", () =>
@@ -231,6 +254,7 @@ Test("Remote claims never take local jobs", () =>
             s.Projects.Add(project); s.Jobs.Add(local); s.Jobs.Add(remote);
             s.Workers.Add(new WorkerInfo { Id = "remote-worker" });
         });
+        GrantRemoteWorker(store, "remote-worker", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "remote-worker");
         Assert(claim?.Job.Id == remote.Id, "Remote worker did not select its eligible job");
         Assert(store.Job(local.Id).State == JobStates.Queued && store.Job(local.Id).Attempt == 0,
@@ -300,6 +324,7 @@ await TestAsync("Remote scope block reaches the controller as amendable scope", 
             s.Projects.Add(project); s.Jobs.Add(job);
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
         Assert(claim is not null);
         var reported = new FactoryJob
@@ -796,10 +821,12 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 4, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 5, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
-            "workers", "releases", "knowledge_items", "graph_nodes", "evaluations",
+            "workers", "worker_project_grants", "worker_capability_proofs",
+            "projects_required_execution_capabilities", "jobs_required_execution_capabilities",
+            "releases", "knowledge_items", "graph_nodes", "evaluations",
             "project_checks", "project_check_arguments", "jobs_depends_on",
             "projects_protected_paths", "goals_acceptance_criteria", "evaluations_failures" })
             Assert(Count($"SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='{table}';") == 1,
@@ -1144,6 +1171,7 @@ await TestAsync("Remote goal claims retain remaining budget and failed usage", a
             s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(earlier); s.Jobs.Add(job);
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
         Assert(claim?.Goal is not null && claim.Goal.TokenBudget == 750);
         Assert(claim!.Job.TokensIn == 20);
@@ -1259,6 +1287,7 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
             s.Projects.Add(project); s.Jobs.Add(job);
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
         Assert(claim != null);
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
@@ -1292,6 +1321,7 @@ await TestAsync("Controller-verified remote results are atomically bound to the 
             s.Projects.Add(project); s.Jobs.Add(job);
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
         Assert(claim != null);
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
@@ -1327,6 +1357,14 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
             db.Open();
             using var cmd = db.CreateCommand();
             cmd.CommandText = """
+                DROP TABLE worker_project_grants;
+                DROP TABLE worker_capability_proofs;
+                DROP TABLE projects_required_execution_capabilities;
+                DROP TABLE jobs_required_execution_capabilities;
+                DROP TABLE worker_project_grants;
+                DROP TABLE worker_capability_proofs;
+                DROP TABLE projects_required_execution_capabilities;
+                DROP TABLE jobs_required_execution_capabilities;
                 DROP TABLE goal_budget_reservations;
                 ALTER TABLE jobs DROP COLUMN usage_complete;
                 ALTER TABLE jobs DROP COLUMN execution_generation;
@@ -1349,7 +1387,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 4);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 5);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -1471,6 +1509,7 @@ await TestAsync("Remote worker generation fences stale heartbeats and completion
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
         var settings = new FactorySettings { AllowPush = true };
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var first = WorkerProtocol.Claim(store, settings, "worker-01");
         Assert(first is not null);
         var stale = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,
@@ -1785,6 +1824,8 @@ Test("Remote workers can concurrently claim reserved shares of one goal", () =>
         });
         var settings = new FactorySettings { AllowPush = true, MaxParallel = 2,
             GoalReservationTokens = 8000 };
+        GrantRemoteWorker(store, "worker-a", project.Id);
+        GrantRemoteWorker(store, "worker-b", project.Id);
         var first = WorkerProtocol.Claim(store, settings, "worker-a");
         var second = WorkerProtocol.Claim(store, settings, "worker-b");
         Assert(first is not null && second is not null && first.Job.Id != second.Job.Id,
@@ -1816,6 +1857,7 @@ await TestAsync("Unverified remote final usage holds budget until reviewed recon
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
         var settings = new FactorySettings { AllowPush = true };
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, settings, "worker-01");
         Assert(claim is not null);
         var claimed = claim!.Job;
@@ -1865,6 +1907,7 @@ await TestAsync("Remote reservation overrun fences worker and preserves actual u
             s.Workers.Add(new WorkerInfo { Id = "worker-01" });
         });
         var settings = new FactorySettings { AllowPush = true };
+        GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, settings, "worker-01");
         Assert(claim is not null);
         var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,

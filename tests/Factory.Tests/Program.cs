@@ -1229,6 +1229,65 @@ Test("Targeted SQLite operations preserve execution fencing and job children", (
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Fenced stage transition writes job and event in one transaction", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-stage-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "stage-test" };
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "stage-runner", 120, local: true));
+        store.SetFencedStage(job.Id, fence, JobStates.Building, "agent");
+        var snapshot = store.Read();
+        var actual = snapshot.Jobs.Single();
+        Assert(actual.State == JobStates.Building && actual.Stage == "agent" &&
+            actual.CheckpointStage == "agent" && actual.CheckpointAt is not null);
+        Assert(snapshot.Events.Count(e => e.JobId == job.Id && e.Type == "stage" &&
+            e.Message == "building/agent") == 1);
+
+        try
+        {
+            store.SetFencedStage(job.Id, fence with { Generation = fence.Generation - 1 },
+                JobStates.Failed, "stale");
+            throw new Exception("Superseded generation mutated the live job");
+        }
+        catch (LostExecutionLeaseException) { }
+        Assert(store.Job(job.Id).State == JobStates.Building);
+        Assert(store.Read().Events.Count(e => e.Type == "stage") == 1);
+
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var command = db.CreateCommand();
+            command.CommandText = """
+                CREATE TRIGGER reject_stage_event BEFORE INSERT ON events
+                WHEN NEW.type='stage' BEGIN SELECT RAISE(ABORT, 'stage event rejected'); END;
+                """;
+            command.ExecuteNonQuery();
+        }
+        try
+        {
+            store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
+            throw new Exception("Stage mutation survived failed audit insert");
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { }
+        Assert(store.Job(job.Id).State == JobStates.Building &&
+            store.Job(job.Id).CheckpointStage == "agent",
+            "Failed audit event must roll back the job transition");
+        store.Change(s => s.Jobs.Single().LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        try
+        {
+            store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
+            throw new Exception("Expired execution changed its stage");
+        }
+        catch (LostExecutionLeaseException) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("App-server token usage counts deltas on resumed threads", () =>
 {
     var tracker = new AppServerTokenTracker();

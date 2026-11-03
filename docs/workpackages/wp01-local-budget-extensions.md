@@ -19,6 +19,7 @@ A controller-local agent execution may extend its active goal reservation using 
 - Durable `budget_extended` operational events identifying reservation, generation, grant, and new authorized total
 - Fail-closed exhaustion and unchanged held-usage reconciliation behavior
 - Validated settings API fields and concurrency/runtime regression tests
+- Goal-budget API summary of active/held liabilities, reconciliation needs, per-job observed usage and retained extension events
 
 ### Out of scope in this increment
 
@@ -26,6 +27,7 @@ A controller-local agent execution may extend its active goal reservation using 
 - Unbounded historical reporting beyond existing event-retention policy
 - A distinct `goal_budget_extensions` relational audit table
 - UI visualization of extensions and provider account allowance controls
+- Guaranteed immutable extension history beyond the bounded operational-event retention
 - Independent automated security and failure-injection review
 
 ## Settings

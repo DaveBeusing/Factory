@@ -133,13 +133,7 @@ public sealed class FactoryEngine
                         heartbeatCancel.Token);
                 }
                 catch (OperationCanceledException) { break; }
-                var renewed = _store.Change(state =>
-                {
-                    var job = state.Jobs.Single(j => j.Id == id);
-                    if (!JobRecovery.Matches(job, fence)) return false;
-                    job.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
-                    return true;
-                });
+                var renewed = _store.RenewLease(id, fence, _settings.LeaseSeconds);
                 if (!renewed)
                 {
                     executionCancel.Cancel();

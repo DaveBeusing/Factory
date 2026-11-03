@@ -15,7 +15,8 @@ Improve the existing embedded .NET-hosted Mission Control without Node.js or fro
 - A Recovery navigation page lists blocked, failed, paused, stopped and held-budget jobs and identifies uncertain Git stages, held token liabilities and potentially live leases
 - Operational Intelligence on Overview shows observed queue age, dependency bottlenecks, review/integration states and explicitly budget-blocked work
 - Detailed job inspection shows owner/heartbeat, execution generation and lease status **without lease secrets**, dependencies, scopes, timestamps, checkpoint, budget liabilities and safe-next-step guidance
-- Goal budget inspector obtains authoritative values through `GET /api/goals/{id}/budget`, separates consumption, active/held liabilities and unreserved capacity, and shows reservation rows and persisted budget events
+- Goal budget inspector obtains authoritative values through `GET /api/goals/{id}/budget`, separates consumption, active/held liabilities and unreserved capacity, and shows reservation rows, per-job usage, persisted budget events, and optional durable controller grant history
+- Dynamic reservation settings (initial allocation, grant increment, low-water threshold, per-job maximum) are editable only when the authenticated settings API advertises support; older controllers do not expose unsupported controls
 - Explicit reviewed reconciliation invokes the existing admin-only `POST /api/goals/{id}/budget/reconcile` with double confirmation and server-side validation
 - Responsive styles and error/loading states
 
@@ -25,7 +26,7 @@ All controller mutations are authenticated and validated by the existing server.
 
 ## Explicitly deferred
 
-- End-to-end remote extension history dependent on WP-01
+- End-to-end remote extension history verification after WP-01 integration (the UI now renders the optional ledger response with a compatibility fallback)
 - Dedicated budget-event ledger beyond the existing bounded event list
 - Typed server-side detailed quality/evidence query endpoints
 - Full permissions/roles, worker utilization, scenario-driven recovery actions and measured queue throughput
@@ -37,4 +38,4 @@ Run the existing .NET 10 build/test suite for regression coverage, then perform 
 
 ## Dependency and integration
 
-The UI uses only APIs already present in the inspected `master` baseline. It can be reviewed independently of WP-01 and WP-02. Additional extension visualization becomes available automatically when the eventual backend emits `budget_extended` events. No merge or publication is authorized by this PR.
+The UI uses existing controller state, budget, reconciliation and settings endpoints. Optional extension configuration and durable history appear only when WP-01's enhanced response is available; they require integrated API verification. WP-03 can be reviewed independently of WP-01 and WP-02, but the combined workflows must be regression-tested after upstream integration. No merge or publication is authorized by this PR.

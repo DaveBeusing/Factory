@@ -807,7 +807,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
         Assert(Count("SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='project_id';") == 1);
         Assert(Count("SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='state';") == 1);
         foreach (var field in new[] { "execution_generation", "lease_token", "worker_process_id",
-            "worker_process_started_at", "checkpoint_stage", "checkpoint_commit", "checkpoint_at" })
+            "worker_process_started_at", "worker_machine_name", "checkpoint_stage", "checkpoint_commit", "checkpoint_at" })
             Assert(Count($"SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name='{field}';") == 1,
                 "Missing durable recovery field: " + field);
         Assert(Count("SELECT COUNT(*) FROM pragma_foreign_key_list('jobs') WHERE \"table\"='projects';") == 1);
@@ -1315,6 +1315,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
                 ALTER TABLE jobs DROP COLUMN execution_generation;
                 ALTER TABLE jobs DROP COLUMN lease_token;
                 ALTER TABLE jobs DROP COLUMN worker_process_id;
+                ALTER TABLE jobs DROP COLUMN worker_machine_name;
                 ALTER TABLE jobs DROP COLUMN worker_process_started_at;
                 ALTER TABLE jobs DROP COLUMN checkpoint_stage;
                 ALTER TABLE jobs DROP COLUMN checkpoint_commit;
@@ -1408,6 +1409,10 @@ Test("Reconciliation checks process identity, worktree, and committed checkpoint
             catch (InvalidOperationException) { }
         }
         Deny(() => JobRecovery.ReconcileLocal(store, job.Id, false, "Reviewed repository"));
+        var actualHost = store.Job(job.Id).WorkerMachineName;
+        store.UpdateJob(job.Id, j => j.WorkerMachineName = "unrecognized-remote-host");
+        Deny(() => JobRecovery.ReconcileLocal(store, job.Id, true, "Reviewed previous process"));
+        store.UpdateJob(job.Id, j => j.WorkerMachineName = actualHost);
         using (var stillRunning = new CancellationTokenSource())
         {
             LocalJobControl.Register(job.Id, stillRunning);

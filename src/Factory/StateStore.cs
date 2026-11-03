@@ -182,6 +182,7 @@ public sealed class StateStore
                     ALTER TABLE jobs ADD COLUMN checkpoint_at TEXT;
                     """);
             }
+            Execute(db, tx, "ALTER TABLE jobs ADD COLUMN usage_complete INTEGER NOT NULL DEFAULT 0;");
             CreateBudgetReservationTable(db, tx);
             // Pre-ledger in-flight work has unbounded/unknown usage. Fence it and hold
             // all remaining capacity until an operator reconciles its final usage.

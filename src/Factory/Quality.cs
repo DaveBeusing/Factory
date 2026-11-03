@@ -34,9 +34,21 @@ public sealed class QualityEngine
             quality.Findings.Add("No executable project checks configured");
            return quality;
         }
-        var changed = GitOperations.ChangedFiles(job.Worktree, project.BaseBranch);
-        try { GitOperations.EnforcePaths(changed, project.ProtectedPaths); }
-        catch (Exception e) { quality.Findings.Add(e.Message); }
+        IReadOnlyList<string> changed;
+        try
+        {
+            changed = WorkPackageScope.ValidateWorktree(project, job);
+        }
+        catch (ScopeViolationException ex)
+        {
+            quality.Findings.Add(ex.Message);
+            return quality;
+        }
+        catch (InvalidOperationException ex)
+        {
+            quality.Findings.Add(ex.Message);
+            return quality;
+        }
         foreach (var file in changed)
         {
             var absolute = Path.GetFullPath(Path.Combine(job.Worktree, file));

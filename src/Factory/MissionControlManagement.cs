@@ -31,6 +31,13 @@ public sealed class JobInput
     public List<Guid> DependsOn { get; set; } = [];
     public List<string> ExpectedPaths { get; set; } = [];
 }
+public sealed class ScopeAmendmentInput
+{
+    public List<string> ExpectedPaths { get; set; } = [];
+    public string Reason { get; set; } = "";
+    public bool Reviewed { get; set; }
+}
+
 public sealed class WorkerInput
 {
     public string Id { get; set; } = "";
@@ -184,6 +191,8 @@ public static class MissionControlManager
             Require(j.ProjectId == input.ProjectId, "Cannot move job between projects");
             if (input.GoalId.HasValue) Require(s.Goals.Any(g => g.Id == input.GoalId && g.ProjectId == j.ProjectId), "Goal not in project");
             Require(input.DependsOn.All(x => x != id && s.Jobs.Any(a => a.Id == x && a.ProjectId == j.ProjectId)), "Unknown or cross-project dependency");
+            Require(j.Attempt == 0 || j.ExpectedPaths.SequenceEqual(input.ExpectedPaths),
+                "Executed work-package scope can only change through an explicit reviewed scope amendment");
             var before = (j.Title, j.Description, j.Priority, j.Risk, j.Mode, j.GoalId, j.DependsOn, j.ExpectedPaths);
             j.Title = input.Title.Trim(); j.Description = input.Description.Trim(); j.Priority = input.Priority;
             j.Risk = input.Risk; j.Mode = input.Mode; j.GoalId = input.GoalId;
@@ -203,8 +212,49 @@ public static class MissionControlManager
             "Title and description required");
         Require((j.Mode is "local" or "remote") && (j.Risk is "low" or "medium" or "high"), "Invalid mode or risk");
         Require(j.Priority is >= 0 and <= 100, "Priority out of range");
-        Require(j.ExpectedPaths.Count <= 100 && j.ExpectedPaths.All(p => !System.IO.Path.IsPathRooted(p) && !p.Contains("..", StringComparison.Ordinal)), "Invalid expected paths");
+        WorkPackageScope.ValidateDeclaration(j.ExpectedPaths);
     }
+    // Only an administrator can approve a blocked scope expansion; it never resumes the job.
+    public static FactoryJob AmendScope(StateStore store, Guid id, ScopeAmendmentInput input)
+    {
+        Require(input.Reviewed, "Scope amendment requires an explicit reviewed approval");
+        Require(!string.IsNullOrWhiteSpace(input.Reason) && input.Reason.Trim().Length >= 10 &&
+            input.Reason.Length <= 1000, "Scope amendment requires a 10-1000 character justification");
+        WorkPackageScope.ValidateDeclaration(input.ExpectedPaths);
+        return store.Change(state =>
+        {
+            var job = state.Jobs.Single(j => j.Id == id);
+            Require(job.State == JobStates.Blocked && job.Stage == "scope" &&
+                string.IsNullOrEmpty(job.LeaseOwner),
+                "Only a blocked, unclaimed scope violation can be amended");
+            var project = state.Projects.Single(p => p.Id == job.ProjectId);
+            // Scope approval cannot authorize changes under protected project paths.
+            GitOperations.EnforcePaths(input.ExpectedPaths, project.ProtectedPaths);
+            foreach (var rule in input.ExpectedPaths)
+            foreach (var protectedPath in project.ProtectedPaths)
+                Require(!WorkPackageScope.Includes(rule, protectedPath),
+                    "A scope amendment cannot include protected project paths");
+
+            var proposed = new FactoryJob { ProjectId = job.ProjectId,
+                ExpectedPaths = input.ExpectedPaths };
+            Require(!state.Jobs.Any(other => other.Id != job.Id &&
+                JobStates.Active.Contains(other.State) &&
+                other.LeaseUntil > DateTimeOffset.UtcNow &&
+                DependencyGraph.Conflict(proposed, other)),
+                "The proposed scope conflicts with an active job; coordinate work ownership first");
+
+            var previous = job.ExpectedPaths.ToArray();
+            job.ExpectedPaths = input.ExpectedPaths.ToList();
+            job.Stage = "scope_amended";
+            job.Error = "";
+            job.UpdatedAt = DateTimeOffset.UtcNow;
+            Log(state, id, "scope_amended",
+                "Previously: [" + string.Join(", ", previous) + "]; Approved: [" +
+                string.Join(", ", job.ExpectedPaths) + "]; Reason: " + input.Reason.Trim());
+            return job;
+        });
+    }
+
     public static FactoryJob ControlJob(StateStore store, Guid id, ControlInput input)
     {
         var action = input.Action;
@@ -240,6 +290,8 @@ public static class MissionControlManager
             {
                 Require(j.State is JobStates.Paused or JobStates.Stopped or JobStates.Failed or JobStates.Blocked,
                     "Job is not eligible for retry or resumption");
+                Require(j.Stage != "scope",
+                    "Scope violation must be resolved through a reviewed contract amendment before retry");
                 Require(!j.StartedAt.HasValue || input.Reviewed, "Inspect the existing worktree and acknowledge review before restarting");
                 Require(!j.StartedAt.HasValue || j.Stage is not ("commit" or "push" or "pr") || input.Reviewed,
                     "Git side effects must be reviewed before restarting");

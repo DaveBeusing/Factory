@@ -124,8 +124,8 @@ Test("Planning rejects cycle", () =>
 {
     var plan = new FactoryPlan { Packages = new List<PlannedPackage>
     {
-        new PlannedPackage { Title="A", Description="a", DependsOn=[1] },
-        new PlannedPackage { Title="B", Description="b", DependsOn=[0] }
+        new PlannedPackage { Title="A", Description="a", Files=["src/a.cs"], DependsOn=[1] },
+        new PlannedPackage { Title="B", Description="b", Files=["src/b.cs"], DependsOn=[0] }
     } };
     try { Planning.Validate(plan); throw new Exception("Cycle not rejected"); }
     catch (ArgumentException) { }
@@ -239,6 +239,111 @@ Test("Remote claims never take local jobs", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Scope rules reject missing paths, traversal, and prefix collisions", () =>
+{
+    void Reject(Action action)
+    {
+        try { action(); throw new Exception("Unsafe scope accepted"); }
+        catch (ScopeViolationException) { }
+    }
+    Reject(() => WorkPackageScope.ValidateDeclaration([]));
+    foreach (var bad in new[] { "../source.cs", "src/../private.cs", "/absolute.cs",
+        "C:\\absolute.cs", "src//file.cs", ".", "src/*.cs", "src/./file.cs" })
+        Reject(() => WorkPackageScope.ValidateDeclaration([bad]));
+    WorkPackageScope.Enforce(["src/Feature.cs", "docs/"], ["src/feature.cs", "docs/guide.md"]);
+    Assert(WorkPackageScope.OutOfScope(["src/Feature.cs"],
+        ["src/Feature.cs.bak", "src/Feature.cs"]).SequenceEqual(["src/Feature.cs.bak"]));
+    Reject(() => WorkPackageScope.Enforce(["src/"], ["docs/README.md"]));
+});
+
+Test("Git scope scanner includes committed, staged, unstaged, renamed and untracked paths", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-scope-git-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(root);
+    void Git(params string[] args) =>
+        Commands.Require(Commands.Run("git", ["-C", root, ..args], root, 90), "git test");
+    try
+    {
+        Git("init", "-b", "master");
+        Git("config", "user.email", "factory-tests@example.invalid");
+        Git("config", "user.name", "Factory Tests");
+        Directory.CreateDirectory(Path.Combine(root, "src"));
+        File.WriteAllText(Path.Combine(root, "src", "old.cs"), "old");
+        File.WriteAllText(Path.Combine(root, "src", "tracked.cs"), "tracked");
+        Git("add", "."); Git("commit", "-m", "Initial");
+        Git("checkout", "-b", "feature");
+        Git("mv", "src/old.cs", "src/new.cs");
+        Git("commit", "-m", "Rename");
+        File.AppendAllText(Path.Combine(root, "src", "tracked.cs"), "change");
+        Directory.CreateDirectory(Path.Combine(root, "docs"));
+        File.WriteAllText(Path.Combine(root, "docs", "created.md"), "new");
+        var paths = WorkPackageScope.ChangedPaths(root, "master");
+        foreach (var expected in new[] { "src/old.cs", "src/new.cs", "src/tracked.cs",
+            "docs/created.md" })
+            Assert(paths.Contains(expected), "Missing Git change: " + expected);
+        Assert(WorkPackageScope.OutOfScope(["src/"], paths).SequenceEqual(["docs/created.md"]));
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
+await TestAsync("Remote scope block reaches the controller as amendable scope", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-scope-remote-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote", Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote,
+            ExpectedPaths = ["src/allowed.cs"] };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        Assert(claim is not null);
+        var reported = new FactoryJob
+        {
+            Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
+            Mode = JobExecutionModes.Remote, State = JobStates.Blocked, Stage = "scope",
+            Error = "Contract amendment required for src/unexpected.cs"
+        };
+        Assert(await WorkerProtocol.CompleteAsync(store, new WorkerStatus
+        {
+            WorkerId = "worker-01", JobId = job.Id, Job = reported,
+            Error = reported.Error
+        }, new RefusingWorkerVerifier()));
+        var blocked = store.Job(job.Id);
+        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "scope" &&
+            blocked.Error.Contains("src/unexpected.cs", StringComparison.Ordinal),
+            "Remote scope violation was not preserved for review");
+        Assert(store.Read().Events.Any(e => e.JobId == job.Id && e.Type == "scope_violation"));
+        MissionControlManager.AmendScope(store, job.Id, new ScopeAmendmentInput
+        {
+            ExpectedPaths = ["src/allowed.cs", "src/unexpected.cs"],
+            Reason = "Remote worktree inspected and scope expansion explicitly approved",
+            Reviewed = true
+        });
+        Assert(store.Job(job.Id).Stage == "scope_amended");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Controller PR file verification includes renamed source and destination", () =>
+{
+    var changed = GitHubWorkerResultVerifier.ParsePullFilePaths(
+        """[[{"filename":"src/new.cs","previous_filename":"src/old.cs"},{"filename":"docs/readme.md"}]]""");
+    Assert(changed.Count == 3);
+    Assert(WorkPackageScope.OutOfScope(["src/new.cs", "docs/"], changed)
+        .SequenceEqual(["src/old.cs"]));
+    try
+    {
+        GitHubWorkerResultVerifier.ParsePullFilePaths("[]");
+        throw new Exception("Empty PR file listing was accepted");
+    }
+    catch (InvalidOperationException) { }
+});
+
 Test("Protected path gate", () =>
 {
     try { GitOperations.EnforcePaths(["factory/checks.json"],["factory/"]); throw new Exception("Not blocked"); }
@@ -320,6 +425,78 @@ await TestAsync("Local queue cannot claim or execute remote jobs", async () =>
         }
     }
     finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Scope violation blocks before commit and requires approved amendment", async () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-scope-e2e-" + Guid.NewGuid().ToString("N"));
+    var repo = Path.Combine(root, "repository");
+    Directory.CreateDirectory(repo);
+    string Git(params string[] args) =>
+        Commands.Require(Commands.Run("git", ["-C", repo, ..args], root, 90), "git fixture");
+    try
+    {
+        Git("init", "-b", "master");
+        Git("config", "user.email", "factory-tests@example.invalid");
+        Git("config", "user.name", "Factory Tests");
+        File.WriteAllText(Path.Combine(repo, "README.md"), "Initial");
+        Git("add", "README.md"); Git("commit", "-m", "Initial");
+        var state = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "scope", Path = repo, BaseBranch = "master",
+            Checks = [new CheckCommand { Name = "git", Executable = "git",
+                Arguments = ["rev-parse", "HEAD"] }] };
+        state.Change(s => s.Projects.Add(project));
+        var job = state.AddJob(new FactoryJob { ProjectId = project.Id, Title = "Bounded work",
+            Description = "Write one source file", ExpectedPaths = ["docs/"] });
+        var engine = new FactoryEngine(state, new FactorySettings(), agent: new FakeAgent());
+        await engine.RunQueueAsync(CancellationToken.None);
+        var blocked = state.Job(job.Id);
+        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "scope",
+            blocked.Error);
+        Assert(blocked.HeadSha == "" && blocked.PrUrl == "",
+            "Out-of-scope changes were committed or published");
+        Assert(File.Exists(Path.Combine(blocked.Worktree, "src", "generated.txt")),
+            "Blocked worktree was unexpectedly discarded");
+        Assert(state.Read().Events.Any(e => e.JobId == job.Id && e.Type == "scope_violation"));
+        var originalHead = Git("rev-parse", "master");
+        Assert(GitOperations.Head(blocked.Worktree) == originalHead,
+            "Blocked change modified Git history");
+
+        void Reject(Action action)
+        {
+            try { action(); throw new Exception("Invalid scope amendment was accepted"); }
+            catch (InvalidOperationException) { }
+        }
+        Reject(() => MissionControlManager.ControlJob(state, job.Id,
+            new ControlInput { Action = "retry", Reviewed = true }));
+        Reject(() => MissionControlManager.AmendScope(state, job.Id,
+            new ScopeAmendmentInput { ExpectedPaths = ["src/generated.txt"],
+                Reason = "Approved file expansion", Reviewed = false }));
+        Reject(() => MissionControlManager.AmendScope(state, job.Id,
+            new ScopeAmendmentInput { ExpectedPaths = ["../private"],
+                Reason = "Approved file expansion", Reviewed = true }));
+        var edited = new JobInput { ProjectId = project.Id, Title = "Bounded work",
+            Description = "Write one source file", ExpectedPaths = ["src/generated.txt"] };
+        Reject(() => MissionControlManager.UpdateJob(state, job.Id, edited));
+
+        // Explicit approval remains separate from retry and requires worktree review.
+        MissionControlManager.AmendScope(state, job.Id, new ScopeAmendmentInput
+        {
+            ExpectedPaths = ["src/generated.txt"],
+            Reason = "Reviewed generated source and approved ownership expansion",
+            Reviewed = true
+        });
+        Assert(state.Job(job.Id).State == JobStates.Blocked &&
+            state.Job(job.Id).Stage == "scope_amended", "Amendment started execution");
+        Assert(state.Read().Events.Any(e => e.JobId == job.Id && e.Type == "scope_amended"),
+            "Missing scope amendment audit");
+        MissionControlManager.ControlJob(state, job.Id,
+            new ControlInput { Action = "retry", Reviewed = true, Reason = "Review completed" });
+        await engine.RunQueueAsync(CancellationToken.None);
+        Assert(state.Job(job.Id).State == JobStates.CompletedLocal,
+            state.Job(job.Id).Error);
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
 });
 
 await TestAsync("Local agent pipeline, evidence and verified integration", async () =>
@@ -549,7 +726,8 @@ Test("Mission Control job cannot skip worktree inspection after interrupted exec
         var project = new ProjectInfo { Name = "Sample" };
         store.Change(s => s.Projects.Add(project));
         var job = MissionControlManager.CreateJob(store, new JobInput { ProjectId = project.Id,
-            Title = "Refine module", Description = "Refactor carefully" }, new FactorySettings());
+            Title = "Refine module", Description = "Refactor carefully",
+            ExpectedPaths = ["src/module.cs"] }, new FactorySettings());
         MissionControlManager.ControlJob(store, job.Id, new ControlInput { Action = "pause" });
         MissionControlManager.ControlJob(store, job.Id, new ControlInput { Action = "resume" });
         store.UpdateJob(job.Id, j => { j.State = JobStates.Paused; j.StartedAt = DateTimeOffset.UtcNow; });
@@ -580,7 +758,7 @@ Test("Mission Control blocks cross-project job dependencies", () =>
         try
         {
             MissionControlManager.CreateJob(store, new JobInput { ProjectId = a.Id, Title = "A", Description = "Test",
-                DependsOn = [other.Id] }, new FactorySettings());
+                DependsOn = [other.Id], ExpectedPaths = ["src/a.cs"] }, new FactorySettings());
             throw new Exception("Cross-project dependency accepted");
         }
         catch (ArgumentException) { }

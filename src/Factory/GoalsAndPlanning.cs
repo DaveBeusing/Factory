@@ -61,8 +61,11 @@ public static class Planning
             if (!new[] { "low", "medium", "high" }.Contains(item.Risk)) throw new ArgumentException("Invalid risk");
             if (item.DependsOn.Any(i => i < 0 || i >= plan.Packages.Count || i == index))
                 throw new ArgumentException("Invalid dependency index");
-            if (item.Files.Any(f => f.Contains("..", StringComparison.Ordinal) || System.IO.Path.IsPathRooted(f)))
-                throw new ArgumentException("Unsafe file path");
+            try { WorkPackageScope.ValidateDeclaration(item.Files); }
+            catch (ScopeViolationException ex)
+            {
+                throw new ArgumentException("Invalid work-package path contract: " + ex.Message, ex);
+            }
         }
         var visits = new int[plan.Packages.Count];
         bool Walk(int i)

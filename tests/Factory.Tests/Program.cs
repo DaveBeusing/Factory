@@ -30,6 +30,54 @@ void GrantRemoteWorker(StateStore store, string workerId, params Guid[] projectI
     });
 }
 
+Test("Job quality inspector validates commit identity and file boundary", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-quality-view-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "quality" };
+        var head = new string('a', 40);
+        var job = new FactoryJob { ProjectId = project.Id,
+            State = JobStates.CompletedLocal, HeadSha = head };
+        var evidenceFolder = Path.Combine(home, "evidence", job.Id.ToString("N"));
+        Directory.CreateDirectory(evidenceFolder);
+        var path = Path.Combine(evidenceFolder, head + ".json");
+        File.WriteAllText(path, Json.Stringify(new
+        {
+            jobId = job.Id, commit = head, report = new QualityResult
+            {
+                HeadSha = head, Passed = true,
+                Checks = [new CheckReport { Name = "build", ExitCode = 0 }],
+                Reviews = new Dictionary<string, string> { ["code"] = "PASS\\nReviewed" }
+            }
+        }));
+        job.EvidenceFile = path;
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        using (var parsed = System.Text.Json.JsonDocument.Parse(
+            Json.Stringify(JobEvidenceReader.Read(store, job.Id))))
+        {
+            var root = parsed.RootElement;
+            Assert(root.GetProperty("current").GetBoolean());
+            Assert(root.GetProperty("status").GetString() == "passed");
+            Assert(root.GetProperty("checks").GetArrayLength() == 1);
+            Assert(root.GetProperty("reviews").GetArrayLength() == 1);
+        }
+        store.Change(s => s.Jobs.Single().HeadSha = new string('b', 40));
+        using (var parsed = System.Text.Json.JsonDocument.Parse(
+            Json.Stringify(JobEvidenceReader.Read(store, job.Id))))
+            Assert(parsed.RootElement.GetProperty("status").GetString() == "stale");
+        store.Change(s => s.Jobs.Single().EvidenceFile = Path.Combine(home, "secret.json"));
+        try
+        {
+            _ = JobEvidenceReader.Read(store, job.Id);
+            throw new Exception("Quality inspector read a path outside its job evidence directory");
+        }
+        catch (InvalidOperationException) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Mission Control embeds operational recovery and budget views", () =>
 {
     string Resource(string resource)

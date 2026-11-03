@@ -1507,6 +1507,49 @@ await TestAsync("Controller-verified remote results are atomically bound to the 
 });
 
 
+Test("SQLite 4 upgrade preserves workers without granting remote access", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-worker-upgrade-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "existing", Origin = "https://example.invalid/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(state =>
+        {
+            state.Projects.Add(project);
+            state.Jobs.Add(job);
+            state.Workers.Add(new WorkerInfo { Id = "legacy-worker" });
+        });
+
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                DROP TABLE worker_project_grants;
+                DROP TABLE worker_capability_proofs;
+                DROP TABLE projects_required_execution_capabilities;
+                DROP TABLE jobs_required_execution_capabilities;
+                PRAGMA user_version=4;
+                """;
+            cmd.ExecuteNonQuery();
+        }
+
+        var migrated = new StateStore(home);
+        Assert(migrated.Read().Workers.Single().Id == "legacy-worker");
+        Assert(migrated.Read().WorkerProjectGrants.Count == 0 &&
+            migrated.Read().WorkerCapabilityProofs.Count == 0);
+        Assert(WorkerProtocol.Claim(migrated, new FactorySettings { AllowPush = true },
+            "legacy-worker") is null, "Migration granted privileges to an existing worker");
+        GrantRemoteWorker(migrated, "legacy-worker", project.Id);
+        Assert(WorkerProtocol.Claim(migrated, new FactorySettings { AllowPush = true },
+            "legacy-worker")?.Job.Id == job.Id);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-recovery-migrate-" + Guid.NewGuid().ToString("N"));

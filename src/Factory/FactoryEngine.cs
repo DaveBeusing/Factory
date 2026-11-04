@@ -57,15 +57,7 @@ public sealed class FactoryEngine
         JobRecovery.Require(_store.Job(id), fence);
 
     private void Stage(Guid id, ExecutionFence fence, string state, string stage, string? error = null)
-    {
-        UpdateOwned(id, fence, job =>
-        {
-            job.State = state; job.Stage = stage;
-            if (error != null) job.Error = error;
-            JobRecovery.Checkpoint(job, stage);
-        });
-        _store.Event(id, "stage", state + "/" + stage);
-    }
+        => _store.SetFencedStage(id, fence, state, stage, error);
 
     public IReadOnlyList<Guid> Recover() => JobRecovery.QuarantineExpired(_store);
 
@@ -133,13 +125,7 @@ public sealed class FactoryEngine
                         heartbeatCancel.Token);
                 }
                 catch (OperationCanceledException) { break; }
-                var renewed = _store.Change(state =>
-                {
-                    var job = state.Jobs.Single(j => j.Id == id);
-                    if (!JobRecovery.Matches(job, fence)) return false;
-                    job.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(_settings.LeaseSeconds);
-                    return true;
-                });
+                var renewed = _store.RenewLease(id, fence, _settings.LeaseSeconds);
                 if (!renewed)
                 {
                     executionCancel.Cancel();

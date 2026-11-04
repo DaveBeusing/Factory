@@ -104,15 +104,13 @@ public static class WorkerProtocol
     }
 
     public static bool Heartbeat(StateStore store, WorkerStatus req, FactorySettings settings)
-        => store.Change(s =>
+    {
+        // Idle heartbeat updates are independent from job authorization and usage.
+        if (req.JobId == Guid.Empty) return store.TouchWorkerHeartbeat(req.WorkerId);
+        return store.Change(s =>
         {
             var worker = s.Workers.FirstOrDefault(w => w.Id == req.WorkerId);
             if (worker is null || !worker.Enabled) return false;
-            if (req.JobId == Guid.Empty)
-            {
-                worker.Heartbeat = DateTimeOffset.UtcNow;
-                return true;
-            }
             var j = s.Jobs.FirstOrDefault(j => j.Id == req.JobId);
             var project = j is null ? null : s.Projects.FirstOrDefault(p => p.Id == j.ProjectId);
             if (j is null || project is null ||
@@ -138,6 +136,7 @@ public static class WorkerProtocol
            j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(settings.LeaseSeconds);
            return true;
         });
+    }
 
     public static async Task<bool> CompleteAsync(StateStore store, WorkerStatus req,
         IWorkerResultVerifier verifier, CancellationToken ct = default,

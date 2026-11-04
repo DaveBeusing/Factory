@@ -601,14 +601,232 @@ public sealed class StateStore
 
     public void Change(Action<FactoryState> action) => Change<int>(s => { action(s); return 0; });
 
-    public void Event(Guid? jobId, string type, string message) => Change(s =>
+    /// <summary>
+    /// Append a single event without materializing unrelated state. The monotonic position
+    /// and bounded retention are committed together under SQLite's write transaction.
+    /// </summary>
+    public void Event(Guid? jobId, string type, string message)
     {
-        s.Events.Add(new FactoryEvent { JobId = jobId, Type = type, Message = message[..Math.Min(message.Length, 2000)] });
-        if (s.Events.Count > 20000) s.Events.RemoveRange(0, s.Events.Count - 20000);
-    });
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        using (var next = Command(db, tx, "SELECT COALESCE(MAX(position),-1)+1 FROM events;"))
+        {
+            var position = Convert.ToInt64(next.ExecuteScalar(), CultureInfo.InvariantCulture);
+            Execute(db, tx, """
+                INSERT INTO events(position,id,at,job_id,type,message)
+                VALUES($position,$id,$at,$job,$type,$message);
+                """, ("$position", position), ("$id", Guid.NewGuid()),
+                ("$at", DateTimeOffset.UtcNow), ("$job", jobId), ("$type", type),
+                ("$message", message[..Math.Min(message.Length, 2000)]));
+        }
+        Execute(db, tx, """
+            DELETE FROM events WHERE id IN (
+                SELECT id FROM events ORDER BY position DESC LIMIT -1 OFFSET 20000
+            );
+            """);
+        tx.Commit();
+    }
 
-    public FactoryJob Job(Guid id) => Read().Jobs.FirstOrDefault(j => j.Id == id)
-        ?? throw new ArgumentException($"Unknown job: {id}");
+    /// <summary>
+    /// Persist a fenced job lifecycle transition and its audit event atomically.
+    /// This hot path avoids reading or comparing unrelated Factory entities.
+    /// A superseded, expired, or inactive execution cannot change the job.
+    /// </summary>
+    public void SetFencedStage(Guid jobId, ExecutionFence fence, string nextState, string stage,
+        string? error = null)
+    {
+        if (string.IsNullOrWhiteSpace(nextState) || string.IsNullOrWhiteSpace(stage))
+            throw new ArgumentException("Job state and stage are required");
+        var now = DateTimeOffset.UtcNow;
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        using (var update = Command(db, tx, """
+            UPDATE jobs SET state=$state, stage=$stage, error=COALESCE($error,error),
+                updated_at=$now, checkpoint_stage=$stage, checkpoint_at=$now
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+              AND lease_owner=$owner AND lease_until>$now
+              AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+            """, ("$state", nextState), ("$stage", stage), ("$error", error),
+            ("$now", now), ("$id", jobId), ("$generation", fence.Generation),
+            ("$token", fence.Token), ("$owner", fence.Owner)))
+        {
+            if (update.ExecuteNonQuery() != 1)
+                throw new LostExecutionLeaseException("Execution lease expired or generation was fenced");
+        }
+
+        using (var next = Command(db, tx, "SELECT COALESCE(MAX(position),-1)+1 FROM events;"))
+        {
+            var position = Convert.ToInt64(next.ExecuteScalar(), CultureInfo.InvariantCulture);
+            Execute(db, tx, """
+                INSERT INTO events(position,id,at,job_id,type,message)
+                VALUES($position,$id,$at,$job,'stage',$message);
+                """, ("$position", position), ("$id", Guid.NewGuid()), ("$at", now),
+                ("$job", jobId), ("$message", nextState + "/" + stage));
+        }
+        Execute(db, tx, """
+            DELETE FROM events WHERE id IN (
+                SELECT id FROM events ORDER BY position DESC LIMIT -1 OFFSET 20000
+            );
+            """);
+        tx.Commit();
+    }
+
+    /// <summary>
+    /// Debit a single fenced execution and its active goal reservation atomically.
+    /// Only the job and its current reservation are read/written; observed overrun
+    /// is persisted rather than hidden, and is returned as a negative balance.
+    /// The caller must interrupt/block an execution whose balance is exhausted.
+    /// </summary>
+    public long RecordFencedUsage(Guid jobId, ExecutionFence fence, long inputDelta,
+        long outputDelta, bool? usageComplete = null)
+    {
+        if (inputDelta < 0 || outputDelta < 0)
+            throw new ArgumentOutOfRangeException(nameof(inputDelta), "Token deltas must be nonnegative");
+        var now = DateTimeOffset.UtcNow;
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        long oldIn, oldOut;
+        Guid? goalId;
+        using (var select = Command(db, tx, """
+            SELECT tokens_in,tokens_out,goal_id FROM jobs
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+                AND lease_owner=$owner AND lease_until>$now
+                AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+            """, ("$id", jobId), ("$generation", fence.Generation),
+            ("$token", fence.Token), ("$owner", fence.Owner), ("$now", now)))
+        using (var reader = select.ExecuteReader())
+        {
+            if (!reader.Read())
+                throw new LostExecutionLeaseException("Execution lease expired or generation was fenced");
+            oldIn = reader.GetInt64(0);
+            oldOut = reader.GetInt64(1);
+            goalId = reader.IsDBNull(2) ? null : Guid.Parse(reader.GetString(2));
+        }
+
+        var newIn = checked(oldIn + inputDelta);
+        var newOut = checked(oldOut + outputDelta);
+        var remaining = long.MaxValue;
+        if (goalId is { } goal)
+        {
+            Guid reservationId;
+            long baseUsage, reserved, previousConsumed;
+            using (var select = Command(db, tx, """
+                SELECT id,base_usage,reserved,consumed FROM goal_budget_reservations
+                WHERE job_id=$job AND goal_id=$goal AND execution_generation=$generation
+                    AND lease_token=$token AND state='active';
+                """, ("$job", jobId), ("$goal", goal),
+                ("$generation", fence.Generation), ("$token", fence.Token)))
+            using (var reader = select.ExecuteReader())
+            {
+                if (!reader.Read())
+                    throw new TokenBudgetExceededException("No active fenced goal reservation");
+                reservationId = Guid.Parse(reader.GetString(0));
+                baseUsage = reader.GetInt64(1);
+                reserved = reader.GetInt64(2);
+                previousConsumed = reader.GetInt64(3);
+                if (reader.Read())
+                    throw new InvalidOperationException("Multiple active reservations for one execution");
+            }
+            var consumed = checked(newIn + newOut - baseUsage);
+            if (consumed < previousConsumed)
+                throw new InvalidOperationException("Goal reservation usage cannot regress");
+            Execute(db, tx, """
+                UPDATE goal_budget_reservations SET consumed=$consumed,updated_at=$now
+                WHERE id=$id AND state='active';
+                """, ("$consumed", consumed), ("$now", now), ("$id", reservationId));
+            remaining = reserved - consumed;
+        }
+
+        using (var update = Command(db, tx, """
+            UPDATE jobs SET tokens_in=$input,tokens_out=$output,
+                usage_complete=COALESCE($complete,usage_complete)
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+                AND lease_owner=$owner AND lease_until>$now
+                AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+            """, ("$input", newIn), ("$output", newOut),
+            ("$complete", usageComplete.HasValue ? (object)(usageComplete.Value ? 1 : 0) : null),
+            ("$id", jobId), ("$generation", fence.Generation),
+            ("$token", fence.Token), ("$owner", fence.Owner), ("$now", now)))
+        {
+            if (update.ExecuteNonQuery() != 1)
+                throw new LostExecutionLeaseException("Execution lease expired or generation was fenced");
+        }
+        tx.Commit();
+        return remaining;
+    }
+
+    /// <summary>
+    /// Renew only the exact live execution lease. No snapshot is loaded, and a stale
+    /// generation, token, owner, expired lease or terminal state cannot be renewed.
+    /// </summary>
+    public bool RenewLease(Guid jobId, ExecutionFence fence, int leaseSeconds)
+    {
+        if (leaseSeconds <= 0) throw new ArgumentOutOfRangeException(nameof(leaseSeconds));
+        var now = DateTimeOffset.UtcNow;
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        using var command = Command(db, tx, """
+            UPDATE jobs SET lease_until=$until
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+              AND lease_owner=$owner AND lease_until>$now
+              AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+            """, ("$until", now.AddSeconds(leaseSeconds)), ("$id", jobId),
+            ("$generation", fence.Generation), ("$token", fence.Token),
+            ("$owner", fence.Owner), ("$now", now));
+        var updated = command.ExecuteNonQuery() == 1;
+        tx.Commit();
+        return updated;
+    }
+
+    /// <summary>
+    /// Update an enabled worker's liveness observation without loading project/job graphs.
+    /// Does not authorize a job-specific heartbeat or renew an execution lease.
+    /// </summary>
+    public bool TouchWorkerHeartbeat(string workerId)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        using var command = Command(db, tx,
+            "UPDATE workers SET heartbeat=$now WHERE id=$id AND enabled=1;",
+            ("$now", DateTimeOffset.UtcNow), ("$id", workerId));
+        var updated = command.ExecuteNonQuery() == 1;
+        tx.Commit();
+        return updated;
+    }
+
+    /// <summary>Read a single job and its ordered child values in one read transaction.</summary>
+    public FactoryJob Job(Guid id)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction(deferred: true);
+        var map = Entities.Single(m => m.Type == typeof(FactoryJob));
+        var scalar = Scalars(map);
+        FactoryJob? job;
+        using (var cmd = Command(db, tx, "SELECT " +
+            string.Join(",", scalar.Select(p => Q(Column(p.Name)))) +
+            " FROM jobs WHERE id=$id;", ("$id", id)))
+        using (var reader = cmd.ExecuteReader())
+        {
+            if (!reader.Read()) throw new ArgumentException($"Unknown job: {id}");
+            job = new FactoryJob();
+            for (int index = 0; index < scalar.Length; index++)
+                scalar[index].SetValue(job,
+                    FromDb(reader.GetValue(index), scalar[index].PropertyType));
+        }
+        foreach (var property in Collections(map))
+        {
+            var values = (IList)property.GetValue(job)!;
+            values.Clear();
+            var elementType = property.PropertyType.GenericTypeArguments.Single();
+            using var cmd = Command(db, tx, "SELECT value FROM " +
+                Q(map.Table + "_" + Column(property.Name)) +
+                " WHERE owner_id=$id ORDER BY position;", ("$id", id));
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) values.Add(FromDb(reader.GetValue(0), elementType));
+        }
+        tx.Commit();
+        return job;
+    }
 
     public ProjectInfo Project(string key) => Read().Projects.FirstOrDefault(p =>
         p.Name.Equals(key, StringComparison.OrdinalIgnoreCase) ||

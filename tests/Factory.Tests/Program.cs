@@ -1195,6 +1195,209 @@ Test("Relational state supports atomic concurrent writes", () =>
 });
 
 
+Test("Targeted SQLite operations preserve execution fencing and job children", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-targeted-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "targeted" };
+        var job = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["src/", "tests/"],
+            RequiredExecutionCapabilities = ["native-agent"] };
+        var worker = new WorkerInfo { Id = "heartbeat-target" };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); s.Workers.Add(worker); });
+        var fence = store.Change(s => JobRecovery.Assign(
+            s.Jobs.Single(j => j.Id == job.Id), "target-worker", 120, local: true));
+        var loaded = store.Job(job.Id);
+        Assert(loaded.ExpectedPaths.SequenceEqual(job.ExpectedPaths));
+        Assert(loaded.RequiredExecutionCapabilities.SequenceEqual(job.RequiredExecutionCapabilities));
+        Assert(store.RenewLease(job.Id, fence, 180), "Live fenced lease renewal failed");
+        Assert(!store.RenewLease(job.Id, fence with { Generation = fence.Generation - 1 }, 180),
+            "Superseded generation renewed an execution lease");
+        Assert(!store.RenewLease(job.Id, fence with { Owner = "other-worker" }, 180),
+            "Foreign worker renewed an execution lease");
+        Assert(store.TouchWorkerHeartbeat(worker.Id));
+        Assert((DateTimeOffset.UtcNow - store.Read().Workers.Single().Heartbeat).TotalSeconds < 10);
+        store.Change(s => s.Workers.Single().Enabled = false);
+        Assert(!store.TouchWorkerHeartbeat(worker.Id), "Disabled worker updated heartbeat");
+        store.Change(s => s.Jobs.Single().LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        Assert(!store.RenewLease(job.Id, fence, 120), "Expired lease renewed");
+        store.Event(job.Id, "targeted_test", "persisted without aggregate mutation");
+        Assert(store.Read().Events.Any(e => e.JobId == job.Id &&
+            e.Type == "targeted_test"), "Targeted event was not committed");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Fenced stage transition writes job and event in one transaction", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-stage-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "stage-test" };
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "stage-runner", 120, local: true));
+        store.SetFencedStage(job.Id, fence, JobStates.Building, "agent");
+        var snapshot = store.Read();
+        var actual = snapshot.Jobs.Single();
+        Assert(actual.State == JobStates.Building && actual.Stage == "agent" &&
+            actual.CheckpointStage == "agent" && actual.CheckpointAt is not null);
+        Assert(snapshot.Events.Count(e => e.JobId == job.Id && e.Type == "stage" &&
+            e.Message == "building/agent") == 1);
+
+        try
+        {
+            store.SetFencedStage(job.Id, fence with { Generation = fence.Generation - 1 },
+                JobStates.Failed, "stale");
+            throw new Exception("Superseded generation mutated the live job");
+        }
+        catch (LostExecutionLeaseException) { }
+        Assert(store.Job(job.Id).State == JobStates.Building);
+        Assert(store.Read().Events.Count(e => e.Type == "stage") == 1);
+
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var command = db.CreateCommand();
+            command.CommandText = """
+                CREATE TRIGGER reject_stage_event BEFORE INSERT ON events
+                WHEN NEW.type='stage' BEGIN SELECT RAISE(ABORT, 'stage event rejected'); END;
+                """;
+            command.ExecuteNonQuery();
+        }
+        try
+        {
+            store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
+            throw new Exception("Stage mutation survived failed audit insert");
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { }
+        Assert(store.Job(job.Id).State == JobStates.Building &&
+            store.Job(job.Id).CheckpointStage == "agent",
+            "Failed audit event must roll back the job transition");
+        store.Change(s => s.Jobs.Single().LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        try
+        {
+            store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
+            throw new Exception("Expired execution changed its stage");
+        }
+        catch (LostExecutionLeaseException) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Fenced token debits are atomic, additive and crash-safe", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-usage-sql-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "usage-fence" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 800 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(),
+            "usage-worker", 120, local: true, state: s, reservationTokens: 512));
+
+        Assert(store.RecordFencedUsage(job.Id, fence, 200, 50) == 262);
+        Assert(store.RecordFencedUsage(job.Id, fence, 20, 10, usageComplete: true) == 232);
+        var reported = store.Read();
+        Assert(reported.Jobs.Single().TokensIn == 220 && reported.Jobs.Single().TokensOut == 60);
+        Assert(reported.Jobs.Single().UsageComplete);
+        Assert(reported.BudgetReservations.Single().Consumed == 280);
+
+        try
+        {
+            store.RecordFencedUsage(job.Id, fence with { Generation = fence.Generation - 1 }, 1, 1);
+            throw new Exception("Stale execution updated token accounting");
+        }
+        catch (LostExecutionLeaseException) { }
+
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = """
+                CREATE TRIGGER reject_usage_update
+                BEFORE UPDATE OF tokens_in,tokens_out ON jobs
+                WHEN NEW.tokens_in>=300
+                BEGIN SELECT RAISE(ABORT, 'job debit rejected'); END;
+                """;
+            cmd.ExecuteNonQuery();
+        }
+        try
+        {
+            store.RecordFencedUsage(job.Id, fence, 100, 20);
+            throw new Exception("Failed job debit committed reservation consumption");
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException) { }
+        Assert(store.Read().BudgetReservations.Single().Consumed == 280 &&
+            store.Job(job.Id).TokensIn == 220,
+            "Reservation and job debit must roll back together");
+
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var cmd = db.CreateCommand();
+            cmd.CommandText = "DROP TRIGGER reject_usage_update;";
+            cmd.ExecuteNonQuery();
+        }
+        Assert(store.RecordFencedUsage(job.Id, fence, 250, 100) == -118,
+            "Overrun observations must be committed and returned to the caller");
+        Assert(store.Read().BudgetReservations.Single().Consumed == 630);
+        store.Change(s => s.Jobs.Single().LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        try
+        {
+            store.RecordFencedUsage(job.Id, fence, 1, 1);
+            throw new Exception("Expired execution updated budget usage");
+        }
+        catch (LostExecutionLeaseException) { }
+        Assert(store.Read().BudgetReservations.Single().Consumed == 630);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Benchmark targeted token debit against aggregate mutation", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-bench-usage-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "bench" };
+        var jobs = Enumerable.Range(0, 75).Select(i => new FactoryJob
+            { ProjectId = project.Id, Title = "Fixture " + i }).ToArray();
+        store.Change(s => { s.Projects.Add(project); s.Jobs.AddRange(jobs); });
+        var job = jobs[0];
+        var fence = store.Change(s => JobRecovery.Assign(
+            s.Jobs.Single(j => j.Id == job.Id), "bench-runner", 120, local: true));
+        const int rounds = 12;
+        var direct = System.Diagnostics.Stopwatch.StartNew();
+        for (var i = 0; i < rounds; i++)
+            store.RecordFencedUsage(job.Id, fence, 1, 1);
+        direct.Stop();
+        var aggregate = System.Diagnostics.Stopwatch.StartNew();
+        for (var i = 0; i < rounds; i++)
+            store.Change(s =>
+            {
+                var current = s.Jobs.Single(j => j.Id == job.Id);
+                JobRecovery.Require(current, fence);
+                current.TokensIn++;
+                current.TokensOut++;
+            });
+        aggregate.Stop();
+        Assert(store.Job(job.Id).TokensIn == rounds * 2 &&
+            store.Job(job.Id).TokensOut == rounds * 2);
+        Console.WriteLine($"BENCHMARK focused token update: {direct.Elapsed.TotalMilliseconds:F2} ms / {rounds}; " +
+            $"snapshot update: {aggregate.Elapsed.TotalMilliseconds:F2} ms / {rounds}; " +
+            "same database, sequential warm fixture (no performance pass threshold)");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("App-server token usage counts deltas on resumed threads", () =>
 {
     var tracker = new AppServerTokenTracker();

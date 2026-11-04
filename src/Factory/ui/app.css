@@ -8,3 +8,22 @@
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;transition-duration:.01ms!important;scroll-behavior:auto!important}}
 
 .subtle-link{display:inline-flex;align-items:center;gap:5px}.subtle-link svg{width:14px;height:14px;flex-shrink:0}
+
+
+/* Operational intelligence, budget detail and recovery sections */
+.operational-pulse,.budget-breakdown{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.pulse-stat,.budget-breakdown>div{border:1px solid var(--border2);background:var(--panel2);border-radius:10px;padding:14px;min-width:0}
+.pulse-stat small,.budget-breakdown small{display:block;color:var(--sub);font-size:11px;line-height:1.4}
+.pulse-stat strong,.budget-breakdown strong{display:block;color:var(--text);font-size:24px;font-weight:700;letter-spacing:-.03em;margin:6px 0}
+.pulse-stat span{display:block;font-size:11px;color:var(--muted)}
+.budget-breakdown{grid-template-columns:repeat(2,minmax(0,1fr));margin:15px 0}
+.budget-breakdown strong{font-size:20px;overflow-wrap:anywhere}
+.recovery-copy{display:block;max-width:30rem;line-height:1.5;color:var(--sub);overflow-wrap:anywhere}
+.recovery-assessment{border:1px solid var(--border2);border-radius:12px;padding:16px;background:var(--panel2);margin:12px 0}
+.recovery-assessment strong{color:var(--text)}
+.recovery-assessment p{font-size:12px;color:var(--sub);margin:9px 0;overflow-wrap:anywhere}
+#inspector-goal-budget h3{margin:22px 0 10px}
+#inspector-goal-budget .table-wrap{overflow-x:auto}
+#inspector-goal-budget .subtext{margin:13px 0;line-height:1.6}
+@media(max-width:1000px){.operational-pulse{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:580px){.operational-pulse,.budget-breakdown{grid-template-columns:minmax(0,1fr)}}

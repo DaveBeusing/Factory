@@ -34,9 +34,13 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                     GoalBudgetLedger.Remaining(snapshot, current) <= controllerThresholdTokens)
                     await controllerExtension(cancellation);
             }
+            // Regular fenced usage retains the focused SQL path. A local extension
+            // must debit consumption and extend its reservation atomically.
+            bool goalFunded = false;
             var remaining = store.Change(state =>
             {
                 var job = state.Jobs.Single(j => j.Id == jobId);
+                goalFunded = job.GoalId.HasValue;
                 if (job.GoalId.HasValue && fence is null)
                     throw new InvalidOperationException(
                         "A goal-funded agent invocation requires a fenced worker claim");
@@ -64,22 +68,31 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 var outputDelta = usage.OutputTokens - recordedOut;
                 if (inputDelta == 0 && outputDelta == 0 && sawUsage) return;
 
-                var currentRemaining = store.Change(state =>
-                {
-                    var job = state.Jobs.Single(j => j.Id == jobId);
-                    if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
-                    var balance = GoalBudgetLedger.Record(state, job,
-                        checked(job.TokensIn + inputDelta),
-                        checked(job.TokensOut + outputDelta));
-                    if (extensionPolicy is not null && job.GoalId.HasValue &&
-                        balance >= 0 && balance <= extensionPolicy.ThresholdTokens)
+                var currentRemaining = extensionPolicy is not null && goalFunded
+                    ? store.Change(state =>
                     {
-                        GoalBudgetLedger.ExtendLocal(state, job, extensionPolicy.IncrementTokens,
-                            extensionPolicy.MaxReservationTokens);
-                        balance = GoalBudgetLedger.Remaining(state, job);
-                    }
-                    return balance;
-                });
+                        var job = state.Jobs.Single(j => j.Id == jobId);
+                        if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
+                        var balance = GoalBudgetLedger.Record(state, job,
+                            checked(job.TokensIn + inputDelta),
+                            checked(job.TokensOut + outputDelta));
+                        if (balance >= 0 && balance <= extensionPolicy.ThresholdTokens)
+                        {
+                            GoalBudgetLedger.ExtendLocal(state, job, extensionPolicy.IncrementTokens,
+                                extensionPolicy.MaxReservationTokens);
+                            balance = GoalBudgetLedger.Remaining(state, job);
+                        }
+                        return balance;
+                    })
+                    : fence is { } activeFence
+                        ? store.RecordFencedUsage(jobId, activeFence, inputDelta, outputDelta)
+                        : store.Change(state =>
+                        {
+                            var job = state.Jobs.Single(j => j.Id == jobId);
+                            return GoalBudgetLedger.Record(state, job,
+                                checked(job.TokensIn + inputDelta),
+                                checked(job.TokensOut + outputDelta));
+                        });
 
                 recordedIn = usage.InputTokens;
                 recordedOut = usage.OutputTokens;
@@ -106,13 +119,17 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                     throw new TokenBudgetExceededException("Agent did not report final token usage; budget remains held");
 
                 if (result.UsageReported && remaining != long.MaxValue && !budgetReached)
-                    store.Change(state =>
-                    {
-                        var job = state.Jobs.Single(j => j.Id == jobId);
-                        if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
-                        GoalBudgetLedger.Current(state, job);
-                        job.UsageComplete = true;
-                    });
+                {
+                    if (fence is { } finalUsageFence)
+                        store.RecordFencedUsage(jobId, finalUsageFence, 0, 0, usageComplete: true);
+                    else
+                        store.Change(state =>
+                        {
+                            var job = state.Jobs.Single(j => j.Id == jobId);
+                            GoalBudgetLedger.Current(state, job);
+                            job.UsageComplete = true;
+                        });
+                }
 
                 if (budgetReached)
                     throw new TokenBudgetExceededException("Job reservation exhausted during execution");

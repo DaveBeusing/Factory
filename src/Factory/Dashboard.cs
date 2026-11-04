@@ -192,6 +192,13 @@ public static class DashboardHost
             });
             return Results.Accepted();
         });
+        app.MapGet("/api/jobs/{id:guid}/quality", (Guid id) =>
+        {
+            var summary = JobEvidenceReader.Read(store, id);
+            return summary is null
+                ? (IResult)Results.NotFound(new { error = "No durable quality evidence is available" })
+                : Results.Ok(summary);
+        });
         app.MapPost("/api/jobs/{id:guid}/reconcile", (Guid id, ControlInput input) =>
             Results.Ok(JobRecovery.ReconcileLocal(store, id, input.Reviewed, input.Reason)));
         app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, CancellationToken ct) =>

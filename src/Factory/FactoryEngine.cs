@@ -8,15 +8,18 @@ public sealed class FactoryEngine
     private readonly IAgentRuntime _agent;
     private readonly bool _runtimeOverridden;
     private readonly string _executionMode;
+    private readonly Func<Guid, CancellationToken, Task>? _remoteBudgetExtension;
     private readonly IReadOnlyList<IFactoryPlugin> _plugins;
     private readonly string _workerId = Environment.MachineName + "/" + Guid.NewGuid().ToString("N")[..8];
 
     public FactoryEngine(StateStore store, FactorySettings settings, IReadOnlyList<IFactoryPlugin>? plugins = null,
-        IAgentRuntime? agent = null, string executionMode = JobExecutionModes.Local)
+        IAgentRuntime? agent = null, string executionMode = JobExecutionModes.Local,
+        Func<Guid, CancellationToken, Task>? remoteBudgetExtension = null)
     {
         if (!JobExecutionModes.IsSupported(executionMode))
             throw new ArgumentException("Unsupported execution mode", nameof(executionMode));
         _executionMode = executionMode;
+        _remoteBudgetExtension = remoteBudgetExtension;
         _store = store; _settings = settings;
         _git = new GitOperations(string.IsNullOrEmpty(settings.WorkspaceRoot)
             ? Path.Combine(store.Home, "worktrees") : settings.WorkspaceRoot);
@@ -203,8 +206,17 @@ public sealed class FactoryEngine
         var p = _store.Read().Projects.Single(x => x.Id == j.ProjectId);
         if (p.Checks.Count == 0) throw new InvalidOperationException("Project checks missing; configure gates before execution");
         WorkPackageScope.ValidateDeclaration(j.ExpectedPaths);
+        // Only the controller-local runner may allocate additional goal capacity.
+        // Remote workers must receive an explicit controller grant before their cap changes.
+        GoalBudgetExtensionPolicy? extensionPolicy = _executionMode == JobExecutionModes.Local
+            ? new(_settings.GoalExtensionIncrementTokens, _settings.GoalExtensionThresholdTokens,
+                _settings.MaxJobReservationTokens)
+            : null;
         var runtime = new BudgetedAgentRuntime(
-            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk), _store, id, fence);
+            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk),
+            _store, id, fence, extensionPolicy,
+            _remoteBudgetExtension is null ? null : token => _remoteBudgetExtension(id, token),
+            _settings.GoalExtensionThresholdTokens);
         var qualityEngine = new QualityEngine(runtime);
         var worktree = _git.Prepare(p, j);
         UpdateOwned(id, fence, x =>

@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed class StateStore
 {
-    private const int DatabaseVersion = 5;
+    private const int DatabaseVersion = 6;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -24,6 +24,7 @@ public sealed class StateStore
         new("goals", nameof(FactoryState.Goals), typeof(FactoryGoal)),
         new("jobs", nameof(FactoryState.Jobs), typeof(FactoryJob)),
         new("goal_budget_reservations", nameof(FactoryState.BudgetReservations), typeof(GoalBudgetReservation)),
+        new("goal_budget_extensions", nameof(FactoryState.BudgetExtensions), typeof(GoalBudgetExtension)),
         new("knowledge_items", nameof(FactoryState.Knowledge), typeof(KnowledgeItem)),
         new("graph_nodes", nameof(FactoryState.Graph), typeof(GraphNode)),
         new("evaluations", nameof(FactoryState.Evaluations), typeof(EvaluationResult)),
@@ -158,6 +159,29 @@ public sealed class StateStore
             """);
     }
 
+    private static void CreateBudgetExtensionTable(SqliteConnection db, SqliteTransaction tx)
+    {
+        // Schema 5 installations contain existing reservations but no extension history.
+        // CREATE IF NOT EXISTS also supports fresh relational installations in this version.
+        Execute(db, tx, """
+            CREATE TABLE IF NOT EXISTS goal_budget_extensions(
+                position INTEGER NOT NULL,
+                id TEXT PRIMARY KEY,
+                goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE NO ACTION,
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE NO ACTION,
+                reservation_id TEXT NOT NULL REFERENCES goal_budget_reservations(id) ON DELETE NO ACTION,
+                execution_generation INTEGER NOT NULL,
+                worker_id TEXT NOT NULL,
+                granted INTEGER NOT NULL CHECK(granted>=0),
+                authorized_total INTEGER NOT NULL CHECK(authorized_total>=0),
+                at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_goal_budget_extensions_reservation
+                ON goal_budget_extensions(reservation_id,at);
+            PRAGMA user_version=6;
+            """);
+    }
+
     private static void UpgradeWorkerAuthorization(SqliteConnection db, SqliteTransaction tx)
     {
         // Existing worker identities get no grants or trusted capability evidence.
@@ -278,12 +302,20 @@ public sealed class StateStore
                 PRAGMA user_version=4;
                 """);
             UpgradeWorkerAuthorization(db, tx);
+            CreateBudgetExtensionTable(db, tx);
             tx.Commit();
             return;
         }
         if (schemaVersion == 4)
         {
             UpgradeWorkerAuthorization(db, tx);
+            CreateBudgetExtensionTable(db, tx);
+            tx.Commit();
+            return;
+        }
+        if (schemaVersion == 5)
+        {
+            CreateBudgetExtensionTable(db, tx);
             tx.Commit();
             return;
         }
@@ -321,11 +353,13 @@ public sealed class StateStore
                 definitions.Add("FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE NO ACTION");
             if (map.Type == typeof(FactoryJob))
                 definitions.Add("FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE NO ACTION");
-            if (map.Type == typeof(GoalBudgetReservation))
+            if (map.Type == typeof(GoalBudgetReservation) || map.Type == typeof(GoalBudgetExtension))
             {
                 definitions.Add("FOREIGN KEY(goal_id) REFERENCES goals(id) ON DELETE NO ACTION");
                 definitions.Add("FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE NO ACTION");
             }
+            if (map.Type == typeof(GoalBudgetExtension))
+                definitions.Add("FOREIGN KEY(reservation_id) REFERENCES goal_budget_reservations(id) ON DELETE NO ACTION");
             if (map.Type == typeof(GraphNode))
                 definitions.Add("UNIQUE(project_id, file)");
             if (map.Type == typeof(WorkerProjectGrant) || map.Type == typeof(WorkerCapabilityProof))
@@ -384,6 +418,7 @@ public sealed class StateStore
                 ON worker_capability_proofs(worker_id,capability);
             PRAGMA user_version=5;
             """);
+        CreateBudgetExtensionTable(db, tx);
         tx.Commit();
     }
 

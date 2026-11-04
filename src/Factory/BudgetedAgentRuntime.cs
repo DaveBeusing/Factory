@@ -7,8 +7,11 @@ public sealed class TokenBudgetExceededException(string message) : InvalidOperat
 /// Transactional debits and execution fencing prevent concurrent jobs from
 /// spending the same available budget. Turns of one job remain serialized.
 /// </summary>
+public sealed record GoalBudgetExtensionPolicy(int IncrementTokens, int ThresholdTokens, int MaxReservationTokens);
+
 public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, Guid jobId,
-    ExecutionFence? fence = null) : IAgentRuntime
+    ExecutionFence? fence = null, GoalBudgetExtensionPolicy? extensionPolicy = null,
+    Func<CancellationToken, Task>? controllerExtension = null, int controllerThresholdTokens = 1024) : IAgentRuntime
 {
     public const long MinimumTurnAllowance = 256;
     private readonly SemaphoreSlim _turnLock = new(1, 1);
@@ -20,9 +23,24 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
         await _turnLock.WaitAsync(cancellation);
         try
         {
+            // Remote workers may synchronize a larger local mirror only after receiving
+            // an authenticated controller grant. A missing or failed grant does not
+            // authorize the worker to lift its own reservation.
+            if (controllerExtension is not null)
+            {
+                var snapshot = store.Read();
+                var current = snapshot.Jobs.Single(j => j.Id == jobId);
+                if (current.GoalId.HasValue &&
+                    GoalBudgetLedger.Remaining(snapshot, current) <= controllerThresholdTokens)
+                    await controllerExtension(cancellation);
+            }
+            // Regular fenced usage retains the focused SQL path. A local extension
+            // must debit consumption and extend its reservation atomically.
+            bool goalFunded = false;
             var remaining = store.Change(state =>
             {
                 var job = state.Jobs.Single(j => j.Id == jobId);
+                goalFunded = job.GoalId.HasValue;
                 if (job.GoalId.HasValue && fence is null)
                     throw new InvalidOperationException(
                         "A goal-funded agent invocation requires a fenced worker claim");
@@ -30,6 +48,10 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 if (job.GoalId is { } goalId &&
                     state.Goals.Single(g => g.Id == goalId).State != "active")
                     throw new TokenBudgetExceededException("Goal is not active");
+                if (extensionPolicy is not null && job.GoalId.HasValue &&
+                    GoalBudgetLedger.Remaining(state, job) <= extensionPolicy.ThresholdTokens)
+                    GoalBudgetLedger.ExtendLocal(state, job, extensionPolicy.IncrementTokens,
+                        extensionPolicy.MaxReservationTokens);
                 return GoalBudgetLedger.BeginTurn(state, job);
             });
 
@@ -46,25 +68,39 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 var outputDelta = usage.OutputTokens - recordedOut;
                 if (inputDelta == 0 && outputDelta == 0 && sawUsage) return;
 
-                // Fenced executions can debit the current job and reservation without
-                // materializing the whole Factory snapshot on every provider update.
-                var currentRemaining = fence is { } currentFence
-                    ? store.RecordFencedUsage(jobId, currentFence, inputDelta, outputDelta)
-                    : store.Change(state =>
+                var currentRemaining = extensionPolicy is not null && goalFunded
+                    ? store.Change(state =>
                     {
                         var job = state.Jobs.Single(j => j.Id == jobId);
-                        return GoalBudgetLedger.Record(state, job,
+                        if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
+                        var balance = GoalBudgetLedger.Record(state, job,
                             checked(job.TokensIn + inputDelta),
                             checked(job.TokensOut + outputDelta));
-                    });
+                        if (balance >= 0 && balance <= extensionPolicy.ThresholdTokens)
+                        {
+                            GoalBudgetLedger.ExtendLocal(state, job, extensionPolicy.IncrementTokens,
+                                extensionPolicy.MaxReservationTokens);
+                            balance = GoalBudgetLedger.Remaining(state, job);
+                        }
+                        return balance;
+                    })
+                    : fence is { } activeFence
+                        ? store.RecordFencedUsage(jobId, activeFence, inputDelta, outputDelta)
+                        : store.Change(state =>
+                        {
+                            var job = state.Jobs.Single(j => j.Id == jobId);
+                            return GoalBudgetLedger.Record(state, job,
+                                checked(job.TokensIn + inputDelta),
+                                checked(job.TokensOut + outputDelta));
+                        });
 
                 recordedIn = usage.InputTokens;
                 recordedOut = usage.OutputTokens;
                 sawUsage = true;
                 onUsage?.Invoke(usage);
 
-                if (remaining != long.MaxValue &&
-                    (usage.Total >= remaining || currentRemaining <= 0))
+                // The authorized reservation may have been extended during this usage debit.
+                if (remaining != long.MaxValue && currentRemaining <= 0)
                 {
                     budgetReached = true;
                     scope.Cancel();

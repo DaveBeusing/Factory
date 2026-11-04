@@ -38,12 +38,30 @@ public static class GoalBudgetLedger
         var goal = state.Goals.Single(g => g.Id == goalId);
         var consumed = Spent(state, goalId);
         var committed = Outstanding(state, goalId);
+        var reservations = state.BudgetReservations.Where(r => r.GoalId == goalId).ToArray();
+        var goalJobs = state.Jobs.Where(j => j.GoalId == goalId).ToArray();
         return new
         {
             goalId, total = goal.TokenBudget, consumed, committed,
+            activeOutstanding = reservations.Where(r => r.State == Active)
+                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)),
+            heldOutstanding = reservations.Where(r => r.State == Held)
+                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)),
             available = Available(state, goalId),
-            reservations = state.BudgetReservations.Where(r => r.GoalId == goalId)
-                .Select(r => new
+            requiresReconciliation = reservations.Any(r => r.State == Held),
+            jobs = goalJobs.Select(j => new
+            {
+                j.Id, j.State, j.Stage, j.Error, j.ExecutionGeneration,
+                worker = string.IsNullOrWhiteSpace(j.LeaseOwner) ? null : j.LeaseOwner,
+                j.TokensIn, j.TokensOut, totalConsumed = checked(j.TokensIn + j.TokensOut),
+                j.UsageComplete
+            }).ToArray(),
+            // Durable extension rows are independent of bounded operational events.
+            extensions = state.BudgetExtensions.Where(e => e.GoalId == goalId)
+                .Select(e => new { e.Id, e.JobId, e.ReservationId,
+                    e.ExecutionGeneration, e.WorkerId, e.Granted,
+                    e.AuthorizedTotal, e.At }).ToArray(),
+            reservations = reservations.Select(r => new
                 {
                     r.Id, r.JobId, r.ExecutionGeneration, r.State,
                     r.Reserved, r.Consumed,
@@ -88,6 +106,93 @@ public static class GoalBudgetLedger
         state.Events.Add(new FactoryEvent { JobId = job.Id, Type = "budget_reserved",
             Message = $"Generation {job.ExecutionGeneration}; reserved {allocated} tokens" });
         return reservation;
+    }
+
+    /// <summary>
+    /// Extend an existing local execution reservation inside the caller's SQLite write
+    /// transaction. The active lease, generation, goal and configured per-job cap
+    /// remain authoritative; remote workers cannot mint their own allowance.
+    /// </summary>
+    public static long ExtendLocal(FactoryState state, FactoryJob job, int increment, int perJobLimit)
+    {
+        if (job.GoalId is null) return 0;
+        if (increment < BudgetedAgentRuntime.MinimumTurnAllowance ||
+            perJobLimit < BudgetedAgentRuntime.MinimumTurnAllowance)
+            throw new ArgumentOutOfRangeException(nameof(increment));
+        if (job.LeaseOwner.StartsWith("remote:", StringComparison.Ordinal))
+            throw new InvalidOperationException("Remote reservations require controller authorization");
+        JobRecovery.Require(job, new ExecutionFence(
+            job.ExecutionGeneration, job.LeaseToken, job.LeaseOwner));
+        var reservation = Current(state, job);
+        if (state.Goals.Single(g => g.Id == job.GoalId.Value).State != "active")
+            throw new TokenBudgetExceededException("Goal is not active");
+        var room = Math.Max(0L, perJobLimit - reservation.Reserved);
+        var available = Available(state, job.GoalId.Value);
+        var granted = Math.Min(Math.Min(room, available), increment);
+        if (granted < BudgetedAgentRuntime.MinimumTurnAllowance) return 0;
+        reservation.Reserved = checked(reservation.Reserved + granted);
+        reservation.UpdatedAt = DateTimeOffset.UtcNow;
+        state.BudgetExtensions.Add(new GoalBudgetExtension
+        {
+            GoalId = reservation.GoalId, JobId = job.Id, ReservationId = reservation.Id,
+            ExecutionGeneration = job.ExecutionGeneration, WorkerId = job.LeaseOwner,
+            Granted = granted, AuthorizedTotal = reservation.Reserved
+        });
+        state.Events.Add(new FactoryEvent
+        {
+            JobId = job.Id, Type = "budget_extended",
+            Message = $"Generation {job.ExecutionGeneration}; +{granted} tokens; reservation {reservation.Id}; total {reservation.Reserved}"
+        });
+        return granted;
+    }
+
+    /// <summary>
+    /// Authorize an explicit remote-worker extension under the controller's
+    /// atomic state mutation. The request ID is the durable replay key.
+    /// An expired or superseded worker cannot obtain or replay a grant.
+    /// </summary>
+    public static GoalBudgetExtension ExtendRemote(FactoryState state, FactoryJob job,
+        ExecutionFence fence, Guid requestId, int requestedTokens, int maxIncrement,
+        int perJobLimit)
+    {
+        if (job.GoalId is null || requestId == Guid.Empty ||
+            job.Mode != JobExecutionModes.Remote ||
+            !job.LeaseOwner.StartsWith("remote:", StringComparison.Ordinal))
+            throw new InvalidOperationException("Active remote goal reservation required");
+        JobRecovery.Require(job, fence);
+        if (requestedTokens < BudgetedAgentRuntime.MinimumTurnAllowance ||
+            maxIncrement < BudgetedAgentRuntime.MinimumTurnAllowance ||
+            perJobLimit < BudgetedAgentRuntime.MinimumTurnAllowance)
+            throw new ArgumentOutOfRangeException(nameof(requestedTokens));
+        var reservation = Current(state, job);
+        var prior = state.BudgetExtensions.FirstOrDefault(e => e.Id == requestId);
+        if (prior is not null)
+        {
+            if (prior.JobId != job.Id || prior.ReservationId != reservation.Id ||
+                prior.ExecutionGeneration != job.ExecutionGeneration ||
+                prior.WorkerId != fence.Owner)
+                throw new InvalidOperationException("Extension request ID belongs to another execution");
+            return prior;
+        }
+        if (state.Goals.Single(g => g.Id == job.GoalId.Value).State != "active")
+            throw new TokenBudgetExceededException("Goal is not active");
+        var room = Math.Max(0L, perJobLimit - reservation.Reserved);
+        var available = Available(state, job.GoalId.Value);
+        var amount = Math.Min(Math.Min(room, available), Math.Min(requestedTokens, maxIncrement));
+        var granted = amount >= BudgetedAgentRuntime.MinimumTurnAllowance ? amount : 0;
+        reservation.Reserved = checked(reservation.Reserved + granted);
+        reservation.UpdatedAt = DateTimeOffset.UtcNow;
+        var extension = new GoalBudgetExtension
+        {
+            Id = requestId, GoalId = reservation.GoalId, JobId = job.Id,
+            ReservationId = reservation.Id, ExecutionGeneration = job.ExecutionGeneration,
+            WorkerId = fence.Owner, Granted = granted, AuthorizedTotal = reservation.Reserved
+        };
+        state.BudgetExtensions.Add(extension);
+        if (granted > 0)
+            state.Events.Add(new FactoryEvent { JobId = job.Id, Type = "budget_extended",
+                Message = $"Remote generation {job.ExecutionGeneration}; +{granted} tokens; reservation {reservation.Id}; total {reservation.Reserved}" });
+        return extension;
     }
 
     public static GoalBudgetReservation Current(FactoryState state, FactoryJob job)

@@ -1082,7 +1082,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 5, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 6, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -1478,6 +1478,120 @@ Test("Benchmark targeted token debit against aggregate mutation", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Remote budget grants are controller-authorized, fenced and idempotent", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-remote-budget-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote-budget", Origin = "https://example.invalid/repo" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 13000 };
+        var jobs = Enumerable.Range(0, 3).Select(_ => new FactoryJob
+            { ProjectId = project.Id, GoalId = goal.Id, Mode = JobExecutionModes.Remote }).ToArray();
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.AddRange(jobs);
+        });
+        var settings = new FactorySettings
+        {
+            GoalReservationTokens = 4096, GoalExtensionIncrementTokens = 4096,
+            MaxJobReservationTokens = 8192
+        };
+        var fences = new Dictionary<Guid, ExecutionFence>();
+        foreach (var job in jobs)
+        {
+            var worker = "remote-" + job.Id.ToString("N")[..8];
+            MissionControlManager.RegisterWorker(store,
+                new WorkerInput { Id = worker, Platform = "test" });
+            GrantRemoteWorker(store, worker, project.Id);
+            fences.Add(job.Id, store.Change(s => JobRecovery.Assign(
+                s.Jobs.Single(j => j.Id == job.Id), "remote:" + worker, 120,
+                local: false, state: s, reservationTokens: 4096)));
+        }
+
+        WorkerBudgetExtensionRequest Request(FactoryJob job, Guid id)
+        {
+            var fence = fences[job.Id];
+            return new WorkerBudgetExtensionRequest
+            {
+                WorkerId = fence.Owner["remote:".Length..],
+                JobId = job.Id, ExecutionGeneration = fence.Generation,
+                LeaseToken = fence.Token, RequestId = id, RequestedTokens = 4096
+            };
+        }
+        var requests = jobs.Select(job => Request(job, Guid.NewGuid())).ToArray();
+        var grants = requests.Select(req => Task.Run(() =>
+            WorkerProtocol.ExtendBudget(new StateStore(home), settings, req))).ToArray();
+        Task.WhenAll(grants).GetAwaiter().GetResult();
+        Assert(grants.All(task => task.Result is not null));
+        Assert(grants.Sum(task => task.Result!.Granted) == 712,
+            "Concurrent remote extensions oversubscribed the goal");
+        var snapshot = store.Read();
+        Assert(GoalBudgetLedger.Liability(snapshot, goal.Id) == 13000);
+        Assert(snapshot.BudgetExtensions.Count == 3);
+        Assert(snapshot.BudgetExtensions.Sum(e => e.Granted) == 712);
+        var repeated = WorkerProtocol.ExtendBudget(store, settings, requests[0]);
+        Assert(repeated is not null && repeated.Granted == grants[0].Result!.Granted);
+        Assert(store.Read().BudgetExtensions.Count == 3,
+            "Repeated request allocated more budget or duplicate history");
+
+        var stale = Request(jobs[0], Guid.NewGuid());
+        stale.ExecutionGeneration--;
+        Assert(WorkerProtocol.ExtendBudget(store, settings, stale) is null);
+        var spoofed = Request(jobs[0], Guid.NewGuid());
+        spoofed.WorkerId = "unknown-worker";
+        Assert(WorkerProtocol.ExtendBudget(store, settings, spoofed) is null);
+        store.Change(s => s.Jobs.Single(j => j.Id == jobs[0].Id).LeaseUntil =
+            DateTimeOffset.UtcNow.AddSeconds(-1));
+        Assert(WorkerProtocol.ExtendBudget(store, settings, requests[0]) is null,
+            "Expired remote lease replayed a prior grant");
+        Assert(!WorkerAuthentication.IsWorkerEndpoint("GET", "/api/worker/budget/extend"));
+        Assert(WorkerAuthentication.IsWorkerEndpoint("POST", "/api/worker/budget/extend"));
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Schema 5 budget state upgrades without data loss", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-budget-schema-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "migration" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 15000 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
+        store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "migration-worker", 120,
+            local: true, state: s, reservationTokens: 4096));
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var command = db.CreateCommand();
+            command.CommandText = """
+                DROP TABLE goal_budget_extensions;
+                PRAGMA user_version=5;
+                """;
+            command.ExecuteNonQuery();
+        }
+        var upgraded = new StateStore(home);
+        var state = upgraded.Read();
+        Assert(state.Projects.Single().Id == project.Id && state.Goals.Single().Id == goal.Id);
+        Assert(state.BudgetReservations.Single().Reserved == 4096,
+            "Schema upgrade lost the active reservation");
+        upgraded.Change(s => GoalBudgetLedger.ExtendLocal(s, s.Jobs.Single(), 1024, 8192));
+        Assert(upgraded.Read().BudgetExtensions.Single().Granted == 1024,
+            "Migrated database cannot persist extension history");
+        using var verify = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}");
+        verify.Open();
+        using var query = verify.CreateCommand();
+        query.CommandText = "PRAGMA user_version;";
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 6);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("App-server token usage counts deltas on resumed threads", () =>
 {
     var tracker = new AppServerTokenTracker();
@@ -1555,6 +1669,89 @@ await TestAsync("Budgeted runtime checks before every invocation and records rev
         }
         catch (TokenBudgetExceededException) { }
         Assert(scripted.Calls == 3, "Provider was called despite insufficient budget");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Three concurrent goal claims never oversubscribe dynamic extensions", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-extensions-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "extension-concurrency" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 13000 };
+        var jobs = Enumerable.Range(0, 3).Select(_ => new FactoryJob
+            { ProjectId = project.Id, GoalId = goal.Id }).ToArray();
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.AddRange(jobs); });
+        foreach (var job in jobs)
+            store.Change(s => JobRecovery.Assign(s.Jobs.Single(j => j.Id == job.Id),
+                "local-" + job.Id, 120, local: true, state: s, reservationTokens: 4096));
+        var granted = jobs.Select(job => Task.Run(() => new StateStore(home).Change(s =>
+            GoalBudgetLedger.ExtendLocal(s, s.Jobs.Single(j => j.Id == job.Id),
+                increment: 4096, perJobLimit: 8192)))).ToArray();
+        Task.WhenAll(granted).GetAwaiter().GetResult();
+        var snapshot = new StateStore(home).Read();
+        Assert(granted.Sum(task => task.Result) == 712, "Extensions did not allocate remaining capacity exactly once");
+        Assert(GoalBudgetLedger.Liability(snapshot, goal.Id) == 13000,
+            "Concurrent extensions oversubscribed the goal");
+        Assert(snapshot.BudgetReservations.Count(r => r.State == GoalBudgetLedger.Active) == 3);
+        Assert(snapshot.Events.Count(e => e.Type == "budget_extended") == 1);
+        Assert(snapshot.BudgetExtensions.Count == 1 &&
+            snapshot.BudgetExtensions.Single().Granted == 712,
+            "Extension grants must survive as durable history records");
+        using (var details = System.Text.Json.JsonDocument.Parse(
+            Json.Stringify(GoalBudgetLedger.Summary(snapshot, goal.Id))))
+        {
+            var budget = details.RootElement;
+            Assert(budget.GetProperty("activeOutstanding").GetInt64() == 13000);
+            Assert(budget.GetProperty("heldOutstanding").GetInt64() == 0);
+            Assert(!budget.GetProperty("requiresReconciliation").GetBoolean());
+            Assert(budget.GetProperty("jobs").GetArrayLength() == 3);
+            Assert(budget.GetProperty("extensions").GetArrayLength() == 1);
+        }
+        var winner = snapshot.Jobs.Single(j => snapshot.BudgetReservations.Any(r =>
+            r.JobId == j.Id && r.Reserved > 4096));
+        store.Change(s =>
+        {
+            var live = s.Jobs.Single(j => j.Id == winner.Id);
+            live.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1);
+        });
+        try
+        {
+            store.Change(s => GoalBudgetLedger.ExtendLocal(s,
+                s.Jobs.Single(j => j.Id == winner.Id), 4096, 8192));
+            throw new Exception("Expired worker extended its budget");
+        }
+        catch (LostExecutionLeaseException) { }
+        Assert(new StateStore(home).Read().BudgetReservations.Sum(r => r.Reserved) == 13000);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Budgeted runtime extends a live local reservation before exhaustion", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-runtime-extension-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "runtime-extension" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 1500 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "local-worker", 120,
+            local: true, state: s, reservationTokens: 512));
+        var scripted = new UsageTestRuntime();
+        scripted.Reports.Enqueue(new AgentTokenUsage(350, 50));
+        var runtime = new BudgetedAgentRuntime(scripted, store, job.Id, fence,
+            new GoalBudgetExtensionPolicy(512, 256, 1024));
+        await runtime.RunAsync(home, "first turn", "", CancellationToken.None);
+        var snapshot = store.Read();
+        var reservation = snapshot.BudgetReservations.Single();
+        Assert(reservation.Reserved == 1024 && reservation.Consumed == 400);
+        Assert(snapshot.Events.Any(e => e.Type == "budget_extended"));
+        Assert(GoalBudgetLedger.Available(snapshot, goal.Id) == 476,
+            "Unused goal capacity was incorrectly debited by reservation extension");
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -1890,7 +2087,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 5);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 6);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

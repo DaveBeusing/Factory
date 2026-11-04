@@ -28,6 +28,24 @@ public sealed class WorkerStatus
     public bool UsageComplete { get; set; }
 }
 
+public sealed class WorkerBudgetExtensionRequest
+{
+    public string WorkerId { get; set; } = "";
+    public Guid JobId { get; set; }
+    public long ExecutionGeneration { get; set; }
+    public string LeaseToken { get; set; } = "";
+    public Guid RequestId { get; set; }
+    public int RequestedTokens { get; set; }
+}
+
+public sealed class WorkerBudgetExtensionGrant
+{
+    public Guid RequestId { get; set; }
+    public long Granted { get; set; }
+    public long Reserved { get; set; }
+    public long ExecutionGeneration { get; set; }
+}
+
 public static class WorkerProtocol
 {
     public static bool Authorized(string? bearer, string token)
@@ -95,11 +113,45 @@ public static class WorkerProtocol
                         LeaseSeconds = settings.LeaseSeconds, MaxParallel = 1,
                         GoalReservationTokens = job.GoalId is null
                             ? settings.GoalReservationTokens
-                            : checked((int)Math.Min(int.MaxValue, GoalBudgetLedger.Current(s, job).Reserved))
+                            : checked((int)Math.Min(int.MaxValue, GoalBudgetLedger.Current(s, job).Reserved)),
+                        GoalExtensionIncrementTokens = settings.GoalExtensionIncrementTokens,
+                        GoalExtensionThresholdTokens = settings.GoalExtensionThresholdTokens,
+                        MaxJobReservationTokens = settings.MaxJobReservationTokens
                     }
                 };
            }
             return null;
+        });
+    }
+
+    public static WorkerBudgetExtensionGrant? ExtendBudget(StateStore store,
+        FactorySettings settings, WorkerBudgetExtensionRequest request)
+    {
+        if (!WorkerAuthentication.IsValidWorkerId(request.WorkerId) ||
+            request.RequestId == Guid.Empty || request.JobId == Guid.Empty ||
+            request.RequestedTokens is < 256 or > 1000000)
+            return null;
+        return store.Change(state =>
+        {
+            var worker = state.Workers.FirstOrDefault(w => w.Id == request.WorkerId);
+            var job = state.Jobs.FirstOrDefault(j => j.Id == request.JobId);
+            var project = job is null ? null : state.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
+            var fence = new ExecutionFence(request.ExecutionGeneration,
+                request.LeaseToken, "remote:" + request.WorkerId);
+            if (worker is null || job is null || project is null ||
+                !WorkerAuthorization.CanContinue(state, worker, project, job, settings) ||
+                !JobRecovery.Matches(job, fence) ||
+                job.Mode != JobExecutionModes.Remote || job.GoalId is null)
+                return null;
+            var extension = GoalBudgetLedger.ExtendRemote(state, job, fence,
+                request.RequestId, request.RequestedTokens, settings.GoalExtensionIncrementTokens,
+                settings.MaxJobReservationTokens);
+            return new WorkerBudgetExtensionGrant
+            {
+                RequestId = request.RequestId, Granted = extension.Granted,
+                Reserved = GoalBudgetLedger.Current(state, job).Reserved,
+                ExecutionGeneration = job.ExecutionGeneration
+            };
         });
     }
 
@@ -365,7 +417,61 @@ public static class RemoteWorker
                    s.Jobs.Add(claim.Job);
                });
                claim.Settings.WorkspaceRoot = Path.Combine(jobDir, "worktrees");
-               var engine = new FactoryEngine(localState, claim.Settings, executionMode: JobExecutionModes.Remote);
+               Guid? pendingGrantRequestId = null;
+               async Task RequestControllerExtension(Guid targetJobId, CancellationToken grantCancellation)
+               {
+                   if (targetJobId != report.JobId || claim.Goal is null)
+                       throw new InvalidOperationException("Remote grant requested for another job");
+                   pendingGrantRequestId ??= Guid.NewGuid();
+                   var request = new WorkerBudgetExtensionRequest
+                   {
+                       WorkerId = workerId, JobId = report.JobId,
+                       ExecutionGeneration = report.ExecutionGeneration,
+                       LeaseToken = report.LeaseToken,
+                       RequestId = pendingGrantRequestId.Value,
+                       RequestedTokens = claim.Settings.GoalExtensionIncrementTokens
+                   };
+                   using var response = await http.PostAsJsonAsync(
+                       "api/worker/budget/extend", request, grantCancellation);
+                   if (!response.IsSuccessStatusCode)
+                       throw new TokenBudgetExceededException(
+                           "Controller did not authorize additional remote goal capacity");
+                   var grant = await response.Content.ReadFromJsonAsync<WorkerBudgetExtensionGrant>(
+                       Json.Options, grantCancellation)
+                       ?? throw new IOException("Missing controller grant");
+                   if (grant.RequestId != request.RequestId ||
+                       grant.ExecutionGeneration != report.ExecutionGeneration)
+                       throw new InvalidOperationException("Controller grant identity mismatch");
+                   localState.Change(s =>
+                   {
+                       var current = s.Jobs.Single(j => j.Id == targetJobId);
+                       JobRecovery.Require(current, new ExecutionFence(
+                           current.ExecutionGeneration, current.LeaseToken, current.LeaseOwner));
+                       var reservation = GoalBudgetLedger.Current(s, current);
+                       if (grant.Reserved < reservation.Reserved)
+                           throw new InvalidOperationException("Controller grant cannot reduce local reservation");
+                       if (grant.Reserved == reservation.Reserved) return;
+                       var added = grant.Reserved - reservation.Reserved;
+                       reservation.Reserved = grant.Reserved;
+                       reservation.UpdatedAt = DateTimeOffset.UtcNow;
+                       s.Goals.Single(g => g.Id == reservation.GoalId).TokenBudget =
+                           checked(reservation.BaseUsage + grant.Reserved);
+                       s.BudgetExtensions.Add(new GoalBudgetExtension
+                       {
+                           Id = grant.RequestId, GoalId = reservation.GoalId,
+                           JobId = current.Id, ReservationId = reservation.Id,
+                           ExecutionGeneration = current.ExecutionGeneration,
+                           WorkerId = "remote:" + workerId, Granted = added,
+                           AuthorizedTotal = reservation.Reserved
+                       });
+                       s.Events.Add(new FactoryEvent { JobId = current.Id, Type = "budget_authorized",
+                           Message = "Controller-authorized remote capacity synchronized" });
+                   });
+                   pendingGrantRequestId = null;
+               }
+               var engine = new FactoryEngine(localState, claim.Settings,
+                   executionMode: JobExecutionModes.Remote,
+                   remoteBudgetExtension: RequestControllerExtension);
                await engine.RunQueueAsync(executionCancel.Token);
                report.Job = localState.Job(claim.Job.Id);
                report.TokensIn = report.Job.TokensIn;

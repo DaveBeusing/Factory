@@ -14,7 +14,7 @@ public static class WorkerAuthentication
     private static readonly string[] WorkerEndpoints =
     [
         "/api/worker/register", "/api/worker/claim",
-        "/api/worker/heartbeat", "/api/worker/complete"
+        "/api/worker/heartbeat", "/api/worker/complete", "/api/worker/budget/extend"
     ];
 
     private static bool IsAsciiLetterOrDigit(char c) =>

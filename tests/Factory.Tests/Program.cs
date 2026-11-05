@@ -110,6 +110,101 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     Assert(style.Contains(".budget-breakdown", StringComparison.Ordinal));
 });
 
+Test("Provider routing enforces declared read-only capability", () =>
+{
+    var projectId = Guid.NewGuid();
+    var settings = new FactorySettings { Model = "default-codex-model" };
+    var routes = new List<ProjectProviderRoute>
+    {
+        new() { ProjectId = projectId, Role = "analysis", ProviderId = "claude", Model = "sonnet" },
+        new() { ProjectId = projectId, Role = "review", ProviderId = "claude", Model = "" }
+    };
+    var analysis = ProviderRouting.Select(settings, routes, projectId, "analysis");
+    Assert(analysis.ProviderId == "claude" && analysis.Model == "sonnet");
+    Assert(ProviderRouting.Select(settings, routes, projectId, "review:security").ProviderId == "claude",
+        "Specialized reviewer should inherit generic review route");
+    Assert(ProviderRouting.Select(settings, routes, projectId, "implementation").ProviderId == "codex",
+        "Implementation should retain the safe reference adapter");
+    try
+    {
+        ProviderRouting.Validate("implementation", "claude", "opus");
+        throw new Exception("Write-unsafe provider was accepted for implementation");
+    }
+    catch (InvalidOperationException) { }
+    try
+    {
+        ProviderRouting.Validate("analysis", "unknown", "");
+        throw new Exception("Unknown provider was accepted");
+    }
+    catch (ArgumentException) { }
+    try
+    {
+        ProviderRouting.Validate("analysis", "claude", "bad model;--flag");
+        throw new Exception("Untrusted model argument was accepted");
+    }
+    catch (ArgumentException) { }
+});
+
+Test("Project provider budgets serialize reservations and report real consumption", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-provider-budget-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "budget-test", Path = home };
+        store.Change(s => s.Projects.Add(project));
+        store.ReplaceProviderRoutes(project.Id,
+        [
+            new ProjectProviderRoute { ProjectId = project.Id, Role = "analysis",
+                ProviderId = "claude", Model = "sonnet" }
+        ]);
+        Assert(store.GetProviderRoutes(project.Id).Single().Model == "sonnet");
+        store.SetProviderLimit(project.Id, "claude", 5000);
+        var route = ProviderRouting.Select(new FactorySettings(),
+            store.GetProviderRoutes(project.Id), project.Id, "analysis");
+        var first = store.BeginProviderTurn(project.Id, null, null, route, 4096);
+        var second = store.BeginProviderTurn(project.Id, null, null, route, 4096);
+        Assert(first.ReservedTokens == 4096 && second.ReservedTokens == 904,
+            "Concurrent reservations must not double-spend the provider limit");
+        try
+        {
+            store.BeginProviderTurn(project.Id, null, null, route, 4096);
+            throw new Exception("Oversubscribed provider budget was permitted");
+        }
+        catch (TokenBudgetExceededException) { }
+        store.RecordStandaloneProviderUsage(first.Id, 300, 200);
+        var whileActive = store.ProviderCapacities(project.Id).Single(x => x.ProviderId == "claude");
+        Assert(whileActive.TokenLimit == 5000);
+        Assert(whileActive.ConsumedTokens == 500 && whileActive.OutstandingTokens == 4500);
+        Assert(whileActive.RemainingTokens == 0);
+        store.FinishProviderTurn(first.Id, true, 12345);
+        var settled = store.ProviderCapacities(project.Id).Single(x => x.ProviderId == "claude");
+        Assert(settled.ConsumedTokens == 500 && settled.OutstandingTokens == 904);
+        Assert(settled.RemainingTokens == 3596);
+        Assert(settled.ReportedCostMicros == 12345);
+        Assert(settled.Breakdown.Single(x => x.Role == "analysis").InputTokens == 300);
+        store.FinishProviderTurn(second.Id, false);
+        Assert(store.ProviderCapacities(project.Id).Single(x => x.ProviderId == "claude")
+            .OutstandingTokens == 904, "Unknown final consumption must remain held");
+    }
+    finally { try { Directory.Delete(home, recursive: true); } catch { } }
+});
+
+Test("Project analysis only verifies repository-contained evidence files", () =>
+{
+    var dir = Path.Combine(Path.GetTempPath(), "factory-analysis-fixture-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "evidence.cs"), "class Evidence {}");
+        Assert(ProjectAnalysis.VerifyEvidence(dir, "evidence.cs"));
+        Assert(!ProjectAnalysis.VerifyEvidence(dir, "../outside-file.cs"));
+        Assert(!ProjectAnalysis.VerifyEvidence(dir, "missing-file.cs"));
+        Assert(!ProjectAnalysis.VerifyEvidence(dir, "/etc/passwd"));
+    }
+    finally { try { Directory.Delete(dir, true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {

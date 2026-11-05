@@ -310,3 +310,58 @@ public sealed partial class StateStore
         return result.Values.OrderBy(x => x.ProviderId).ToList();
     }
 }
+
+public sealed class ProjectMeteredRuntime(IAgentRuntime inner, StateStore store, Guid projectId,
+    SelectedProvider provider, int reservationTokens) : IAgentRuntime
+{
+    public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
+    {
+        if (!readOnly)
+            throw new InvalidOperationException("Project-level metered runtime is restricted to read-only operations");
+        var turn = store.BeginProviderTurn(projectId, null, null, provider, reservationTokens);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        long recordedInput = 0, recordedOutput = 0;
+        bool limitHit = false, finalized = false;
+        void Record(AgentTokenUsage usage)
+        {
+            if (usage.InputTokens < recordedInput || usage.OutputTokens < recordedOutput) return;
+            var inputDelta = usage.InputTokens - recordedInput;
+            var outputDelta = usage.OutputTokens - recordedOutput;
+            if (inputDelta == 0 && outputDelta == 0) return;
+            var remaining = store.RecordStandaloneProviderUsage(turn.Id, inputDelta, outputDelta);
+            recordedInput = usage.InputTokens;
+            recordedOutput = usage.OutputTokens;
+            onUsage?.Invoke(usage);
+            if (remaining <= 0) { limitHit = true; linked.Cancel(); }
+        }
+        try
+        {
+            var result = await inner.RunAsync(directory, prompt, previousSession, linked.Token,
+                onSession, true, Record);
+            if (result.UsageReported)
+                Record(new AgentTokenUsage(result.InputTokens, result.OutputTokens));
+            if (limitHit)
+                throw new TokenBudgetExceededException("Provider reservation exhausted during read-only operation");
+            store.FinishProviderTurn(turn.Id, result.UsageReported && result.Success,
+                result.ProviderReportedCostMicros);
+            finalized = true;
+            if (turn.Limited && !result.UsageReported)
+                throw new TokenBudgetExceededException("Final provider usage unavailable; reservation remains held");
+            return result;
+        }
+        catch (OperationCanceledException) when (limitHit && !cancellation.IsCancellationRequested)
+        {
+            throw new TokenBudgetExceededException("Provider reservation exhausted during read-only operation");
+        }
+        finally
+        {
+            if (!finalized)
+            {
+                try { store.FinishProviderTurn(turn.Id, false); }
+                catch (InvalidOperationException) { /* Preserve the original failure. */ }
+            }
+        }
+    }
+}

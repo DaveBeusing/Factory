@@ -171,7 +171,11 @@ Environment: FACTORY_HOME overrides the local state directory.
             {
                 var goal = store.Read().Goals.Single(g => g.Id == GuidArg(Required(args, "goal")));
                 var project = store.Read().Projects.Single(p => p.Id == goal.ProjectId);
-                Print(await Planning.ProposeAsync(store, project, goal, AgentRuntimeFactory.Create(settings), CancellationToken.None));
+                var planningProvider = ProviderRouting.Select(settings, store.GetProviderRoutes(project.Id),
+                    project.Id, "planning");
+                Print(await Planning.ProposeAsync(store, project, goal,
+                    new ProjectMeteredRuntime(ProviderRouting.Create(settings, planningProvider), store,
+                        project.Id, planningProvider, settings.GoalReservationTokens), CancellationToken.None));
                 return 0;
             }
             case "adopt": Print(Planning.Adopt(store, GuidArg(Required(args, "goal")), Option(args, "mode", "local"))); return 0;

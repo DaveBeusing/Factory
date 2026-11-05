@@ -220,6 +220,28 @@ async function editProviderBudget(projectId,providerId){
   await refreshProviderCapacity();
  },'Save provider limit');
 }
+async function editHeldProviderUsage(projectId){
+ const turns=await api('projects/'+projectId+'/provider-held');
+ if(!turns.length){notify('No held provider reservations require reconciliation');return}
+ const first=turns[0];
+ const opts=turns.map(t=>[t.id,t.providerId+' · '+t.role+' · '+(t.jobId||'project analysis')+' · '+t.reservedTokens+' reserved']);
+ const html=field('turnId','Held provider turn',first.id,'select',opts)+
+  field('finalInputTokens','Independently verified final input tokens',first.inputTokens,'number')+
+  field('finalOutputTokens','Independently verified final output tokens',first.outputTokens,'number')+
+  field('reason','Source of verification and reconciliation justification','','textarea')+
+  field('reviewed','I independently verified the final provider usage',false,'checkbox')+
+  '<p class="subtext">This operation releases unused reserved capacity. Use final counts for the selected turn, not your account allowance. If independent evidence is unavailable, leave the reservation held.</p>';
+ openForm('Reconcile held provider usage','Administrative action requiring independent evidence. Tokens cannot be reduced below previously observed values.',html,async form=>{
+  const x=values(form),input=Number(x.finalInputTokens),output=Number(x.finalOutputTokens);
+  if(!form.elements.reviewed.checked||x.reason.trim().length<10||
+      !Number.isSafeInteger(input)||!Number.isSafeInteger(output)||input<0||output<0)
+   throw Error('Verified nonnegative integer totals and a justification of at least 10 characters are required');
+  if(!confirm('Confirm independently verified final provider usage and release the unspent reservation?'))return;
+  await mutate('projects/'+projectId+'/provider-held/'+encodeURIComponent(x.turnId)+'/reconcile',
+   'POST',{finalInputTokens:input,finalOutputTokens:output,reviewed:true,reason:x.reason.trim()});
+  await refreshProviderCapacity();
+ },'Reconcile verified usage');
+}
 async function startProjectAnalysis(projectId){
  if(analysisBusy)return;
  analysisBusy=true;render();
@@ -456,7 +478,7 @@ function inspect(type,id){const entity=(type==='project'?state.projects:type==='
   if(type==='goal')renderGoalBudget(id);
   if(type==='job')renderJobQuality(id);
 }
-async function act(action,id,index){switch(action){case'provider-config':await configureProviders(id);break;case'provider-budget-edit':await editProviderBudget(id,index);break;case'provider-refresh':await refreshProviderCapacity();break;case'analysis-run':await startProjectAnalysis(id);break;case'analysis-goal':proposeGoalFromAnalysis(id,index);break;case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
+async function act(action,id,index){switch(action){case'provider-config':await configureProviders(id);break;case'provider-budget-edit':await editProviderBudget(id,index);break;case'provider-refresh':await refreshProviderCapacity();break;case'provider-held':await editHeldProviderUsage(id);break;case'analysis-run':await startProjectAnalysis(id);break;case'analysis-goal':proposeGoalFromAnalysis(id,index);break;case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
  case'queue-run':case'queue-pause':case'queue-resume':case'queue-stop':await runQueue(action.slice(6));break;
  case'verify':await verify(id);break;
  case'job-start':await mutate(`jobs/${id}/start`,'POST',{});break;
@@ -499,7 +521,7 @@ render();statusFromHealth();if(token)connect();else setTimeout(()=>$('connection
 +(m.reportedCostMicros/1000000).toFixed(4))+'</td></tr>').join('');
   return '<section class="card" style="margin-top:14px"><div class="card-head"><div><h2>'+esc(p.providerId)+'</h2><p>All models and roles within this project</p></div><button class="button button-muted" data-act="provider-budget-edit" data-id="'+esc(projectId)+'" data-index="'+esc(p.providerId)+'">Edit budget</button></div><div class="card-body"><div class="budget-breakdown"><div><small>Configured local limit</small><strong>'+(p.tokenLimit==null?'Not configured':nf(p.tokenLimit))+'</strong></div><div><small>Observed consumption</small><strong>'+nf(p.consumedTokens)+'</strong></div><div><small>Reserved / unsettled</small><strong>'+nf(p.outstandingTokens)+'</strong></div><div><small>Local remaining</small><strong>'+(p.remainingTokens==null?'Unknown / unlimited':nf(p.remainingTokens))+'</strong></div></div><p class="subtext">Actual provider account quota: '+(p.providerId==='codex'&&usage?'See provider-reported windows below':'Not available')+'. Local budgets do not establish account entitlements.</p>'+(modelRows?table(['Model','Role','Input','Output','Reported USD cost'],modelRows):'<p class="subtext">No metered executions recorded.</p>')+'</div></section>';
  }).join('');
- return title+picker+'<div class="queue-controls"><button class="button button-muted" data-act="provider-config" data-id="'+esc(projectId)+'">Configure provider roles</button><button class="button button-muted" data-act="provider-refresh">Refresh usage</button></div>'+body+(usage?'<div style="margin-top:18px"><h2>Codex account allowances</h2>'+usageCards()+'</div>':'<p class="subtext">No account allowance report is currently available. This is not zero remaining quota.</p>');
+ return title+picker+'<div class="queue-controls"><button class="button button-muted" data-act="provider-config" data-id="'+esc(projectId)+'">Configure provider roles</button><button class="button button-muted" data-act="provider-refresh">Refresh usage</button><button class="button button-muted" data-act="provider-held" data-id="'+esc(projectId)+'">Reconcile held usage</button></div>'+body+(usage?'<div style="margin-top:18px"><h2>Codex account allowances</h2>'+usageCards()+'</div>':'<p class="subtext">No account allowance report is currently available. This is not zero remaining quota.</p>');
 }
 function renderSettings(){return header('Settings & policies','Review and configure execution limits and publication guardrails.')+`<div class="content-grid">${card('Runtime policy','Changes are stored in ~/.factory/settings.json',`<div class="job-info-grid">${[['Global concurrency',settings.maxParallel],['Agent sessions',settings.maxAgentSessions],['Review rounds',settings.maxReviewRounds],['Lease seconds',settings.leaseSeconds],['Push enabled',settings.allowPush?'Yes':'No'],['Auto-merge',settings.autoMerge?'Yes':'No']].map(([a,b])=>`<div class="kv"><small>${esc(a)}</small><strong>${esc(b)}</strong></div>`).join('')}</div><button class="button button-muted" style="margin-top:18px" data-act="edit-settings">${ico('edit')} Edit configuration</button>`)}${card('Operational safety','Safeguards for reliable execution',`<div class="list-stack">${[['shield','Human-controlled integration','Merging and publishing remain permission-gated'],['route','Dependency-aware execution','Jobs do not start before integrated dependencies'],['activity','Event history','Actions are recorded in persistent state'],['cpu','Worker isolation','Separate Git worktrees; not OS sandboxes']].map(([i,t,d])=>`<div class="list-item"><span class="list-icon">${ico(i)}</span><div class="list-text"><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div>`)}</div>`}
 

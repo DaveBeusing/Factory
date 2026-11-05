@@ -38,7 +38,8 @@ Provider-token consumption, outstanding reservations and configurable local caps
 | Windows x64 | Local build, CLI and dashboard | For the supplied Windows scripts |
 | .NET 10 SDK | Restore, build, test and publish | Yes |
 | Git | Repository inspection, branches and worktrees | Yes |
-| Native agent CLI (`codex.exe`) | Planning, implementation and reviews | Yes |
+| Native agent CLI (`codex.exe`) | Default planning, write-enabled implementation and reviews | For Codex workflows |
+| Claude Code CLI (`claude`) | Optional, read-only planning, project analysis and reviews | Only when selected |
 | GitHub CLI (`gh`) | GitHub authentication and pull requests | For GitHub workflows |
 | Docker | Optional container-based checks | Only if configured |
 | Project-specific toolchains | Execute configured repository checks | Only if used by your checks |

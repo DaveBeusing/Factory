@@ -128,6 +128,29 @@ public static class DashboardHost
                 settings.GoalReservationTokens, settings.GoalExtensionIncrementTokens,
                 settings.GoalExtensionThresholdTokens, settings.MaxJobReservationTokens });
         });
+        app.MapGet("/api/providers", () => Results.Ok(new[]
+        {
+            new { id = "codex", roles = new[] { "planning", "analysis", "implementation", "review" },
+                write = true, usage = "token reports", allowance = "provider reported when available" },
+            new { id = "claude", roles = new[] { "planning", "analysis", "review" },
+                write = false, usage = "CLI JSON where available", allowance = "unavailable" }
+        }));
+        app.MapGet("/api/projects/{id:guid}/providers", (Guid id) =>
+            Results.Ok(store.GetProviderRoutes(id)));
+        app.MapPut("/api/projects/{id:guid}/providers", (Guid id, ProviderRoutesInput input) =>
+        {
+            foreach (var route in input.Routes) route.ProjectId = id;
+            store.ReplaceProviderRoutes(id, input.Routes);
+            return Results.Ok(store.GetProviderRoutes(id));
+        });
+        app.MapGet("/api/projects/{id:guid}/provider-capacity", (Guid id) =>
+            Results.Ok(store.ProviderCapacities(id)));
+        app.MapPut("/api/projects/{id:guid}/provider-budgets/{providerId}",
+            (Guid id, string providerId, ProviderBudgetInput input) =>
+        {
+            store.SetProviderLimit(id, providerId, input.TokenLimit);
+            return Results.Ok(store.ProviderCapacities(id));
+        });
         app.MapGet("/api/plans", () => Results.Ok(store.Read().Goals.Select(g =>
             new { g.Id, g.ProjectId, g.State, g.Objective, Plan = MissionControlManager.ReadPlan(store, g.Id) })));
         app.MapGet("/api/plans/{goalId:guid}", (Guid goalId) =>
@@ -148,7 +171,8 @@ public static class DashboardHost
                 store.Event(null, "plan_generating", goalId.ToString());
                 try
                 {
-                    await Planning.ProposeAsync(store, project, goal, AgentRuntimeFactory.Create(settings), CancellationToken.None);
+                    await Planning.ProposeAsync(store, project, goal,
+                        CreateProjectReadOnlyRuntime(store, settings, project, "planning"), CancellationToken.None);
                     store.Event(null, "plan_generated", goalId.ToString());
                 }
                 catch (Exception ex) { store.Event(null, "plan_error", goalId + ": " + ex.Message); }

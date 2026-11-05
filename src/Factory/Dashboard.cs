@@ -153,6 +153,15 @@ public static class DashboardHost
         });
         app.MapGet("/api/projects/{id:guid}/provider-capacity", (Guid id) =>
             Results.Ok(store.ProviderCapacities(id)));
+        app.MapGet("/api/projects/{id:guid}/provider-held", (Guid id) =>
+            Results.Ok(store.HeldProviderTurns(id)));
+        app.MapPost("/api/projects/{id:guid}/provider-held/{turnId:guid}/reconcile",
+            (Guid id, Guid turnId, ProviderReconciliationInput input) =>
+        {
+            store.ReconcileProviderTurn(id, turnId, input.FinalInputTokens,
+                input.FinalOutputTokens, input.Reviewed, input.Reason);
+            return Results.Ok(store.ProviderCapacities(id));
+        });
         app.MapPut("/api/projects/{id:guid}/provider-budgets/{providerId}",
             (Guid id, string providerId, ProviderBudgetInput input) =>
         {
@@ -398,4 +407,12 @@ public sealed class ProviderBudgetInput
 {
     /// <summary>Zero removes the local cap; it does not imply an unlimited provider account allowance.</summary>
     public long TokenLimit { get; set; }
+}
+
+public sealed class ProviderReconciliationInput
+{
+    public long FinalInputTokens { get; set; }
+    public long FinalOutputTokens { get; set; }
+    public bool Reviewed { get; set; }
+    public string Reason { get; set; } = "";
 }

@@ -80,7 +80,7 @@ public static class ProjectAnalysis
         var summary = store.Read();
         var activity = summary.Jobs.Where(x => x.ProjectId == project.Id)
             .OrderByDescending(x => x.CreatedAt).Take(25)
-            .Select(x => new { x.Title, x.State, x.Stage, x.Risk, x.Error });
+            .Select(x => new { x.Title, x.State, x.Stage, x.Risk });
         var route = ProviderRouting.Select(settings, store.GetProviderRoutes(project.Id),
             project.Id, "analysis");
         var runtime = new ProjectMeteredRuntime(ProviderRouting.Create(settings, route),

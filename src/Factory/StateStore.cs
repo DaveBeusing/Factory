@@ -620,7 +620,10 @@ public sealed partial class StateStore
         }
     }
 
-    public T Change<T>(Func<FactoryState, T> mutator)
+    public T Change<T>(Func<FactoryState, T> mutator) => ChangeCore(mutator, null);
+
+    private T ChangeCore<T>(Func<FactoryState, T> mutator,
+        Action<SqliteConnection, SqliteTransaction>? beforeCommit)
     {
         using var db = Open();
         using var tx = db.BeginTransaction();
@@ -640,8 +643,20 @@ public sealed partial class StateStore
         }).ToArray();
         var result = mutator(state);
         Save(db, tx, state, before);
+        beforeCommit?.Invoke(db, tx);
         tx.Commit();
         return result;
+    }
+
+    public (long GoalRemaining, long ProviderRemaining) ChangeWithProviderDebit(
+        Func<FactoryState, long> mutation, Guid providerTurnId, Guid jobId,
+        long inputDelta, long outputDelta)
+    {
+        long providerRemaining = long.MaxValue;
+        var goalRemaining = ChangeCore(mutation, (db, tx) =>
+            providerRemaining = DebitProviderTurn(db, tx, providerTurnId, jobId,
+                inputDelta, outputDelta));
+        return (goalRemaining, providerRemaining);
     }
 
     public void Change(Action<FactoryState> action) => Change<int>(s => { action(s); return 0; });

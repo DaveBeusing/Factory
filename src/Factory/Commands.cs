@@ -96,6 +96,25 @@ public static class Commands
             "PowerShell aliases are not executable paths.");
     }
 
+    public static string ResolveClaudeExecutable()
+    {
+        var configured = Environment.GetEnvironmentVariable("FACTORY_CLAUDE_EXECUTABLE");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            var path = Environment.ExpandEnvironmentVariables(configured.Trim().Trim('"'));
+            if (!File.Exists(path))
+                throw new FileNotFoundException("FACTORY_CLAUDE_EXECUTABLE points to a missing file", path);
+            return Path.GetFullPath(path);
+        }
+        if (!OperatingSystem.IsWindows()) return "claude";
+        var candidates = (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(Path.PathSeparator)
+            .SelectMany(path => new[] { Path.Combine(Environment.ExpandEnvironmentVariables(path.Trim().Trim('"')), "claude.exe"),
+                Path.Combine(Environment.ExpandEnvironmentVariables(path.Trim().Trim('"')), "claude.cmd") });
+        return FirstExistingExecutable(candidates)
+            ?? throw new FileNotFoundException("Claude Code CLI not found. Install the official CLI, restart Factory, or set FACTORY_CLAUDE_EXECUTABLE.");
+    }
+
     // Pure helper for unit testing lookup precedence without installing software.
     public static string? FirstExistingExecutable(IEnumerable<string> candidates)
     {
@@ -112,6 +131,8 @@ public static class Commands
         var argv = supplied;
         if (executable.Equals("codex", StringComparison.OrdinalIgnoreCase))
             actual = ResolveAgentExecutable();
+        else if (executable.Equals("claude", StringComparison.OrdinalIgnoreCase))
+            actual = ResolveClaudeExecutable();
 
         if (OperatingSystem.IsWindows() &&
             (actual.EndsWith(".cmd", StringComparison.OrdinalIgnoreCase) ||

@@ -325,6 +325,15 @@ public static class DashboardHost
         await app.RunAsync(cancellationToken);
     }
 
+    private static IAgentRuntime CreateProjectReadOnlyRuntime(StateStore store,
+        FactorySettings settings, ProjectInfo project, string role)
+    {
+        var provider = ProviderRouting.Select(settings, store.GetProviderRoutes(project.Id),
+            project.Id, role);
+        return new ProjectMeteredRuntime(ProviderRouting.Create(settings, provider), store,
+            project.Id, provider, settings.GoalReservationTokens);
+    }
+
     private static object Health(StateStore store)
     {
         var s = store.Read();
@@ -370,4 +379,15 @@ public sealed class SettingsInput
     public int PollSeconds { get; set; } = 3;
     public bool AllowPush { get; set; }
     public bool AutoMerge { get; set; }
+}
+
+public sealed class ProviderRoutesInput
+{
+    public List<ProjectProviderRoute> Routes { get; set; } = [];
+}
+
+public sealed class ProviderBudgetInput
+{
+    /// <summary>Zero removes the local cap; it does not imply an unlimited provider account allowance.</summary>
+    public long TokenLimit { get; set; }
 }

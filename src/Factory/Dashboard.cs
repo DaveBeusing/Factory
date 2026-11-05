@@ -143,6 +143,14 @@ public static class DashboardHost
             store.ReplaceProviderRoutes(id, input.Routes);
             return Results.Ok(store.GetProviderRoutes(id));
         });
+        app.MapGet("/api/projects/{id:guid}/analysis", (Guid id) =>
+            ProjectAnalysis.Latest(store, id) is { } report
+                ? (IResult)Results.Ok(report) : Results.NotFound());
+        app.MapPost("/api/projects/{id:guid}/analysis", async (Guid id, CancellationToken ct) =>
+        {
+            var project = store.Read().Projects.Single(p => p.Id == id);
+            return Results.Ok(await ProjectAnalysis.RunAsync(store, settings, project, ct));
+        });
         app.MapGet("/api/projects/{id:guid}/provider-capacity", (Guid id) =>
             Results.Ok(store.ProviderCapacities(id)));
         app.MapPut("/api/projects/{id:guid}/provider-budgets/{providerId}",

@@ -42,15 +42,14 @@ public static class ProviderRouting
             throw new InvalidOperationException("Claude Code is currently enabled only for read-only planning, analysis and review");
     }
 
-    public static SelectedProvider Select(FactorySettings settings, FactoryState state, Guid projectId,
-        string role, string risk = "medium")
+    public static SelectedProvider Select(FactorySettings settings, IEnumerable<ProjectProviderRoute> routes,
+        Guid projectId, string role, string risk = "medium")
     {
         if (!Roles.Contains(role)) throw new ArgumentException("Unknown provider role: " + role);
-        if (!state.Projects.Any(p => p.Id == projectId))
-            throw new ArgumentException("Unknown project");
-        var assigned = state.ProviderRoutes.FirstOrDefault(r => r.ProjectId == projectId && r.Role == role);
+        var assignments = routes.Where(r => r.ProjectId == projectId).ToList();
+        var assigned = assignments.FirstOrDefault(r => r.Role == role);
         if (assigned is null && role.StartsWith("review:", StringComparison.Ordinal))
-            assigned = state.ProviderRoutes.FirstOrDefault(r => r.ProjectId == projectId && r.Role == "review");
+            assigned = assignments.FirstOrDefault(r => r.Role == "review");
         var provider = assigned?.ProviderId ?? "codex";
         var model = assigned?.Model ?? "";
         if (provider == "codex" && model.Length == 0)

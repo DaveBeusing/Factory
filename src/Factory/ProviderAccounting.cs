@@ -37,20 +37,20 @@ public sealed partial class StateStore
     private static void CreateProviderTables(SqliteConnection db, SqliteTransaction tx)
     {
         Execute(db, tx, """
-            CREATE TABLE project_provider_routes(
+            CREATE TABLE IF NOT EXISTS project_provider_routes(
                 project_id TEXT NOT NULL REFERENCES projects(id),
                 role TEXT NOT NULL,
                 provider_id TEXT NOT NULL,
                 model TEXT NOT NULL,
                 PRIMARY KEY(project_id, role)
             );
-            CREATE TABLE provider_budget_limits(
+            CREATE TABLE IF NOT EXISTS provider_budget_limits(
                 project_id TEXT NOT NULL REFERENCES projects(id),
                 provider_id TEXT NOT NULL,
                 token_limit INTEGER NOT NULL CHECK(token_limit >= 0),
                 PRIMARY KEY(project_id, provider_id)
             );
-            CREATE TABLE provider_turns(
+            CREATE TABLE IF NOT EXISTS provider_turns(
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL REFERENCES projects(id),
                 job_id TEXT REFERENCES jobs(id),
@@ -67,8 +67,8 @@ public sealed partial class StateStore
                 created_at TEXT NOT NULL,
                 finished_at TEXT
             );
-            CREATE INDEX idx_provider_turns_budget ON provider_turns(project_id,provider_id,state);
-            CREATE INDEX idx_provider_turns_job ON provider_turns(job_id);
+            CREATE INDEX IF NOT EXISTS idx_provider_turns_budget ON provider_turns(project_id,provider_id,state);
+            CREATE INDEX IF NOT EXISTS idx_provider_turns_job ON provider_turns(job_id);
             PRAGMA user_version=7;
             """);
     }

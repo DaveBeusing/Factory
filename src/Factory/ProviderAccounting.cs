@@ -5,6 +5,19 @@ namespace Factory;
 
 public sealed record ProviderTurnAllocation(Guid Id, long ReservedTokens, bool Limited);
 
+public sealed class ProviderHeldTurn
+{
+    public Guid Id { get; set; }
+    public Guid? JobId { get; set; }
+    public string ProviderId { get; set; } = "";
+    public string Model { get; set; } = "";
+    public string Role { get; set; } = "";
+    public long ReservedTokens { get; set; }
+    public long InputTokens { get; set; }
+    public long OutputTokens { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
 public sealed class ProviderUsageBreakdown
 {
     public string Model { get; set; } = "";
@@ -308,6 +321,76 @@ public sealed partial class StateStore
                     row.ReportedCostMicros = checked((row.ReportedCostMicros ?? 0) + cost.Value);
             }
         return result.Values.OrderBy(x => x.ProviderId).ToList();
+    }
+
+    public IReadOnlyList<ProviderHeldTurn> HeldProviderTurns(Guid projectId)
+    {
+        using var db = Open();
+        using var cmd = Command(db, null, """
+            SELECT id,job_id,provider_id,model,role,reserved_tokens,
+                consumed_input,consumed_output,created_at
+            FROM provider_turns WHERE project_id=$project AND state='held'
+            ORDER BY created_at;
+            """, ("$project", projectId));
+        using var reader = cmd.ExecuteReader();
+        var records = new List<ProviderHeldTurn>();
+        while (reader.Read())
+            records.Add(new ProviderHeldTurn
+            {
+                Id = Guid.Parse(reader.GetString(0)),
+                JobId = reader.IsDBNull(1) ? null : Guid.Parse(reader.GetString(1)),
+                ProviderId = reader.GetString(2), Model = reader.GetString(3),
+                Role = reader.GetString(4), ReservedTokens = reader.GetInt64(5),
+                InputTokens = reader.GetInt64(6), OutputTokens = reader.GetInt64(7),
+                CreatedAt = DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture)
+            });
+        return records;
+    }
+
+    public void ReconcileProviderTurn(Guid projectId, Guid turnId, long finalInput,
+        long finalOutput, bool reviewed, string reason)
+    {
+        if (!reviewed || string.IsNullOrWhiteSpace(reason) || reason.Trim().Length < 10)
+            throw new InvalidOperationException("Independent final usage verification and a reason of at least 10 characters are required");
+        if (finalInput < 0 || finalOutput < 0)
+            throw new ArgumentOutOfRangeException(nameof(finalInput));
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        Guid? jobId;
+        long previousInput, previousOutput;
+        using (var cmd = Command(db, tx, """
+            SELECT job_id,consumed_input,consumed_output FROM provider_turns
+            WHERE id=$id AND project_id=$project AND state='held';
+            """, ("$id", turnId), ("$project", projectId)))
+        using (var reader = cmd.ExecuteReader())
+        {
+            if (!reader.Read()) throw new InvalidOperationException("Held provider turn not found");
+            jobId = reader.IsDBNull(0) ? null : Guid.Parse(reader.GetString(0));
+            previousInput = reader.GetInt64(1);
+            previousOutput = reader.GetInt64(2);
+        }
+        if (finalInput < previousInput || finalOutput < previousOutput)
+            throw new InvalidOperationException("Verified usage must not regress below observed provider tokens");
+        if (jobId.HasValue)
+        {
+            using var cmd = Command(db, tx, """
+                SELECT COUNT(*) FROM jobs WHERE id=$job AND
+                state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval')
+                AND lease_until>$now;
+                """, ("$job", jobId.Value), ("$now", DateTimeOffset.UtcNow));
+            if (Convert.ToInt64(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) > 0)
+                throw new InvalidOperationException("Cannot reconcile a provider turn while its job has a live lease");
+        }
+        Execute(db, tx, """
+            UPDATE provider_turns SET consumed_input=$input,consumed_output=$output,
+                state='settled',reported_cost_micros=NULL,finished_at=$now
+            WHERE id=$id AND project_id=$project AND state='held';
+            """, ("$id", turnId), ("$project", projectId),
+            ("$input", finalInput), ("$output", finalOutput), ("$now", DateTimeOffset.UtcNow));
+        tx.Commit();
+        Event(jobId, "provider_usage_reconciled",
+            "Project " + projectId + " provider turn " + turnId +
+            " reconciled against independently verified final token counts: " + reason.Trim());
     }
 }
 

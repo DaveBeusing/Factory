@@ -91,6 +91,12 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     var script = Resource("Factory.Ui.Script");
     var style = Resource("Factory.Ui.Style");
     Assert(html.Contains("data-view=\"recovery\"", StringComparison.Ordinal));
+    Assert(html.Contains("data-view=\"analysis\"", StringComparison.Ordinal));
+    Assert(script.Contains("renderAnalysis()", StringComparison.Ordinal));
+    Assert(script.Contains("renderUsage()", StringComparison.Ordinal));
+    Assert(script.Contains("configureProviders(projectId)", StringComparison.Ordinal));
+    Assert(script.Contains("editHeldProviderUsage(projectId)", StringComparison.Ordinal));
+    Assert(script.Contains("proposeGoalFromAnalysis(projectId,index)", StringComparison.Ordinal));
     Assert(script.Contains("renderRecovery()", StringComparison.Ordinal));
     Assert(script.Contains("renderGoalBudget(goalId)", StringComparison.Ordinal));
     Assert(script.Contains("goals/'+goalId+'/budget", StringComparison.Ordinal));
@@ -186,8 +192,57 @@ Test("Project provider budgets serialize reservations and report real consumptio
         store.FinishProviderTurn(second.Id, false);
         Assert(store.ProviderCapacities(project.Id).Single(x => x.ProviderId == "claude")
             .OutstandingTokens == 904, "Unknown final consumption must remain held");
+        try
+        {
+            store.ReconcileProviderTurn(project.Id, second.Id, 0, 0, false,
+                "No verified evidence");
+            throw new Exception("Unreviewed provider reconciliation was permitted");
+        }
+        catch (InvalidOperationException) { }
+        Assert(store.HeldProviderTurns(project.Id).Count == 1);
+        store.ReconcileProviderTurn(project.Id, second.Id, 0, 0, true,
+            "Verified final usage from the provider's own execution record");
+        Assert(store.HeldProviderTurns(project.Id).Count == 0);
+        Assert(store.ProviderCapacities(project.Id).Single(x => x.ProviderId == "claude")
+            .RemainingTokens == 4500, "Reconciliation must release only independently verified unused capacity");
     }
     finally { try { Directory.Delete(home, recursive: true); } catch { } }
+});
+
+Test("Fenced provider usage debits job and provider budgets together", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-provider-fence-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "fenced-provider" };
+        var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 800 };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job); });
+        store.SetProviderLimit(project.Id, "codex", 400);
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(),
+            "local-provider", 120, local: true, state: s, reservationTokens: 512));
+        var turn = store.BeginProviderTurn(project.Id, job.Id, fence,
+            new SelectedProvider("implementation", "codex", "model"), 512);
+        Assert(turn.ReservedTokens == 400);
+        Assert(store.RecordFencedUsage(job.Id, fence, 300, 50,
+            providerTurnId: turn.Id) == 50);
+        Assert(store.RecordFencedUsage(job.Id, fence, 50, 0,
+            providerTurnId: turn.Id) == 0);
+        try
+        {
+            store.RecordFencedUsage(job.Id, fence with { Generation = fence.Generation - 1 },
+                1, 0, providerTurnId: turn.Id);
+            throw new Exception("Stale lease debited provider usage");
+        }
+        catch (LostExecutionLeaseException) { }
+        var usage = store.ProviderCapacities(project.Id).Single(x => x.ProviderId == "codex");
+        Assert(usage.ConsumedTokens == 400 && usage.RemainingTokens == 0);
+        Assert(store.Read().BudgetReservations.Single().Consumed == 400);
+        store.FinishProviderTurn(turn.Id, true);
+        Assert(store.HeldProviderTurns(project.Id).Count == 0);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
 });
 
 Test("Project analysis only verifies repository-contained evidence files", () =>

@@ -11,7 +11,8 @@ public sealed record GoalBudgetExtensionPolicy(int IncrementTokens, int Threshol
 
 public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, Guid jobId,
     ExecutionFence? fence = null, GoalBudgetExtensionPolicy? extensionPolicy = null,
-    Func<CancellationToken, Task>? controllerExtension = null, int controllerThresholdTokens = 1024) : IAgentRuntime
+    Func<CancellationToken, Task>? controllerExtension = null, int controllerThresholdTokens = 1024,
+    SelectedProvider? provider = null, int providerReservationTokens = GoalBudgetLedger.DefaultReservationTokens) : IAgentRuntime
 {
     public const long MinimumTurnAllowance = 256;
     private readonly SemaphoreSlim _turnLock = new(1, 1);
@@ -55,6 +56,10 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 return GoalBudgetLedger.BeginTurn(state, job);
             });
 
+            ProviderTurnAllocation? providerTurn = provider is null ? null :
+                store.BeginProviderTurn(store.Job(jobId).ProjectId, jobId, fence,
+                    provider, providerReservationTokens);
+            bool providerTurnFinalized = false;
             using var scope = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
             long recordedIn = 0, recordedOut = 0;
             bool budgetReached = false;
@@ -68,8 +73,10 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 var outputDelta = usage.OutputTokens - recordedOut;
                 if (inputDelta == 0 && outputDelta == 0 && sawUsage) return;
 
-                var currentRemaining = extensionPolicy is not null && goalFunded
-                    ? store.Change(state =>
+                long currentRemaining;
+                if (extensionPolicy is not null && goalFunded)
+                {
+                    long DebitGoal(FactoryState state)
                     {
                         var job = state.Jobs.Single(j => j.Id == jobId);
                         if (fence is { } currentFence) JobRecovery.Require(job, currentFence);
@@ -83,16 +90,26 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                             balance = GoalBudgetLedger.Remaining(state, job);
                         }
                         return balance;
-                    })
-                    : fence is { } activeFence
-                        ? store.RecordFencedUsage(jobId, activeFence, inputDelta, outputDelta)
-                        : store.Change(state =>
-                        {
-                            var job = state.Jobs.Single(j => j.Id == jobId);
-                            return GoalBudgetLedger.Record(state, job,
-                                checked(job.TokensIn + inputDelta),
-                                checked(job.TokensOut + outputDelta));
-                        });
+                    }
+                    if (providerTurn is { } activeTurn)
+                    {
+                        var balances = store.ChangeWithProviderDebit(DebitGoal,
+                            activeTurn.Id, jobId, inputDelta, outputDelta);
+                        currentRemaining = Math.Min(balances.GoalRemaining, balances.ProviderRemaining);
+                    }
+                    else currentRemaining = store.Change(DebitGoal);
+                }
+                else if (fence is { } activeFence)
+                    currentRemaining = store.RecordFencedUsage(jobId, activeFence,
+                        inputDelta, outputDelta, providerTurnId: providerTurn?.Id);
+                else
+                    currentRemaining = store.Change(state =>
+                    {
+                        var job = state.Jobs.Single(j => j.Id == jobId);
+                        return GoalBudgetLedger.Record(state, job,
+                            checked(job.TokensIn + inputDelta),
+                            checked(job.TokensOut + outputDelta));
+                    });
 
                 recordedIn = usage.InputTokens;
                 recordedOut = usage.OutputTokens;
@@ -100,7 +117,7 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 onUsage?.Invoke(usage);
 
                 // The authorized reservation may have been extended during this usage debit.
-                if (remaining != long.MaxValue && currentRemaining <= 0)
+                if (currentRemaining <= 0)
                 {
                     budgetReached = true;
                     scope.Cancel();
@@ -134,11 +151,26 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 if (budgetReached)
                     throw new TokenBudgetExceededException("Job reservation exhausted during execution");
                 if (fence is { } finalFence) JobRecovery.Require(store.Job(jobId), finalFence);
+                if (providerTurn is { } completedTurn)
+                {
+                    store.FinishProviderTurn(completedTurn.Id, result.UsageReported && result.Success,
+                        result.ProviderReportedCostMicros);
+                    providerTurnFinalized = true;
+                }
                 return result;
             }
             catch (OperationCanceledException) when (budgetReached && !cancellation.IsCancellationRequested)
             {
-                throw new TokenBudgetExceededException("Job reservation exhausted during execution");
+                throw new TokenBudgetExceededException("Job or provider reservation exhausted during execution");
+            }
+            catch
+            {
+                if (providerTurn is { } unfinishedTurn && !providerTurnFinalized)
+                {
+                    try { store.FinishProviderTurn(unfinishedTurn.Id, false); }
+                    catch (InvalidOperationException) { /* Preserve the original error; leave usage held. */ }
+                }
+                throw;
             }
         }
         finally { _turnLock.Release(); }

@@ -26,6 +26,9 @@ public sealed class QualityEngine
 {
     private readonly IAgentRuntime _agent;
     private readonly Func<string, IAgentRuntime>? _reviewerRuntime;
+    // Review calls with separately attributed provider reservations must not race the
+    // shared job's final-usage flag; serialize metered reviewer turns for now.
+    private readonly SemaphoreSlim _providerReviewGate = new(1, 1);
     public QualityEngine(IAgentRuntime agent, Func<string, IAgentRuntime>? reviewerRuntime = null)
     {
         _agent = agent;
@@ -119,11 +122,16 @@ public sealed class QualityEngine
                 "Second line onward provide evidence with file paths. Task: " + job.Description + "\nDiff summary:\n" + diff.Output;
            try
             {
-                var result = await (_reviewerRuntime?.Invoke(role) ?? _agent)
-                    .RunAsync(job.Worktree, instruction, "", ct, readOnly: true);
+                if (_reviewerRuntime is not null) await _providerReviewGate.WaitAsync(ct);
+                try
+                {
+                    var result = await (_reviewerRuntime?.Invoke(role) ?? _agent)
+                        .RunAsync(job.Worktree, instruction, "", ct, readOnly: true);
                var verdict = result.Success && result.FinalText.TrimStart().StartsWith("VERDICT: PASS", StringComparison.Ordinal)
                     ? "PASS" : "CHANGES";
-               return (role, verdict, result.FinalText[..Math.Min(3000, result.FinalText.Length)]);
+                    return (role, verdict, result.FinalText[..Math.Min(3000, result.FinalText.Length)]);
+                }
+                finally { if (_reviewerRuntime is not null) _providerReviewGate.Release(); }
            }
             catch (Exception ex) when (ex is not OperationCanceledException and not TokenBudgetExceededException)
             {

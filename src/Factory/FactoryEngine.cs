@@ -212,12 +212,26 @@ public sealed class FactoryEngine
             ? new(_settings.GoalExtensionIncrementTokens, _settings.GoalExtensionThresholdTokens,
                 _settings.MaxJobReservationTokens)
             : null;
+        var routes = _runtimeOverridden ? Array.Empty<ProjectProviderRoute>() :
+            _store.GetProviderRoutes(p.Id);
+        SelectedProvider? builderRoute = _runtimeOverridden ? null :
+            ProviderRouting.Select(_settings, routes, p.Id, "implementation", j.Risk);
         var runtime = new BudgetedAgentRuntime(
-            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk),
+            _runtimeOverridden ? _agent : ProviderRouting.Create(_settings, builderRoute!,
+                _executionMode == JobExecutionModes.Remote),
             _store, id, fence, extensionPolicy,
             _remoteBudgetExtension is null ? null : token => _remoteBudgetExtension(id, token),
-            _settings.GoalExtensionThresholdTokens);
-        var qualityEngine = new QualityEngine(runtime);
+            _settings.GoalExtensionThresholdTokens, builderRoute, _settings.GoalReservationTokens);
+        IAgentRuntime ReviewRuntime(string role)
+        {
+            var route = ProviderRouting.Select(_settings, routes, p.Id, "review:" + role, j.Risk);
+            return new BudgetedAgentRuntime(ProviderRouting.Create(_settings, route,
+                    _executionMode == JobExecutionModes.Remote),
+                _store, id, fence, extensionPolicy,
+                _remoteBudgetExtension is null ? null : token => _remoteBudgetExtension(id, token),
+                _settings.GoalExtensionThresholdTokens, route, _settings.GoalReservationTokens);
+        }
+        var qualityEngine = new QualityEngine(runtime, _runtimeOverridden ? null : ReviewRuntime);
         var worktree = _git.Prepare(p, j);
         UpdateOwned(id, fence, x =>
         {

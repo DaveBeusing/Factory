@@ -37,6 +37,7 @@ The existing goal-budget ledger remains authoritative for total goal allocations
 - Before every metered job turn or read-only project-level planning/analysis call, Factory reserves provider capacity in a SQLite transaction. Concurrent reservations cannot promise the same remaining tokens.
 - Provider-reported input and output deltas debit the reservation. Cache-read and cache-write input tokens are included when Claude reports them.
 - A confirmed final usage report settles a successful turn and releases unused reserved capacity. Interrupted, unverified or unfinished turns remain **held**, including after a process failure.
+- Held provider turns can be reconciled explicitly from **Capacity → Reconcile held usage**, but only after the operator independently verifies final input/output counts and records a justification. Missing evidence must not trigger automatic release.
 - A provider limit blocks admission when remaining capacity is below the required minimum and cancels execution when the active reservation is exhausted. Goal and provider usage debits during fenced local execution share an SQLite transaction.
 - The **Capacity** view reports consumed tokens, outstanding liabilities, configured limit and locally available allocation. It also groups usage by model and agent role.
 - Provider-reported USD cost is shown only when available from the provider (currently Claude JSON). Missing pricing/cost and unknown model IDs remain unknown; Factory does not synthesize prices.

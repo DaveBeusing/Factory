@@ -7,6 +7,12 @@ Factory can manage multiple repositories and local or remote workers. Git pushes
 > [!IMPORTANT]
 > This distribution contains **source code**. The Mission Control redesign has not yet undergone a real .NET build or Windows end-to-end validation in the packaging environment. Build and run the included tests on your own machine before using it with production repositories. The .NET build and authenticated agent/GitHub integration have not been validated in the packaging environment.
 
+## Project review and multi-provider operation
+
+Mission Control now includes a **Project Review** workspace for commit-bound, read-only repository analysis and suggestions that can be prepared as explicit goal drafts. Projects can configure different providers/models for planning, implementation, analysis and review. Codex remains the write-capable reference adapter; Claude Code is currently limited to read-only planning and review.
+
+Provider-token consumption, outstanding reservations and configurable local caps are visible by project/provider/model/role. These **are not** provider account allowances; external remaining quota and price information are never inferred from local token totals. See [provider routing and budgets](docs/providers-and-budgets.md) and the [project review workflow](docs/project-reviews.md) for setup, capabilities, limitations and safe upgrades.
+
 ## Contents
 
 1. [Requirements](#1-requirements)

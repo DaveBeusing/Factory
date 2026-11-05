@@ -12,9 +12,9 @@ namespace Factory;
 /// The public snapshot API is retained so existing orchestrator callers stay unchanged.
 /// Only changed entities are written; collection values live in ordered child tables.
 /// </summary>
-public sealed class StateStore
+public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 6;
+    private const int DatabaseVersion = 7;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -234,6 +234,12 @@ public sealed class StateStore
             tx.Commit();
             return;
         }
+        if (schemaVersion == 6)
+        {
+            CreateProviderTables(db, tx);
+            tx.Commit();
+            return;
+        }
         if (schemaVersion is 2 or 3)
         {
             if (schemaVersion == 2)
@@ -303,6 +309,7 @@ public sealed class StateStore
                 """);
             UpgradeWorkerAuthorization(db, tx);
             CreateBudgetExtensionTable(db, tx);
+            CreateProviderTables(db, tx);
             tx.Commit();
             return;
         }
@@ -310,12 +317,14 @@ public sealed class StateStore
         {
             UpgradeWorkerAuthorization(db, tx);
             CreateBudgetExtensionTable(db, tx);
+            CreateProviderTables(db, tx);
             tx.Commit();
             return;
         }
         if (schemaVersion == 5)
         {
             CreateBudgetExtensionTable(db, tx);
+            CreateProviderTables(db, tx);
             tx.Commit();
             return;
         }
@@ -419,6 +428,7 @@ public sealed class StateStore
             PRAGMA user_version=5;
             """);
         CreateBudgetExtensionTable(db, tx);
+        CreateProviderTables(db, tx);
         tx.Commit();
     }
 
@@ -713,7 +723,7 @@ public sealed class StateStore
     /// The caller must interrupt/block an execution whose balance is exhausted.
     /// </summary>
     public long RecordFencedUsage(Guid jobId, ExecutionFence fence, long inputDelta,
-        long outputDelta, bool? usageComplete = null)
+        long outputDelta, bool? usageComplete = null, Guid? providerTurnId = null)
     {
         if (inputDelta < 0 || outputDelta < 0)
             throw new ArgumentOutOfRangeException(nameof(inputDelta), "Token deltas must be nonnegative");
@@ -786,6 +796,9 @@ public sealed class StateStore
             if (update.ExecuteNonQuery() != 1)
                 throw new LostExecutionLeaseException("Execution lease expired or generation was fenced");
         }
+        if (providerTurnId is { } turnId)
+            remaining = Math.Min(remaining,
+                DebitProviderTurn(db, tx, turnId, jobId, inputDelta, outputDelta));
         tx.Commit();
         return remaining;
     }

@@ -132,7 +132,7 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                     Record(new AgentTokenUsage(result.InputTokens, result.OutputTokens));
 
                 // A partial usage notification cannot prove the final total.
-                if (!result.UsageReported && remaining != long.MaxValue)
+                if (!result.UsageReported && (remaining != long.MaxValue || providerTurn?.Limited == true))
                     throw new TokenBudgetExceededException("Agent did not report final token usage; budget remains held");
 
                 if (result.UsageReported && remaining != long.MaxValue && !budgetReached)
@@ -161,6 +161,11 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
             }
             catch (OperationCanceledException) when (budgetReached && !cancellation.IsCancellationRequested)
             {
+                if (providerTurn is { } unfinishedTurn && !providerTurnFinalized)
+                {
+                    try { store.FinishProviderTurn(unfinishedTurn.Id, false); }
+                    catch (InvalidOperationException) { /* Preserve budget failure. */ }
+                }
                 throw new TokenBudgetExceededException("Job or provider reservation exhausted during execution");
             }
             catch

@@ -12,6 +12,8 @@ public sealed class AgentRunResult
     public long InputTokens { get; set; }
     public long OutputTokens { get; set; }
     public bool UsageReported { get; set; }
+    // Decimal USD cost from the provider's own CLI report, in millionths of a dollar.
+    public long? ProviderReportedCostMicros { get; set; }
 }
 
 public readonly record struct AgentTokenUsage(long InputTokens, long OutputTokens)

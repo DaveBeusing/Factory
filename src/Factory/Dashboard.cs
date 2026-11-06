@@ -98,7 +98,7 @@ public static class DashboardHost
             ProjectReviewer.Read(store, id) is { } review
                 ? (IResult)Results.Ok(review) : Results.NotFound(new { error = "No review exists yet" }));
         app.MapPost("/api/projects/{id:guid}/analysis", async (Guid id, CancellationToken ct) =>
-            Results.Ok(await ProjectReviewer.AnalyzeAsync(store, id, ct)));
+            Results.Ok(await ProjectReviewer.AnalyzeAsync(store, id, ct, settings)));
         app.MapPost("/api/projects/{id:guid}/analysis/goals", (Guid id, ReviewGoalInput input) =>
             Results.Created("/api/state", ProjectReviewer.CreateDraftGoal(store, id, input)));
         app.MapGet("/api/health", () => Results.Ok(Health(store)));

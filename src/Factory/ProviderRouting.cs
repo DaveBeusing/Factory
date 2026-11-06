@@ -256,3 +256,66 @@ public static class ProviderBudgetLedger
             };
         }).ToArray();
 }
+
+public sealed class AttributedAgentRuntime(IAgentRuntime inner, StateStore store, Guid jobId,
+    ProviderProfile profile, string role, string model, int reservationTokens,
+    ExecutionFence? fence = null) : IAgentRuntime
+{
+    public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
+    {
+        var usageId = store.Change(state =>
+        {
+            var job = state.Jobs.Single(j => j.Id == jobId);
+            if (fence is { } claim) JobRecovery.Require(job, claim);
+            return ProviderBudgetLedger.Begin(state, job, profile, role, model, reservationTokens).Id;
+        });
+        using var scope = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        bool completed = false;
+        bool capped = false;
+        long lastIn = 0, lastOut = 0;
+        void Observe(AgentTokenUsage usage)
+        {
+            if (usage.InputTokens < lastIn || usage.OutputTokens < lastOut) return;
+            var remaining = store.Change(state =>
+            {
+                var job = state.Jobs.Single(j => j.Id == jobId);
+                if (fence is { } claim) JobRecovery.Require(job, claim);
+                return ProviderBudgetLedger.Record(state, usageId, usage);
+            });
+            lastIn = usage.InputTokens;
+            lastOut = usage.OutputTokens;
+            onUsage?.Invoke(usage);
+            if (remaining <= 0)
+            {
+                capped = true;
+                scope.Cancel();
+            }
+        }
+        try
+        {
+            var result = await inner.RunAsync(directory, prompt, previousSession, scope.Token,
+                onSession, readOnly, Observe);
+            if (result.UsageReported)
+                Observe(new AgentTokenUsage(result.InputTokens, result.OutputTokens));
+            if (capped) throw new TokenBudgetExceededException("Configured provider reservation exhausted");
+            store.Change(state => ProviderBudgetLedger.Finish(state, usageId, result.UsageReported));
+            completed = true;
+            return result;
+        }
+        catch (OperationCanceledException) when (capped && !cancellation.IsCancellationRequested)
+        {
+            throw new TokenBudgetExceededException("Configured provider reservation exhausted");
+        }
+        finally
+        {
+            if (!completed)
+            {
+                // No final provider report: never release an uncertain liability.
+                try { store.Change(state => ProviderBudgetLedger.Finish(state, usageId, false)); }
+                catch (LostExecutionLeaseException) { }
+            }
+        }
+    }
+}

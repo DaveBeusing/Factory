@@ -253,7 +253,7 @@ public static class RemoteProviderRouting
         {
             Reviewed = input.Reviewed, Reason = reason[..Math.Min(reason.Length, 1000)],
             ConfirmOverrun = input.ConfirmOverrun, FinalInputTokens = receipt.InputTokens, FinalOutputTokens = receipt.OutputTokens
-        });
+        }, receipt.ObservedModel);
     }
 
     internal static bool Record(FactoryState state, FactorySettings settings, RemoteExecutorGrant grant, RemoteExecutorReceipt receipt)

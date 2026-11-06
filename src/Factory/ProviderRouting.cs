@@ -97,8 +97,10 @@ public sealed class ClaudeReadOnlyAgentRuntime(string model) : IAgentRuntime
     {
         if (!readOnly)
             throw new InvalidOperationException("Claude adapter cannot execute write-enabled jobs");
-        var args = new List<string> { "-p", "--output-format", "json",
-            "--permission-mode", "plan", "--tools", "Read,Glob,Grep" };
+        var args = new List<string> { "--bare", "-p", "--output-format", "json",
+            "--permission-mode", "plan", "--tools", "Read,Glob,Grep",
+            "--strict-mcp-config", "--mcp-config", "{}",
+            "--disallowedTools", "mcp__*" };
         if (!string.IsNullOrWhiteSpace(model)) { args.Add("--model"); args.Add(model); }
         if (!string.IsNullOrWhiteSpace(previousSession))
         {

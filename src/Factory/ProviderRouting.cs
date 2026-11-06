@@ -241,6 +241,18 @@ public static class ProviderBudgetLedger
             return new { profile.Id, profile.Kind, profile.Model, profile.Enabled,
                 inputTokens = records.Sum(x => x.InputTokens), outputTokens = records.Sum(x => x.OutputTokens),
                 observedTokens = spent, reservedTokens = pending,
+                models = records.GroupBy(x => x.Model).Select(modelGroup => new
+                {
+                    model = string.IsNullOrWhiteSpace(modelGroup.Key) ? "Provider default" : modelGroup.Key,
+                    inputTokens = modelGroup.Sum(x => x.InputTokens),
+                    outputTokens = modelGroup.Sum(x => x.OutputTokens),
+                    roles = modelGroup.GroupBy(x => x.Role).Select(roleGroup => new
+                    {
+                        role = roleGroup.Key,
+                        inputTokens = roleGroup.Sum(x => x.InputTokens),
+                        outputTokens = roleGroup.Sum(x => x.OutputTokens)
+                    }).ToArray()
+                }).ToArray(),
                 localRemainingTokens = profile.TokenLimit > 0 ? (long?)Math.Max(0, profile.TokenLimit - spent - pending) : null,
                 accountRemaining = (double?)null, // Account entitlements are never inferred.
                 projects = state.Projects.Select(p =>

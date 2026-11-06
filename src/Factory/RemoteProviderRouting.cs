@@ -23,6 +23,8 @@ public sealed class RemoteProviderTurn
     public string InputCommit { get; set; } = "";
     public string OutputTree { get; set; } = "";
     public string ObservedModel { get; set; } = "";
+    public string GrantDigest { get; set; } = "";
+    public string HoldReason { get; set; } = "";
     public string State { get; set; } = "active";
     public DateTimeOffset StartedAt { get; set; } = DateTimeOffset.UtcNow;
 }
@@ -51,6 +53,8 @@ public sealed record RemoteExecutorGrant(Guid TurnId, Guid LeaseId, Guid JobId, 
 public sealed record RemoteExecutorReceipt(Guid TurnId, Guid LeaseId, string ProviderId, string Role,
     string InputCommit, string ObservedModel, long InputTokens, long OutputTokens, bool FinalUsage,
     bool Success, string FinalText, bool FinalTextIsFallback, string OutputTree, byte[] Patch);
+
+public sealed record RemoteReceiptRecoveryInput(bool Reviewed, string Reason, bool ConfirmOverrun);
 
 public static class RemoteProviderRouting
 {
@@ -131,9 +135,17 @@ public static class RemoteProviderRouting
         var dispatch = store.Change(state => Begin(state, settings, request));
         try
         {
-            var receipt = await RemoteProviderExecutor.InvokeAsync(dispatch.ExecutorUrl,
-                ExecutorCredential(settings) ?? throw new InvalidOperationException("Executor credential unavailable"),
-                dispatch.Grant, ct);
+            var credential = ExecutorCredential(settings) ?? throw new InvalidOperationException("Executor credential unavailable");
+            RemoteExecutorReceipt receipt;
+            try { receipt = await RemoteProviderExecutor.InvokeAsync(dispatch.ExecutorUrl, credential, dispatch.Grant, ct); }
+            catch (Exception ex) when (!ct.IsCancellationRequested &&
+                ex is HttpRequestException or IOException or OperationCanceledException)
+            {
+                // Retry only the receipt lookup. Dispatching the same provider call again is unsafe.
+                receipt = await RemoteProviderExecutor.FetchReceiptAsync(dispatch.ExecutorUrl, credential,
+                    new(dispatch.Grant.TurnId, RemoteProviderExecutor.Digest(dispatch.Grant)), ct)
+                    ?? throw new InvalidOperationException("Executor has no durable receipt for the interrupted turn", ex);
+            }
             var accepted = store.Change(state => Record(state, settings, dispatch.Grant, receipt));
             if (!accepted) throw new InvalidOperationException("Remote provider turn requires reconciliation");
             return receipt;
@@ -192,16 +204,56 @@ public static class RemoteProviderRouting
         reservation.OwnerProcessId = 0;
         reservation.OwnerStartedAt = null;
         reservation.OwnerMachine = "";
-        state.RemoteProviderTurns.Add(new RemoteProviderTurn
-        {
-            Id = request.TurnId, LeaseId = lease.Id, UsageId = usage.Id, Role = route.Role,
-            InputCommit = request.Commit
-        });
-        return (lease.ExecutorUrl, new(request.TurnId, lease.Id, job.Id, job.ExecutionGeneration, route,
+        var grant = new RemoteExecutorGrant(request.TurnId, lease.Id, job.Id, job.ExecutionGeneration, route,
             request.Commit, firstBuilder?.InputCommit ?? request.Commit,
             route.Role == "builder" ? builder?.OutputTree ?? "" : builder!.OutputTree,
             repository, firstBuilder is null, checked((int)reservation.Reserved), task, request.Bundle,
-            job.ExpectedPaths.ToArray(), project.ProtectedPaths.ToArray()));
+            job.ExpectedPaths.ToArray(), project.ProtectedPaths.ToArray());
+        state.RemoteProviderTurns.Add(new RemoteProviderTurn
+        {
+            Id = request.TurnId, LeaseId = lease.Id, UsageId = usage.Id, Role = route.Role,
+            InputCommit = request.Commit, GrantDigest = RemoteProviderExecutor.Digest(grant)
+        });
+        return (lease.ExecutorUrl, grant);
+    }
+
+    public static async Task<object> RecoverReceiptAsync(StateStore store, FactorySettings settings, Guid jobId,
+        Guid turnId, RemoteReceiptRecoveryInput input, CancellationToken ct)
+    {
+        if (!input.Reviewed || string.IsNullOrWhiteSpace(input.Reason) || input.Reason.Trim().Length is < 10 or > 1000)
+            throw new InvalidOperationException("Receipt recovery requires an independent review and evidence reason");
+        var state = store.Read();
+        var turn = state.RemoteProviderTurns.Single(t => t.Id == turnId);
+        var lease = state.RemoteProviderLeases.Single(l => l.Id == turn.LeaseId && l.JobId == jobId);
+        if (turn.State == "reconciled") return new { turn.Id, turn.State };
+        if (turn.State != "held" || turn.GrantDigest.Length != 64 ||
+            !string.Equals(settings.RemoteProviderExecutorUrl, lease.ExecutorUrl, StringComparison.Ordinal))
+            throw new InvalidOperationException("No held receipt from the configured executor is available");
+        var credential = ExecutorCredential(settings) ?? throw new InvalidOperationException("Executor credential unavailable");
+        var receipt = await RemoteProviderExecutor.FetchReceiptAsync(lease.ExecutorUrl, credential,
+            new(turn.Id, turn.GrantDigest), ct) ?? throw new InvalidOperationException("Executor has no durable receipt for this turn");
+        return SettleRecoveredReceipt(store, jobId, turnId, input, receipt);
+    }
+
+    internal static object SettleRecoveredReceipt(StateStore store, Guid jobId, Guid turnId,
+        RemoteReceiptRecoveryInput input, RemoteExecutorReceipt receipt)
+    {
+        var state = store.Read();
+        var turn = state.RemoteProviderTurns.Single(t => t.Id == turnId);
+        var lease = state.RemoteProviderLeases.Single(l => l.Id == turn.LeaseId && l.JobId == jobId);
+        if (turn.State == "reconciled") return new { turn.Id, turn.State };
+        var usage = state.ProviderUsages.Single(u => u.Id == turn.UsageId);
+        if (turn.State != "held" || !receipt.FinalUsage || receipt.TurnId != turn.Id ||
+            receipt.LeaseId != lease.Id || receipt.InputCommit != turn.InputCommit || receipt.Role != turn.Role ||
+            receipt.ProviderId != usage.ProviderId || receipt.ObservedModel != usage.Model)
+            throw new InvalidOperationException("Executor receipt does not establish final usage for this held turn");
+        var reservation = state.ProviderBudgetReservations.Single(r => r.UsageId == usage.Id);
+        var reason = "Recovered executor receipt " + turn.Id + ". " + input.Reason.Trim();
+        return ProviderBudgetReconciliation.Reconcile(store, reservation.Id, new()
+        {
+            Reviewed = input.Reviewed, Reason = reason[..Math.Min(reason.Length, 1000)],
+            ConfirmOverrun = input.ConfirmOverrun, FinalInputTokens = receipt.InputTokens, FinalOutputTokens = receipt.OutputTokens
+        });
     }
 
     internal static bool Record(FactoryState state, FactorySettings settings, RemoteExecutorGrant grant, RemoteExecutorReceipt receipt)
@@ -232,13 +284,23 @@ public static class RemoteProviderRouting
         turn.OutputTree = receipt.OutputTree ?? "";
         var project = state.Projects.Single(p => p.Id == job.ProjectId);
         var worker = state.Workers.Single(w => w.Id == lease.WorkerId);
-        if (!receipt.FinalUsage || receipt.ObservedModel != grant.Route.Model ||
-            providerRemaining < 0 || goalRemaining < 0 ||
-            !WorkerAuthorization.CanContinue(state, worker, project, job, settings) ||
-            !CanContinue(state, settings, job, lease) ||
-            (receipt.Success && grant.Route.Role == "builder" && !IntegrationVerifier.IsCommitSha(turn.OutputTree)))
+        string? reason = null;
+        if (providerRemaining < 0 || goalRemaining < 0)
+            reason = "Executor reported usage above the reserved budget";
+        else if (!string.IsNullOrEmpty(receipt.ObservedModel) && receipt.ObservedModel != grant.Route.Model)
+            reason = "Executor reported a different model from the lease route";
+        else if (!receipt.FinalUsage)
+            reason = "Executor did not provide final usage";
+        else if (receipt.ObservedModel != grant.Route.Model)
+            reason = "Executor did not confirm the model on the lease route";
+        else if (!WorkerAuthorization.CanContinue(state, worker, project, job, settings) ||
+            !CanContinue(state, settings, job, lease))
+            reason = "Remote provider lease authorization changed during the turn";
+        else if (receipt.Success && grant.Route.Role == "builder" && !IntegrationVerifier.IsCommitSha(turn.OutputTree))
+            reason = "Executor returned no valid builder tree";
+        if (reason is not null)
         {
-            Fence(state, job, "Remote provider usage, model, budget or authorization requires review");
+            Fence(state, job, reason);
             return false;
         }
 
@@ -249,21 +311,22 @@ public static class RemoteProviderRouting
         return true;
     }
 
-    internal static void HoldTurns(FactoryState state, FactoryJob job)
+    internal static void HoldTurns(FactoryState state, FactoryJob job, string reason = "Remote executor turn interrupted")
     {
         var lease = Current(state, job);
         if (lease is null) return;
         foreach (var turn in state.RemoteProviderTurns.Where(t => t.LeaseId == lease.Id && t.State == "active"))
         {
             turn.State = "held";
+            turn.HoldReason = reason;
             ProviderBudgetLedger.Hold(state, state.ProviderBudgetReservations.Single(r => r.UsageId == turn.UsageId),
-                "Remote executor turn interrupted");
+                reason);
         }
     }
 
     internal static void Fence(FactoryState state, FactoryJob job, string reason)
     {
-        HoldTurns(state, job);
+        HoldTurns(state, job, reason);
         GoalBudgetLedger.Hold(state, job, reason);
         job.ExecutionGeneration = checked(job.ExecutionGeneration + 1);
         job.State = JobStates.Blocked;

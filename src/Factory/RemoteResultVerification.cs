@@ -45,7 +45,8 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         ValidatePull(pr, repository, project.BaseBranch, expectedBranch, finished.HeadSha);
 
         // A passing worker-side check cannot substitute for required, independent GitHub checks.
-        var checks = await RequiredChecksAsync(repository, number, ct);
+        var baseSha = ReadBaseSha(pr);
+        var checks = await RequiredChecksAsync(repository, number, finished.HeadSha, ct);
         foreach (var check in project.Checks)
         {
             if (!checks.Contains(check.Name))
@@ -53,7 +54,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         }
 
         // Controller-side enforcement uses GitHub PR files, not worker-reported paths.
-        var changed = await PullFilePathsAsync(repository, number, ct);
+        var changed = await CompareFilePathsAsync(repository, baseSha, finished.HeadSha, ct);
         WorkPackageScope.Enforce(job.ExpectedPaths, changed);
         GitOperations.EnforcePaths(changed, project.ProtectedPaths);
 
@@ -73,12 +74,15 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         // Recheck the PR after all other GitHub requests, including the commit tree lookup.
         using var latest = await PullAsync(repository, number, ct);
         ValidatePull(latest, repository, project.BaseBranch, expectedBranch, finished.HeadSha);
+        if (ReadBaseSha(latest) != baseSha)
+            throw new InvalidOperationException("GitHub PR base commit changed during verification");
         return new VerifiedWorkerResult(Json.Stringify(new
         {
             verifiedBy = "controller/github-required-checks",
             repository,
             prNumber = number,
             branch = expectedBranch,
+            baseCommit = baseSha,
             commit = finished.HeadSha,
             verifiedAt = DateTimeOffset.UtcNow,
             requiredChecks = checks.OrderBy(n => n, StringComparer.Ordinal).ToArray(),
@@ -221,31 +225,69 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         return paths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    private async Task<IReadOnlyList<string>> PullFilePathsAsync(
-        string repository, int number, CancellationToken ct)
+    private static string ReadBaseSha(JsonDocument pull)
     {
-        var response = await _runGitHub(
-            ["api", "--paginate", "--slurp",
-             $"repos/{repository}/pulls/{number}/files?per_page=100"],
-            60, ct);
-        if (!response.Ok)
-            throw new InvalidOperationException("Unable to verify changed PR files");
-        return ParsePullFilePaths(response.Output);
+        var sha = pull.RootElement.GetProperty("base").GetProperty("sha").GetString();
+        return sha is not null && IntegrationVerifier.IsCommitSha(sha)
+            ? sha : throw new InvalidOperationException("GitHub PR base commit is missing or invalid");
     }
 
-    private async Task<HashSet<string>> RequiredChecksAsync(string repository, int number, CancellationToken ct)
+    private async Task<IReadOnlyList<string>> CompareFilePathsAsync(
+        string repository, string baseSha, string headSha, CancellationToken ct)
     {
+        var response = await _runGitHub(
+            ["api", $"repos/{repository}/compare/{baseSha}...{headSha}?per_page=1"], 60, ct);
+        if (!response.Ok)
+            throw new InvalidOperationException("Unable to verify changed files for the claimed commits");
+        using var document = JsonDocument.Parse(response.Output);
+        if (document.RootElement.GetProperty("base_commit").GetProperty("sha").GetString() != baseSha)
+            throw new InvalidOperationException("GitHub comparison returned a different base commit");
+        var files = document.RootElement.GetProperty("files");
+        // GitHub only includes the comparison file list on the first page and caps it at 300.
+        if (files.GetArrayLength() >= 300)
+            throw new InvalidOperationException("GitHub comparison file limit reached");
+        foreach (var file in files.EnumerateArray())
+            if (file.GetProperty("status").GetString() == "renamed" &&
+                (!file.TryGetProperty("previous_filename", out var previous) || string.IsNullOrWhiteSpace(previous.GetString())))
+                throw new InvalidOperationException("GitHub renamed file source is missing");
+        return ParsePullFilePaths("[" + files.GetRawText() + "]");
+    }
+
+    private async Task<HashSet<string>> RequiredChecksAsync(string repository, int number, string sha, CancellationToken ct)
+    {
+        const string query = """
+            query($owner: String!, $name: String!, $sha: GitObjectID!, $pr: Int!) {
+              repository(owner: $owner, name: $name) {
+                object(oid: $sha) { ... on Commit { oid statusCheckRollup {
+                  contexts(first: 100) { pageInfo { hasNextPage } nodes {
+                    ... on CheckRun { name isRequired(pullRequestNumber: $pr) conclusion }
+                    ... on StatusContext { context isRequired(pullRequestNumber: $pr) state }
+                  } }
+                } } }
+              }
+            }
+            """;
+        var names = repository.Split('/');
         var result = await _runGitHub(
-            ["pr", "checks", number.ToString(), "--repo", repository, "--required",
-             "--json", "name,state"], 60, ct);
+            ["api", "graphql", "-f", "query=" + query, "-f", "owner=" + names[0],
+             "-f", "name=" + names[1], "-f", "sha=" + sha, "-F", $"pr={number}"], 60, ct);
         if (!result.Ok) throw new InvalidOperationException("Required GitHub checks are not successful");
         using var document = JsonDocument.Parse(result.Output);
-        if (document.RootElement.ValueKind != JsonValueKind.Array)
-            throw new InvalidOperationException("Cannot read required GitHub checks");
-        var checks = document.RootElement.EnumerateArray().ToArray();
-        if (checks.Length == 0 || checks.Any(c => c.GetProperty("state").GetString() != "SUCCESS"))
+        var root = document.RootElement;
+        if (root.TryGetProperty("errors", out _))
+            throw new InvalidOperationException("GitHub returned incomplete check evidence");
+        var commit = root.GetProperty("data").GetProperty("repository").GetProperty("object");
+        if (commit.GetProperty("oid").GetString() != sha)
+            throw new InvalidOperationException("GitHub checks belong to a different commit");
+        var contexts = commit.GetProperty("statusCheckRollup").GetProperty("contexts");
+        if (contexts.GetProperty("pageInfo").GetProperty("hasNextPage").GetBoolean())
+            throw new InvalidOperationException("GitHub check listing exceeds the verification limit");
+        var checks = contexts.GetProperty("nodes").EnumerateArray()
+            .Where(c => c.GetProperty("isRequired").GetBoolean()).ToArray();
+        if (checks.Length == 0 || checks.Any(c =>
+            (c.TryGetProperty("conclusion", out var value) ? value : c.GetProperty("state")).GetString() != "SUCCESS"))
             throw new InvalidOperationException("Required GitHub checks are missing, pending or failing");
-        return checks.Select(c => c.GetProperty("name").GetString()!)
+        return checks.Select(c => (c.TryGetProperty("name", out var name) ? name : c.GetProperty("context")).GetString()!)
             .ToHashSet(StringComparer.Ordinal);
     }
 }

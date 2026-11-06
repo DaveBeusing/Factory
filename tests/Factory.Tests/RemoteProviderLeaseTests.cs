@@ -56,7 +56,8 @@ internal static class RemoteProviderLeaseTests
                 "Disabled mixed routing accepted a claim");
             settings.EnableRemoteProviderRouting = true;
             var workerToken = WorkerAuthentication.CreateToken(settings.WorkerTokenKey, worker);
-            foreach (var path in new[] { "/api/executor/turn", "/api/executor/turn/", "/API/Executor/Turn/" })
+            foreach (var path in new[] { "/api/executor/turn", "/api/executor/turn/", "/API/Executor/Turn/",
+                         "/api/executor/receipt", "/API/Executor/Receipt/" })
             {
                 Check(WorkerAuthentication.Authorized("POST", path, "Bearer " + token, null, settings),
                     "Dedicated executor authentication failed for " + path);
@@ -145,7 +146,30 @@ internal static class RemoteProviderLeaseTests
             Check(heldTurn.State == "held" && expired.ProviderBudgetReservations.Single(r => r.UsageId == heldTurn.UsageId).State == "held" &&
                 expired.BudgetReservations.Single(r => r.JobId == expiringJob.Id).State == GoalBudgetLedger.Held,
                 "Expiry released an uncertain liability");
+            var restarted = new StateStore(scratch.FullName);
+            var recovery = new RemoteReceiptRecoveryInput(true, "Verified durable executor receipt", false);
+            RemoteProviderRouting.SettleRecoveredReceipt(restarted, expiringJob.Id, interrupted.TurnId, recovery, Receipt(interrupted));
+            RemoteProviderRouting.SettleRecoveredReceipt(restarted, expiringJob.Id, interrupted.TurnId, recovery, Receipt(interrupted));
+            var settled = restarted.Read();
+            Check(settled.Jobs.Single(j => j.Id == expiringJob.Id) is { State: JobStates.Blocked, TokensIn: 30, TokensOut: 10 } &&
+                settled.RemoteProviderTurns.Single(t => t.Id == interrupted.TurnId).State == "reconciled" &&
+                settled.BudgetReservations.Single(r => r.JobId == expiringJob.Id) is { State: GoalBudgetLedger.Held, Consumed: 40 },
+                "Receipt recovery reopened the lease or charged its usage twice");
             await VerifyExecutorAsync(store, settings, scratch.FullName, builder, code);
+            using (var db = new SqliteConnection(new SqliteConnectionStringBuilder
+                { DataSource = Path.Combine(scratch.FullName, "factory.sqlite3"), Pooling = false }.ToString()))
+            {
+                db.Open();
+                using var command = db.CreateCommand();
+                command.CommandText = """
+                    ALTER TABLE remote_provider_turns DROP COLUMN grant_digest;
+                    ALTER TABLE remote_provider_turns DROP COLUMN hold_reason;
+                    PRAGMA user_version=10;
+                    """;
+                command.ExecuteNonQuery();
+            }
+            Check(new StateStore(scratch.FullName).Read().RemoteProviderTurns.Single(t => t.Id == interrupted.TurnId)
+                is { State: "reconciled", GrantDigest: "", HoldReason: "" }, "Schema 10 migration lost an existing turn");
         }
         finally
         {
@@ -190,7 +214,8 @@ internal static class RemoteProviderLeaseTests
             })
         };
 
-        GitHubWorkerResultVerifier Verifier(bool forcePush)
+        GitHubWorkerResultVerifier Verifier(bool forcePush, bool wrongCheckCommit = false, bool wrongBase = false,
+            bool intermediateHead = false)
         {
             var currentHead = Head;
             return new GitHubWorkerResultVerifier((args, _, _) =>
@@ -206,14 +231,25 @@ internal static class RemoteProviderLeaseTests
                     var repo = new { full_name = repository };
                     output = Json.Stringify(new
                     {
-                        state = "open", @base = new { repo, @ref = "master" },
+                        state = "open", @base = new { repo, @ref = "master", sha = Base },
                         head = new { repo, @ref = job.Branch, sha = currentHead }
                     });
                 }
-                else if (args is ["api", "--paginate", "--slurp", _])
-                    output = """[[{"filename":"fixture.txt"}]]""";
-                else if (args is ["pr", "checks", ..])
-                    output = """[{"name":"build","state":"SUCCESS"}]""";
+                else if (args is ["api", var comparePath] && comparePath == $"repos/{repository}/compare/{Base}...{Head}?per_page=1")
+                    output = Json.Stringify(new { base_commit = new { sha = wrongBase ? Tree : Base },
+                        files = new[] { new { filename = "fixture.txt", status = "modified" } } });
+                else if (args is ["api", "graphql", ..] && args.Contains("sha=" + Head))
+                {
+                    if (intermediateHead) currentHead = Base;
+                    output = Json.Stringify(new { data = new { repository = new { @object = new {
+                        oid = wrongCheckCommit ? Base : Head, statusCheckRollup = new { contexts = new {
+                            pageInfo = new { hasNextPage = false },
+                            // Checks at the intermediate head pass. The immutable original head is still pending.
+                            nodes = new[] { new { name = "build", isRequired = true,
+                                conclusion = intermediateHead ? null : "SUCCESS" } }
+                        } }
+                    } } } });
+                }
                 else
                     throw new Exception("Unexpected GitHub request: " + string.Join(" ", args));
                 return Task.FromResult(new CommandResult(0, output, ""));
@@ -222,15 +258,17 @@ internal static class RemoteProviderLeaseTests
 
         var stable = await Verifier(forcePush: false).VerifyAsync(project, job, status, CancellationToken.None);
         Check(stable.TreeSha == Tree, "Stable PR did not return the verified tree");
-        try
+        await RejectAsync(Verifier(forcePush: true), "head commit differs");
+        await RejectAsync(Verifier(forcePush: false, wrongCheckCommit: true), "checks belong to a different commit");
+        await RejectAsync(Verifier(forcePush: false, wrongBase: true), "different base commit");
+        await RejectAsync(Verifier(forcePush: false, intermediateHead: true), "missing, pending or failing");
+
+        async Task RejectAsync(GitHubWorkerResultVerifier verifier, string reason)
         {
-            await Verifier(forcePush: true).VerifyAsync(project, job, status, CancellationToken.None);
+            try { await verifier.VerifyAsync(project, job, status, CancellationToken.None); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains(reason, StringComparison.Ordinal)) { return; }
+            throw new Exception("Expected GitHub verification to reject: " + reason);
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("head commit differs", StringComparison.Ordinal))
-        {
-            return;
-        }
-        throw new Exception("A force-push during the tree lookup was accepted");
     }
 
     private static async Task VerifyExecutorAsync(StateStore store, FactorySettings settings, string scratch,
@@ -262,6 +300,14 @@ internal static class RemoteProviderLeaseTests
             new FixtureAgent(builder.Route.Model, expectReadOnly: false));
         Check(built.Success && built.Patch.Length != 0 && built.ObservedModel == builder.Route.Model,
             "Executor did not produce a model-bound patch");
+        var restarted = new StateStore(store.Home);
+        var saved = await RemoteProviderExecutor.ReadReceiptAsync(restarted,
+            new(builderGrant.TurnId, RemoteProviderExecutor.Digest(builderGrant)), ct);
+        Check(saved is { FinalUsage: true } && saved.OutputTree == built.OutputTree && saved.Patch.SequenceEqual(built.Patch),
+            "Executor restart lost the durable receipt");
+        Check(await RemoteProviderExecutor.ReadReceiptAsync(restarted,
+            new(builderGrant.TurnId, RemoteProviderExecutor.Digest(builderGrant with { Budget = builderGrant.Budget + 1 })), ct) is null,
+            "A conflicting grant retrieved another turn's receipt");
         var patch = Path.Combine(scratch, "executor.patch");
         await File.WriteAllBytesAsync(patch, built.Patch, ct);
         await Git("apply", "--index", "--binary", patch);
@@ -272,6 +318,24 @@ internal static class RemoteProviderLeaseTests
             TurnId = Guid.NewGuid(), Commit = await Git("rev-parse", "HEAD"), BaseCommit = baseCommit,
             ExpectedInputTree = built.OutputTree, Bundle = await Bundle()
         };
+        try
+        {
+            RemoteGitBundle.Validate(reviewGrant.Bundle, ct, maxExpandedBytes: 64);
+            throw new Exception("Executor accepted a bundle over the expanded object limit");
+        }
+        catch (InvalidDataException) { }
+        var foreign = await Git("-c", "user.name=Factory Fixture", "-c", "user.email=fixture@example.invalid",
+            "commit-tree", built.OutputTree, "-m", "Foreign history with the same tree");
+        await Git("checkout", "--detach", foreign);
+        var foreignGrant = reviewGrant with { TurnId = Guid.NewGuid(), Commit = foreign, Bundle = await Bundle() };
+        await Git("checkout", "--detach", reviewGrant.Commit);
+        try
+        {
+            await RemoteProviderExecutor.RunAsync(store, settings, foreignGrant, ct,
+                new FixtureAgent(reviewer.Route.Model, expectReadOnly: true));
+            throw new Exception("Executor accepted foreign history with the same tree");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.StartsWith("Executor Git command", StringComparison.Ordinal)) { }
         var reviewed = await RemoteProviderExecutor.RunAsync(store, settings, reviewGrant, ct,
             new FixtureAgent(reviewer.Route.Model, expectReadOnly: true));
         Check(reviewed.Success && reviewed.FinalText == "VERDICT: PASS" && reviewed.Patch.Length == 0,
@@ -283,6 +347,18 @@ internal static class RemoteProviderLeaseTests
             throw new Exception("Executor dispatched the same grant twice");
         }
         catch (IOException) { }
+
+        await File.WriteAllBytesAsync(Path.Combine(repository, "compressible.bin"), new byte[65536], ct);
+        await Git("add", "compressible.bin");
+        await Commit("Highly compressible object");
+        var compressed = await Bundle();
+        Check(compressed.Length < 16 * 1024, "Fixture bundle was larger than the expanded test limit");
+        try
+        {
+            RemoteGitBundle.Validate(compressed, ct, maxExpandedBytes: 16 * 1024);
+            throw new Exception("Executor accepted an oversized expanded object from a small bundle");
+        }
+        catch (InvalidDataException) { }
     }
 
     private sealed class FixtureAgent(string model, bool expectReadOnly) : IAgentRuntime

@@ -2,6 +2,33 @@ using Factory;
 
 internal static class BrowserRecoveryFixture
 {
+    public static void SeedProviderEvidence(string directory)
+    {
+        var store = new StateStore(directory);
+        store.Change(state =>
+        {
+            var project = new ProjectInfo { Name = "Provider evidence fixture", Path = directory };
+            var job = new FactoryJob { ProjectId = project.Id, Title = "Blocked provider fixture",
+                Mode = JobExecutionModes.Remote, State = JobStates.Blocked, Stage = "reconcile",
+                LeaseToken = "fixture-lease-secret" };
+            var lease = new RemoteProviderLease { JobId = job.Id, ExecutionGeneration = 4, WorkerId = "fixture" };
+            var usage = new ProviderUsageEntry { JobId = job.Id, ProjectId = project.Id,
+                ProviderId = "fixture-provider", Model = "requested-v1", Role = "builder", InputTokens = 60, OutputTokens = 30 };
+            state.Projects.Add(project);
+            state.Jobs.Add(job);
+            state.RemoteProviderLeases.Add(lease);
+            state.ProviderUsages.Add(usage);
+            state.ProviderBudgetReservations.Add(new ProviderBudgetReservation
+            {
+                UsageId = usage.Id, ProjectId = project.Id, ProviderId = usage.ProviderId,
+                Reserved = 512, Consumed = 90, State = "held"
+            });
+            state.RemoteProviderTurns.Add(new RemoteProviderTurn { Id = Guid.NewGuid(), LeaseId = lease.Id,
+                UsageId = usage.Id, Role = usage.Role, ObservedModel = "observed-v2", State = "held",
+                HoldReason = "Model mismatch requires review", GrantDigest = "fixture-receipt-digest" });
+        });
+    }
+
     public static void Seed(string home)
     {
         var store = new StateStore(home);

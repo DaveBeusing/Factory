@@ -549,6 +549,24 @@ function jobInspectorDetails(j,kv){
 }
 
 
+async function renderJobProviderTurns(jobId){
+ const target=$('inspector-provider-turns');
+ if(!target)return;
+ try{
+  const turns=await api('jobs/'+jobId+'/provider-turns');
+  if(inspectorKey!=='job:'+jobId||$('inspector-provider-turns')!==target)return;
+  const rows=turns.map(t=>`<tr><td>${esc(t.providerId)}<small>${esc(t.role)} · Lease generation ${esc(t.executionGeneration)}</small></td>
+   <td>${esc(t.requestedModel||'Unknown')}</td><td>${esc(t.observedModel||'Unavailable')}</td>
+   <td>${number(t.reserved)} / ${number(t.consumed)}</td>
+   <td>${badge(t.state)}${t.holdReason?`<small>${esc(t.holdReason)}</small>`:''}</td></tr>`).join('');
+  target.innerHTML=rows?table(['Provider and route','Requested model','Observed model','Reserved / recorded','Status'],rows):
+   '<p class="subtext">No remote provider turns recorded.</p>';
+ }catch(error){
+  if(inspectorKey==='job:'+jobId&&$('inspector-provider-turns')===target)
+   target.textContent='Provider evidence unavailable: '+error.message;
+ }
+}
+
 async function renderJobQuality(jobId){
  const target=$('inspector-job-quality');
  if(!target||inspectorKey!=='job:'+jobId)return;
@@ -686,6 +704,7 @@ function inspectorPanel(title,body){inspectorKey=null;$('inspector-title').textC
 function inspect(type,id){const entity=(type==='project'?state.projects:type==='goal'?state.goals:type==='worker'?state.workers:state.jobs).find(x=>(type==='worker'?x.id: x.id)===id);if(!entity)return;let body='';const kv=(label,v)=>`<div class="kv"><small>${esc(label)}</small><strong>${esc(v)}</strong></div>`;
  if(type==='job'){const j=entity;body=`${badge(j.state)}<div class="job-info-grid" style="margin-top:18px">${kv('Priority',j.priority)}${kv('Risk',j.risk)}${kv('Execution mode',j.mode)}${kv('Stage',j.stage)}${kv('Attempt',j.attempt)}${kv('Tokens',Number(j.tokensIn||0)+Number(j.tokensOut||0))}</div><h3>Description</h3><p class="subtext">${esc(j.description)}</p>${j.error?`<div class="badge danger">${esc(j.error)}</div>`:''}${kv('Branch',j.branch||'—')}${kv('Worktree',j.worktree||'—')}${kv('Head commit',j.headSha||'—')}${kv('Dependencies',j.dependsOn.join(', ')||'None')}${safeUrl(j.prUrl)?`<p><a href="${esc(safeUrl(j.prUrl))}" rel="noopener noreferrer" target="_blank">View pull request ↗</a></p>`:''}<hr class="panel-divider"><h3>Controls</h3><div class="queue-controls">${['queued'].includes(j.state)?`<button class="button button-primary" data-act="job-start" data-id="${j.id}" ${j.mode==='remote'?'disabled':''}>Run now</button><button class="button button-muted" data-control="job:${j.id}:pause">Pause</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop</button>`:''}${['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state)?`<button class="button button-muted" data-control="job:${j.id}:pause">Pause local</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop local</button>`:''}${['paused','stopped','blocked','failed'].includes(j.state)?`<button class="button button-primary" data-control="job:${j.id}:resume">Review & requeue</button>`:''}${['pr_ready','completed_local'].includes(j.state)?`<button class="button button-muted" data-act="verify" data-id="${j.id}">Verify integration</button>`:''}</div>`;
  body+=jobInspectorDetails(j,kv);
+ if(j.mode==='remote')body+='<hr class="panel-divider"><h3>Remote provider turns</h3><div id="inspector-provider-turns" aria-live="polite">Loading provider evidence...</div>';
   }else if(type==='project'){const p=entity;body=`${badge(p.status||'active')}<div class="job-info-grid" style="margin-top:18px">${kv('Base branch',p.baseBranch)}${kv('Concurrency',p.maxParallel)}</div>${kv('Path',p.path)}${kv('Origin',p.origin||'Local')}${kv('Checks',p.checks.length)}${kv('Protected paths',p.protectedPaths.join(', '))}<hr class="panel-divider"><div class="queue-controls"><button class="button button-muted" data-edit="project:${p.id}">Configure</button>${['paused','disabled'].includes(p.status)?`<button class="button button-primary" data-control="project:${p.id}:activate">Activate</button>`:`<button class="button button-muted" data-control="project:${p.id}:pause">Pause</button><button class="button button-muted" data-control="project:${p.id}:disable">Disable</button>`}<button class="button button-danger" data-control="project:${p.id}:archive">Archive</button></div>`;
  body+=`<p><button class="button button-muted" data-act="open-project-analysis" data-id="${p.id}">Review repository & plan goals</button></p><hr class="panel-divider"><h3>AI provider routing</h3><p class="subtext">Select models for planning, implementation and independent reviews. Configure local token ceilings per provider.</p><button class="button button-muted" data-act="project-providers" data-id="${p.id}">Configure AI providers</button>`;
  }else if(type==='goal'){const g=entity;body=`${badge(g.state)}${kv('Objective',g.objective)}${kv('Token budget',g.tokenBudget.toLocaleString())}<h3>Acceptance criteria</h3><ul>${g.acceptanceCriteria.map(c=>`<li>${esc(c)}</li>`).join('')}</ul><hr class="panel-divider"><div class="queue-controls"><button class="button button-muted" data-edit="goal:${g.id}">Edit</button>${g.state==='draft'?`<button class="button button-primary" data-control="goal:${g.id}:activate">Activate</button>`:''}${['active'].includes(g.state)?`<button class="button button-muted" data-control="goal:${g.id}:pause">Pause</button><button class="button button-muted" data-control="goal:${g.id}:stop">Stop</button><button class="button button-muted" data-control="goal:${g.id}:complete">Complete</button>`:''}${['paused','stopped'].includes(g.state)?`<button class="button button-primary" data-control="goal:${g.id}:activate">Resume</button>`:''}<button class="button button-muted" data-control="goal:${g.id}:archive">Archive</button></div>`;
@@ -695,7 +714,7 @@ function inspect(type,id){const entity=(type==='project'?state.projects:type==='
  inspectorPanel((type==='job'?entity.title:type==='goal'?shorten(entity.objective,40):type==='project'?entity.name:entity.id),body);
   inspectorKey=type+':'+id;
   if(type==='goal')renderGoalBudget(id);
-  if(type==='job')renderJobQuality(id);
+  if(type==='job'){renderJobQuality(id);renderJobProviderTurns(id);}
 }
 function preflightDetails(preflight){
  if(!preflight)return '<p class="subtext">Save or regenerate the plan to capture master and open work.</p>';

@@ -321,8 +321,8 @@ public static class WorkerProtocol
                     RemoteProviderRouting.VerifyCompletion(s, providerLease, req.Job!.HeadSha, tree);
                 if (!finalUsage)
                 {
-                    RemoteProviderRouting.HoldTurns(s, j);
                     failure = "Missing or inconsistent trusted provider turn evidence";
+                    RemoteProviderRouting.HoldTurns(s, j, failure);
                 }
                 remaining = GoalBudgetLedger.Record(s, j, j.TokensIn, j.TokensOut, finalUsage);
             }

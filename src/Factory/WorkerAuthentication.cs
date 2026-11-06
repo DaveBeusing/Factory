@@ -56,7 +56,8 @@ public static class WorkerAuthentication
         FactorySettings settings)
     {
         if (IsNamespace(path, "/api/executor"))
-            return string.Equals(path?.TrimEnd('/'), "/api/executor/turn", StringComparison.OrdinalIgnoreCase) &&
+            return (string.Equals(path?.TrimEnd('/'), "/api/executor/turn", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(path?.TrimEnd('/'), "/api/executor/receipt", StringComparison.OrdinalIgnoreCase)) &&
                 settings.EnableRemoteProviderExecutor && method.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
                 RemoteProviderRouting.ExecutorCredential(settings) is { } executor && WorkerProtocol.Authorized(bearer, executor);
         if (IsWorkerNamespace(path))

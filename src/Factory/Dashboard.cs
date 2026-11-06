@@ -64,7 +64,14 @@ public static class DashboardHost
                 await ctx.Response.WriteAsJsonAsync(new { error = ex.Message });
             }
         });
-        app.MapGet("/api/state", () => Results.Ok(store.Read()));
+        app.MapGet("/api/state", () =>
+        {
+            var snapshot = store.Read();
+            foreach (var job in snapshot.Jobs) job.LeaseToken = "";
+            foreach (var reservation in snapshot.BudgetReservations) reservation.LeaseToken = "";
+            foreach (var turn in snapshot.RemoteProviderTurns) turn.GrantDigest = "";
+            return Results.Ok(snapshot);
+        });
         app.MapGet("/api/usage", async (CancellationToken ct) => Results.Ok(await UsageMonitor.GetAsync(store.Home, ct)));
         app.MapGet("/api/providers", () =>
         {
@@ -331,6 +338,30 @@ public static class DashboardHost
         });
         app.MapPost("/api/executor/turn", async (RemoteExecutorGrant grant, CancellationToken ct) =>
             Results.Ok(await RemoteProviderExecutor.RunAsync(store, settings, grant, ct)));
+        app.MapPost("/api/executor/receipt", async (RemoteProviderExecutor.ReceiptQuery query, CancellationToken ct) =>
+            await RemoteProviderExecutor.ReadReceiptAsync(store, query, ct) is { } receipt
+                ? (IResult)Results.Ok(receipt) : Results.NotFound());
+        app.MapPost("/api/jobs/{id:guid}/provider-turns/{turnId:guid}/recover",
+            async (Guid id, Guid turnId, RemoteReceiptRecoveryInput input, CancellationToken ct) =>
+                Results.Ok(await RemoteProviderRouting.RecoverReceiptAsync(store, settings, id, turnId, input, ct)));
+        app.MapGet("/api/jobs/{id:guid}/provider-turns", (Guid id) =>
+        {
+            var snapshot = store.Read();
+            if (!snapshot.Jobs.Any(job => job.Id == id)) return (IResult)Results.NotFound();
+            var turns = from lease in snapshot.RemoteProviderLeases
+                        where lease.JobId == id
+                        join turn in snapshot.RemoteProviderTurns on lease.Id equals turn.LeaseId
+                        join usage in snapshot.ProviderUsages on turn.UsageId equals usage.Id
+                        join reservation in snapshot.ProviderBudgetReservations on usage.Id equals reservation.UsageId
+                        orderby turn.StartedAt descending
+                        select new
+                        {
+                            turn.Id, lease.ExecutionGeneration, turn.Role, usage.ProviderId, requestedModel = usage.Model,
+                            turn.ObservedModel, reservation.Reserved, reservation.Consumed, turn.State, turn.HoldReason,
+                            usage.FinalUsageReported
+                        };
+            return Results.Ok(turns.Take(100).ToArray());
+        });
         app.MapPost("/api/worker/turn", async (HttpContext ctx, RemoteProviderTurnRequest req, CancellationToken ct) =>
         {
             if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))

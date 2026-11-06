@@ -186,7 +186,11 @@ public static class MissionControlManager
             Require(g.ProjectId == input.ProjectId, "Cannot move goal to another project");
             Require(input.TokenBudget >= GoalBudgetLedger.Liability(s, id),
                 "Goal budget cannot be lowered below consumed and reserved tokens");
-            g.Objective = input.Objective.Trim(); g.AcceptanceCriteria = input.AcceptanceCriteria; g.TokenBudget = input.TokenBudget;
+            var objective = input.Objective.Trim();
+            var scopeChanged = g.Objective != objective || !g.AcceptanceCriteria.SequenceEqual(input.AcceptanceCriteria);
+            Require(!scopeChanged || !s.Jobs.Any(j => j.GoalId == id),
+                "Goals with work packages retain their adopted objective and acceptance criteria");
+            g.Objective = objective; g.AcceptanceCriteria = input.AcceptanceCriteria; g.TokenBudget = input.TokenBudget;
             Log(s, null, "goal_updated", g.Objective); return g;
         });
     }
@@ -442,16 +446,23 @@ public static class MissionControlManager
         var s = store.Read();
         var goal = s.Goals.Single(g => g.Id == plan.GoalId);
         Require(goal.State == "draft" && goal.ProjectId == plan.ProjectId, "Only draft goal plans are editable");
+        Require(plan.GoalRevision == Planning.GoalRevision(goal), "Goal changed; reopen the current goal before saving its plan");
         var p = s.Projects.Single(p => p.Id == goal.ProjectId);
         plan.Preflight = WorkPackagePreflight.Inspect(s, p, goal);
         plan.BaseCommit = plan.Preflight.BaseCommit;
-        Planning.Write(store, plan);
+        Planning.SaveRevision(store, plan, p);
         store.Event(null, "plan_saved", goal.Id.ToString());
         return plan;
     }
     public static FactoryPlan? ReadPlan(StateStore store, Guid goalId)
     {
         var file = Planning.PathFor(store, goalId);
-        return File.Exists(file) ? System.Text.Json.JsonSerializer.Deserialize<FactoryPlan>(File.ReadAllText(file), Json.Options) : null;
+        try
+        {
+            using var stream = File.Open(file, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            return System.Text.Json.JsonSerializer.Deserialize<FactoryPlan>(stream, Json.Options);
+        }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
     }
 }

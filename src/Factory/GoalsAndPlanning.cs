@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace Factory;
@@ -17,6 +19,8 @@ public sealed class FactoryPlan
     public Guid GoalId { get; set; }
     public Guid ProjectId { get; set; }
     public string BaseCommit { get; set; } = "";
+    public string GoalRevision { get; set; } = "";
+    public Guid? Revision { get; set; }
     public List<PlannedPackage> Packages { get; set; } = [];
     // Source/PR evidence used when drafting the work packages. Never interpreted as completeness proof.
     public WorkPackagePreflightReport? Preflight { get; set; }
@@ -25,20 +29,28 @@ public sealed class FactoryPlan
 public static class Planning
 {
     public static string PathFor(StateStore store, Guid goalId) => System.IO.Path.Combine(store.Home, "plans", $"{goalId:N}.json");
+    public static string GoalRevision(FactoryGoal goal) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            Json.Stringify(new { goal.Objective, goal.AcceptanceCriteria }))));
+
     public static Task<FactoryPlan> ProposeAsync(StateStore store, ProjectInfo project, FactoryGoal goal,
-        FactorySettings settings, CancellationToken ct)
+        FactorySettings settings, CancellationToken ct, Guid? expectedPlanRevision = null)
     {
         var state = store.Read();
         var route = ProviderRouter.Select(settings, state, project.Id, "planner", "medium");
         var profile = ProviderRouter.Resolve(settings, state, project.Id, "planner");
         var runtime = new ProjectScopedAgentRuntime(route.Runtime, store, project.Id, goal.Id,
             profile, "planner", route.Model, settings.GoalReservationTokens);
-        return ProposeAsync(store, project, goal, runtime, ct);
+        return ProposeAsync(store, project, goal, runtime, ct, expectedPlanRevision);
     }
 
-    public static async Task<FactoryPlan> ProposeAsync(StateStore store, ProjectInfo p, FactoryGoal goal, IAgentRuntime agent, CancellationToken ct)
+    public static async Task<FactoryPlan> ProposeAsync(StateStore store, ProjectInfo p, FactoryGoal goal, IAgentRuntime agent, CancellationToken ct, Guid? expectedPlanRevision = null)
     {
         var current = store.Read();
+        var existingRevision = MissionControlManager.ReadPlan(store, goal.Id)?.Revision;
+        if (expectedPlanRevision is { } expected && expected != (existingRevision ?? Guid.Empty))
+            throw new InvalidOperationException("Plan changed; reopen it before regenerating");
+        var goalRevision = GoalRevision(goal);
         var preflight = WorkPackagePreflight.Inspect(current, p, goal);
         if (GitOperations.Head(p.Path) != preflight.BaseCommit ||
             !string.IsNullOrWhiteSpace(GitOperations.Git(p.Path, "status", "--porcelain")))
@@ -74,17 +86,32 @@ public static class Planning
         plan.BaseCommit = preflight.BaseCommit;
         plan.Preflight = preflight;
         Validate(plan);
-        if (WorkPackagePreflight.MasterCommit(p) != plan.BaseCommit)
-            throw new InvalidOperationException("master advanced during planning; regenerate the proposal");
-        var latest = store.Read().Goals.Single(g => g.Id == goal.Id);
-        if (latest.State != "draft" || latest.Objective != goal.Objective ||
-            !latest.AcceptanceCriteria.SequenceEqual(goal.AcceptanceCriteria))
-            throw new InvalidOperationException("Goal changed during planning; regenerate the proposal");
-        Write(store, plan);
-        return plan;
+        plan.GoalRevision = goalRevision;
+        plan.Revision = existingRevision;
+        return SaveRevision(store, plan, p);
     }
 
-    internal static void Write(StateStore store, FactoryPlan plan)
+    internal static FactoryPlan SaveRevision(StateStore store, FactoryPlan plan, ProjectInfo source)
+    {
+        // All plan writes and adoptions take the same SQLite writer lock, including
+        // across CLI and dashboard processes. The file itself is replaced atomically.
+        return store.Change(state =>
+        {
+            var goal = state.Goals.Single(g => g.Id == plan.GoalId);
+            if (goal.State != "draft" || goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
+                throw new InvalidOperationException("Goal changed; reopen the current goal before saving its plan");
+            var project = state.Projects.Single(p => p.Id == goal.ProjectId);
+            if (project.Path != source.Path || WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
+                throw new InvalidOperationException("Project checkout or master changed; refresh the plan");
+            if (MissionControlManager.ReadPlan(store, goal.Id)?.Revision != plan.Revision)
+                throw new InvalidOperationException("Plan changed; reopen the latest revision before saving");
+            plan.Revision = Guid.NewGuid();
+            Write(store, plan);
+            return plan;
+        });
+    }
+
+    private static void Write(StateStore store, FactoryPlan plan)
     {
         var path = PathFor(store, plan.GoalId);
         Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
@@ -132,15 +159,22 @@ public static class Planning
         if (Enumerable.Range(0, visits.Length).Any(Walk)) throw new ArgumentException("Dependency cycle");
     }
     public static IReadOnlyList<FactoryJob> Adopt(StateStore store, Guid goalId, string mode,
-        bool reviewedExistingWork = false)
+        bool reviewedExistingWork = false, Guid planRevision = default)
     {
         if (mode is not ("local" or "remote")) throw new ArgumentException("mode must be local or remote");
-        var plan = JsonSerializer.Deserialize<FactoryPlan>(File.ReadAllText(PathFor(store, goalId)), Json.Options)
-            ?? throw new InvalidOperationException("Unreadable plan");
+        var plan = MissionControlManager.ReadPlan(store, goalId)
+            ?? throw new InvalidOperationException("No saved plan");
+        if (plan.Revision is null || string.IsNullOrEmpty(plan.GoalRevision))
+            throw new InvalidOperationException("Plan predates revision tracking; review and save it again before adoption");
+        if (planRevision == Guid.Empty || plan.Revision != planRevision)
+            throw new InvalidOperationException("Review and confirm the current plan revision before adoption");
         Validate(plan);
         var snapshot = store.Read();
         var requestedGoal = snapshot.Goals.Single(g => g.Id == goalId);
         var requestedProject = snapshot.Projects.Single(p => p.Id == requestedGoal.ProjectId);
+        if (plan.GoalId != goalId || plan.ProjectId != requestedProject.Id ||
+            plan.GoalRevision != GoalRevision(requestedGoal))
+            throw new InvalidOperationException("Goal changed; review and save or regenerate its plan before adoption");
         if (plan.Preflight is null || plan.Preflight.BaseCommit != plan.BaseCommit)
             throw new InvalidOperationException("Plan has no current master preflight; save or regenerate before adoption");
         var fresh = WorkPackagePreflight.Inspect(snapshot, requestedProject, requestedGoal);
@@ -167,9 +201,13 @@ public static class Planning
         {
             var goal = state.Goals.Single(g => g.Id == goalId);
             if (goal.State != "draft") throw new InvalidOperationException("Goal already adopted");
+            if (goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
+                throw new InvalidOperationException("Goal changed; review and save or regenerate its plan before adoption");
+            if (MissionControlManager.ReadPlan(store, goalId)?.Revision != planRevision)
+                throw new InvalidOperationException("Plan changed; review and confirm the current plan revision before adoption");
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             WorkPackagePreflight.RequireMaster(project);
-            if (WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
+            if (project.Path != requestedProject.Path || WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
                 throw new InvalidOperationException("master advanced; regenerate the plan");
             var jobs = plan.Packages.Select(pkg => new FactoryJob
             {

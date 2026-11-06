@@ -438,10 +438,37 @@ async function confirmControl(type,id,action){const label={activate:'Activate',p
  openForm(`${label} ${type}`,action==='pause'&&type==='queue'?'Active jobs continue; new scheduling pauses.':'Confirm this operational action.',html,async f=>{const x=values(f);const body={action,reason:x.reason||'',reviewed:!!f.elements.reviewed?.checked};if(type==='job'&&['resume','retry'].includes(action)&&state.jobs.find(j=>j.id===id)?.startedAt&&!body.reviewed)throw Error('Worktree review acknowledgement required');await mutate(`${type}s/${encodeURIComponent(id)}/action`,'POST',body);if(type==='worker')await fetchManagedWorkers()},label)}
 async function runQueue(action){if(action==='stop'){if(!confirm('Stop local active jobs at their next cancellation point and pause the queue? Remote work is not force-killed.'))return}await mutate('queue/'+action,'POST',{})}
 async function verify(id){if(!confirm('Verify this job is integrated into its base branch?'))return;await mutate(`jobs/${id}/verify`,'POST',{})}
-const plansCache=new Map(); let managedWorkers=[];async function loadPlans(){if(!token)return;try{const plans=await api('plans');plansCache.clear();for(const p of plans)if(p.plan)plansCache.set(p.id,p.plan);if(view==='plans')render()}catch{}}
-function planEditor(goalId){const g=state.goals.find(g=>g.id===goalId);if(!g)return;const existing=plansCache.get(goalId);planGoal=goalId;planDraft=structuredClone(existing||{goalId,projectId:g.projectId,baseCommit:'',packages:[]});renderPlanEditor()}
-function renderPlanEditor(){if(!planDraft)return;const html=`<div class="card" style="margin-top:17px"><div class="card-head"><div><h2>Work packages</h2><p>Select dependencies by title. The server validates paths and cycles before saving.</p></div><button class="button button-muted" data-act="package-add">${ico('plus')} Add package</button></div><div class="card-body"><div class="plan-packages">${planDraft.packages.length?planDraft.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(shorten(p.description,100))} · Priority ${p.priority} · ${esc(p.risk)} · Depends on ${esc(p.dependsOn.map(n=>planDraft.packages[n]?.title||('Package '+n)).join(', ')||'none')}</small></div><div class="tiny-actions"><button class="tiny-button" data-act="package-edit" data-index="${i}">Edit</button><button class="tiny-button" data-act="package-remove" data-index="${i}">Remove</button></div></div>`).join(''):empty('route','No packages yet','Add work packages and dependencies before saving.')}</div><div class="head-actions" style="margin-top:20px;justify-content:flex-end"><button class="button button-muted" data-act="plan-close">Cancel</button><button class="button button-primary" data-act="plan-save">${ico('check')} Save plan</button></div></div></div>`;$('inspector-title').textContent='Plan Designer';$('inspector-body').innerHTML=`<p class="muted">${esc(gName(planGoal))}</p>${html}`;showInspector()}
-const gName=id=>state.goals.find(g=>g.id===id)?.objective||'';
+const plansCache=new Map(), planGoals=new Map();
+let managedWorkers=[], planDraftGoal=null;
+async function loadPlans(){
+ if(!token)return;
+ try{
+  const plans=await api('plans');
+  plansCache.clear();planGoals.clear();
+  for(const entry of plans){
+   planGoals.set(entry.id,entry);
+   if(entry.plan)plansCache.set(entry.id,entry.plan);
+  }
+  if(view==='plans')render();
+ }catch{}
+}
+function planGoalContext(goal){
+ if(!goal)return '';
+ const criteria=goal.acceptanceCriteria.map(item=>'<li>'+esc(item)+'</li>').join('');
+ return '<h3>Current goal</h3><p class="subtext">'+esc(goal.objective)+'</p>'+
+  (criteria?'<ul aria-label="Acceptance criteria">'+criteria+'</ul>':'');
+}
+async function planEditor(goalId){
+ await loadPlans();
+ const goal=planGoals.get(goalId);
+ if(!goal||goal.state!=='draft')throw Error('Reload the goal planner before editing this draft');
+ const existing=plansCache.get(goalId);
+ planGoal=goalId;
+ planDraftGoal=goal;
+ planDraft={...structuredClone(existing||{goalId,projectId:goal.projectId,packages:[]}),goalRevision:goal.goalRevision};
+ renderPlanEditor();
+}
+function renderPlanEditor(){if(!planDraft)return;const html=`<div class="card" style="margin-top:17px"><div class="card-head"><div><h2>Work packages</h2><p>Select dependencies by title. The server validates paths and cycles before saving.</p></div><button class="button button-muted" data-act="package-add">${ico('plus')} Add package</button></div><div class="card-body"><div class="plan-packages">${planDraft.packages.length?planDraft.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(shorten(p.description,100))} · Priority ${p.priority} · ${esc(p.risk)} · Depends on ${esc(p.dependsOn.map(n=>planDraft.packages[n]?.title||('Package '+n)).join(', ')||'none')}</small></div><div class="tiny-actions"><button class="tiny-button" data-act="package-edit" data-index="${i}">Edit</button><button class="tiny-button" data-act="package-remove" data-index="${i}">Remove</button></div></div>`).join(''):empty('route','No packages yet','Add work packages and dependencies before saving.')}</div><div class="head-actions" style="margin-top:20px;justify-content:flex-end"><button class="button button-muted" data-act="plan-close">Cancel</button><button class="button button-primary" data-act="plan-save">${ico('check')} Save plan</button></div></div></div>`;$('inspector-title').textContent='Plan Designer';$('inspector-body').innerHTML=`${planGoalContext(planDraftGoal)}${html}`;showInspector()}
 function packageForm(i){
  const packages=planDraft.packages;
  const p=packages[i]||{title:'',description:'',risk:'medium',priority:50,files:[],dependsOn:[]};
@@ -652,7 +679,7 @@ function preflightDetails(preflight){
  ${section('Open pull requests',links(preflight.openPullRequests),preflight.pullRequestsChecked?'Inventory checked':preflight.pullRequestCheckNote||'Inventory unchecked')}
  ${section('Open issues',links(preflight.openIssues),preflight.issuesChecked?'Inventory checked':preflight.issueCheckNote||'Inventory unchecked')}`;
 }
-async function act(action,id,index){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'project-providers':formProjectProviders(id);break;
+async function act(action,id,index,revision){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'project-providers':formProjectProviders(id);break;
  case'analysis-run':await startProjectReview();break;case'analysis-goal':createReviewGoal(id);break;case'provider-reconcile':formProviderReconciliation(id);break;
  case'project-plans':planProject=id;nav('plans');await loadPlans();break;
  case'open-project-analysis':closeInspector();analysisProject=id;nav('analysis');await loadProjectReview(id);break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
@@ -664,32 +691,36 @@ async function act(action,id,index){switch(action){case'open-connection':$('conn
  if(plansCache.has(id)&&!confirm('Replace the saved plan with a new proposal?'))break;
  generatingPlans.add(id);render();
  try{
-  const plan=await api('plans/'+id+'/generate?wait=true','POST',{});
+  const expected=plansCache.get(id)?.revision||'00000000-0000-0000-0000-000000000000';
+  const plan=await api('plans/'+id+'/generate?wait=true&planRevision='+encodeURIComponent(expected),'POST',{});
   plansCache.set(id,plan);
   notify('Plan generated');
   if(view==='plans')await act('plan-view',id);
  }finally{generatingPlans.delete(id);render();await fetchProviders()}
  break;}
- case'plan-edit':planEditor(id);break;
+ case'plan-edit':await planEditor(id);break;
  case'plan-preflight':{
  const evidence=await api('goals/'+id+'/preflight');
  inspectorPanel('Check master & open work',preflightDetails(evidence));
  break;}
  case'plan-view':{
  const plan=plansCache.get(id);if(!plan)return;
- const goal=state.goals.find(g=>g.id===id);
+ const goal=planGoals.get(id);
  const packages=plan.packages.map((p,i)=>'<div class="package-row"><span class="package-num">'+(i+1)+'</span><div><strong>'+
   esc(p.title)+'</strong><small>'+esc(p.description)+'</small><small>Depends on '+esc(p.dependsOn.map(n=>plan.packages[n]?.title).join(', ')||'none')+
   '</small><small>Paths '+esc(p.files.join(', '))+'</small></div></div>').join('');
- const adopt=goal?.state==='draft'&&plan.preflight?'<button class="button button-primary" data-act="plan-adopt" data-id="'+id+'">Adopt reviewed plan</button>':'';
- inspectorPanel('Plan details','<p class="subtext">'+esc(gName(id))+'</p>'+preflightDetails(plan.preflight)+
+ const adoptable=plan.revision&&plan.preflight&&plan.goalRevision===goal?.goalRevision;
+ const adopt=goal?.state!=='draft'?'':adoptable
+  ?'<button class="button button-primary" data-act="plan-adopt" data-id="'+id+'" data-revision="'+esc(plan.revision)+'">Adopt reviewed plan</button>'
+  :'<span class="subtext">Review the current goal, then edit and save or regenerate this plan before adoption.</span>';
+ inspectorPanel('Plan details',planGoalContext(goal)+preflightDetails(plan.preflight)+
   '<h3>Proposed work packages</h3><div class="plan-packages">'+packages+'</div><p>'+adopt+'</p>');
  break;}
  case'plan-adopt':{
- const plan=plansCache.get(id);
- if(!plan?.preflight){notify('Save or regenerate the plan to establish a master preflight first',true);return}
+ if(!revision)throw Error('Open the current plan revision before adopting');
  if(!confirm('Before adopting: have you reviewed existing master code, partial implementations and relevant open PRs and issues, and confirmed that no duplicate work package will be created?'))return;
- await mutate(`plans/${id}/adopt`,'POST',{mode:'local',reviewedExistingWork:true});
+ await mutate(`plans/${id}/adopt`,'POST',{mode:'local',reviewedExistingWork:true,planRevision:revision});
+ closeInspector();
  break;
 }
  case'plan-close':closeInspector();planDraft=null;break;
@@ -710,7 +741,7 @@ document.addEventListener('click',async e=>{const btn=e.target.closest('[data-vi
  if(btn.dataset.inspect){const [type,id]=btn.dataset.inspect.split(':');inspect(type,decodeURIComponent(id));return}
  if(btn.dataset.edit){const [type,id]=btn.dataset.edit.split(':');if(type==='project')formProject(id);else if(type==='goal')formGoal(id);else if(type==='job')formJob(id);return}
  if(btn.dataset.control){const bits=btn.dataset.control.split(':');await confirmControl(bits[0],decodeURIComponent(bits[1]),bits[2]);return}
- if(btn.dataset.act)await act(btn.dataset.act,btn.dataset.id,btn.dataset.index)
+ if(btn.dataset.act)await act(btn.dataset.act,btn.dataset.id,btn.dataset.index,btn.dataset.revision)
  }catch(error){notify(error.message,true)}});
 $('modal-form').addEventListener('submit',async e=>{e.preventDefault();const btn=$('modal-submit');btn.disabled=true;try{if(modalHandler)await modalHandler(e.target);$('form-modal').close()}catch(error){notify(error.message,true)}finally{btn.disabled=false}});
 $('modal-close').addEventListener('click',()=>{$('form-modal').close()});$('modal-cancel').addEventListener('click',()=>$('form-modal').close());

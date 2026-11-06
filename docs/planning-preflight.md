@@ -23,10 +23,12 @@ Direct user-created jobs and test-audit-generated jobs must also pass this prefl
 A plan can be adopted using:
 
 ```powershell
-Factory adopt --goal <guid> --mode local --reviewed-existing-work
+Factory adopt --goal <guid> --plan-revision <revision-guid> --mode local --reviewed-existing-work
 ```
 
-Only supply `--reviewed-existing-work` after inspecting the implementation and checking pending PR and issue overlap. The API equivalent is `POST /api/plans/{goalId}/adopt` with `reviewedExistingWork: true`. `GET /api/goals/{goalId}/preflight` returns the current report.
+Only supply `--reviewed-existing-work` after inspecting the implementation and checking pending PR and issue overlap. Use the `revision` from the plan you reviewed. The API equivalent is `POST /api/plans/{goalId}/adopt` with `planRevision` and `reviewedExistingWork: true`. Read the saved plan with `GET /api/plans/{goalId}`. The planner list also supplies the current `goalRevision` for manual saves, which must include that value and the previously loaded plan `revision` when editing. `GET /api/goals/{goalId}/preflight` returns the current preflight report.
+
+Changing the objective or ordered acceptance criteria invalidates an existing draft plan. Reopen the current goal and review and save the plan again or regenerate it. Older plan files can be opened and saved to add revisions. Once work packages exist, the objective and criteria stay bound to that work. Token budgets remain editable subject to existing liabilities.
 
 ## Limitations
 

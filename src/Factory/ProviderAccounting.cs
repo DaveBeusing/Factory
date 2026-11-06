@@ -118,6 +118,14 @@ public sealed partial class StateStore
         using (var check = Command(db, tx, "SELECT COUNT(*) FROM projects WHERE id=$id", ("$id", projectId)))
             if (Convert.ToInt64(check.ExecuteScalar(), CultureInfo.InvariantCulture) != 1)
                 throw new ArgumentException("Unknown project");
+        using (var active = Command(db, tx, """
+            SELECT COUNT(*) FROM jobs WHERE project_id=$project AND mode='remote'
+            AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval')
+            AND lease_until>$now;
+            """, ("$project", projectId), ("$now", DateTimeOffset.UtcNow)))
+            if (Convert.ToInt64(active.ExecuteScalar(), CultureInfo.InvariantCulture) != 0)
+                throw new InvalidOperationException(
+                    "Provider routing cannot change while a remote execution is active; drain workers and reconcile first");
         Execute(db, tx, "DELETE FROM project_provider_routes WHERE project_id=$id", ("$id", projectId));
         foreach (var route in routes)
             Execute(db, tx, """

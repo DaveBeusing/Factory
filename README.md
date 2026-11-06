@@ -5,7 +5,7 @@
 Factory can manage multiple repositories and local or remote workers. Git pushes are opt-in; merges and deployments remain manual. An implemented branch is **not** treated as integrated until Factory verifies the change in the target branch.
 
 > [!IMPORTANT]
-> This distribution contains **source code**. The Mission Control redesign has not yet undergone a real .NET build or Windows end-to-end validation in the packaging environment. Build and run the included tests on your own machine before using it with production repositories. The .NET build and authenticated agent/GitHub integration have not been validated in the packaging environment.
+> This distribution contains **source code**. Windows/.NET 10 validation in GitHub Actions builds, runs the console-based test suite, and publishes the executable; this does not establish an authenticated end-to-end agent execution or a browser usability/security audit. Local native Codex/Claude Code authentication, production Git integration, and external account quota reporting require separate operator validation before use with sensitive repositories.
 
 ## Project review and multi-provider operation
 

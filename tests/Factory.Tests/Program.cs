@@ -164,6 +164,12 @@ Test("Master-first preflight rejects stale master and non-master projects", () =
             Packages = [new PlannedPackage { Title = "Diagnostics", Description = "Improve output",
                 Files = ["README.md"] }]
         });
+        try
+        {
+            Planning.Adopt(store, goal.Id, "local");
+            throw new Exception("Plan without matches bypassed review acknowledgement");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("explicit review")) { }
         File.AppendAllText(Path.Combine(repo, "README.md"), "\nUpdate");
         Git("add", ".");
         Git("commit", "-m", "Advance master");

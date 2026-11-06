@@ -332,6 +332,8 @@ Direct jobs also run a master-source and existing-work preflight. Review matchin
 
 The default branch mode is `local`. Remote branch publication requires an explicit mode and the configured permission to push. Git worktrees isolate independent tasks, while the dependency scheduler limits overlapping paths and resource contention.
 
+When using `test-audit --enqueue`, the same rule applies: inspect the existing master-based test implementation and outstanding work first, then add `--reviewed-existing-work`. Read-only audits that do not enqueue jobs are unchanged.
+
 ### Pausing and recovery
 
 ```powershell

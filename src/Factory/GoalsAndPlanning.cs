@@ -123,10 +123,11 @@ public static class Planning
             !fresh.OpenPullRequests.Select(p => p.Number).OrderBy(x => x)
                 .SequenceEqual(plan.Preflight.OpenPullRequests.Select(p => p.Number).OrderBy(x => x)))
             throw new InvalidOperationException("Matching open pull requests changed; refresh preflight and plan");
-        if ((fresh.ExistingCode.Count > 0 || fresh.ExistingJobs.Count > 0 ||
-                fresh.OpenPullRequests.Count > 0) && !reviewedExistingWork)
+        // A keyword scan cannot prove the absence of other implementations or PRs.
+        // Require the operator to acknowledge the review even when no candidates matched.
+        if (!reviewedExistingWork)
             throw new InvalidOperationException(
-                "Existing implementation or work candidates require explicit review before adopting new work packages");
+                "All new work packages require explicit review of existing master code and outstanding PRs before adoption");
         return store.Change(state =>
         {
             var goal = state.Goals.Single(g => g.Id == goalId);

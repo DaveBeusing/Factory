@@ -48,6 +48,15 @@ Restore into isolated state directories with workers stopped and claim admission
 
 For credential rotation, pause claims and drain or stop remote work. Replace `FACTORY_REMOTE_EXECUTOR_TOKEN` on both the controller and executor through their service secret stores. Restart both services, verify that the new credential can retrieve a retained receipt and that the previous credential is rejected, then resume. Rotation does not require changing grant digests, receipts or dispatch markers.
 
+### Downgrade an executor with held turns
+
+The previous executor reads receipt files only from `executor-dispatches`. A controller database rollback does not make files in `executor-receipts` visible to that executor.
+
+1. Pause new claims and stop workers. List the held remote turns in Mission Control and record each turn ID and its lease generation. If possible, recover and settle the held provider usage with the current executor before downgrading. Keep any turn without verified final usage held.
+2. Stop the controller and executor and take a coordinated backup of the current controller database, settings and both executor directories. Keep that copy and the current binary for recovery. Preserve the dispatch markers, which are the files named by turn ID without a suffix.
+3. If a held turn must remain recoverable on the previous executor, prepare an isolated copy of the executor state. For each affected turn, copy `<turn-id-without-hyphens>.receipt.json` from `executor-receipts` into `executor-dispatches` with the same name. Keep the original and verify that the copy has the same SHA-256. If a destination already exists, compare hashes and stop on a mismatch. Leave the extensionless dispatch marker in place. A missing marker or missing receipt requires investigation before resuming.
+4. Start the previous executor against the prepared state and start the controller with claims still paused. Confirm that the controller still contains the matching held turn and grant. Verify the receipt lookup with the configured executor credential. If a compatible controller backup would lose the hold or its grant, use the current controller and executor state to reconcile it first. Resume claims only after the remaining holds and any Git side effects are accounted for.
+
 ## Settle held usage
 
 1. In **Capacity → Held provider reservations**, select **Reconcile**. Enter verified final input and output totals for that **provider turn**, acknowledge the independent verification and record the evidence. Totals must be at least as high as the amounts already reported. A linked job must be inactive and have no lease owner.

@@ -34,6 +34,26 @@ if (args.FirstOrDefault() == "--safe-mode")
     }
 }
 
+if (Environment.GetEnvironmentVariable("FACTORY_PREFLIGHT_GH_HEAD") is { } fixtureHead &&
+    args is [var kind, "list", ..])
+{
+    var repository = Array.IndexOf(args, "--repo");
+    if (repository < 0 || args.ElementAtOrDefault(repository + 1) != "github.com/fixture/registered")
+        return 24;
+    if (kind == "issue")
+    {
+        Console.WriteLine("[]");
+        return 0;
+    }
+    if (kind != "pr" || !args.Contains("number,title,headRefName,headRefOid,url")) return 25;
+    Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new[]
+    {
+        new { number = 17, title = "Diagnostics changes", headRefName = "feature/diagnostics",
+            headRefOid = fixtureHead, url = "https://github.com/fixture/registered/pull/17" }
+    }));
+    return 0;
+}
+
 var results = new List<(string Name, bool Passed, string Error)>();
 void Test(string name, Action test)
 {
@@ -655,6 +675,108 @@ Test("Master-first preflight rejects stale master and non-master projects", () =
         catch (InvalidOperationException ex) when (ex.Message.Contains("must be based on master")) { }
     }
     finally { try { Directory.Delete(root, true); } catch { } }
+});
+
+Test("Preflight binds the live remote master and matching PR head to the registered repository", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-remote-preflight-" + Guid.NewGuid().ToString("N"));
+    var repo = Directory.CreateDirectory(Path.Combine(root, "repo")).FullName;
+    var bare = Path.Combine(root, "remote.git");
+    var author = Path.Combine(root, "author");
+    var commandPath = Environment.GetEnvironmentVariable("PATH");
+    const string fixtureVariable = "FACTORY_PREFLIGHT_GH_HEAD";
+    var previousHead = Environment.GetEnvironmentVariable(fixtureVariable);
+    var bin = AppContext.BaseDirectory;
+    var appHost = OperatingSystem.IsWindows() ? "Factory.Tests.exe" : "Factory.Tests";
+    var gh = Path.Combine(bin, OperatingSystem.IsWindows() ? "gh.exe" : "gh");
+    File.Copy(Path.Combine(bin, appHost), gh);
+    try
+    {
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(gh, File.GetUnixFileMode(Path.Combine(bin, appHost)));
+        Environment.SetEnvironmentVariable("PATH", bin + Path.PathSeparator + commandPath);
+        var head = new string('a', 40);
+        Environment.SetEnvironmentVariable(fixtureVariable, head);
+
+        void Commit(string path, string title)
+        {
+            GitOperations.Git(path, "add", ".");
+            GitOperations.Git(path, "-c", "user.name=Factory Fixture", "-c",
+                "user.email=fixture@example.invalid", "commit", "-m", title);
+        }
+        GitOperations.Git(repo, "init", "-b", "master");
+        File.WriteAllText(Path.Combine(repo, "README.md"), "# Original");
+        Commit(repo, "Original");
+        GitOperations.Git(root, "clone", "--bare", repo, bare);
+        GitOperations.Git(repo, "remote", "add", "origin", "https://github.com/fixture/wrong-origin.git");
+        GitOperations.Git(repo, "remote", "add", "upstream", "https://github.com/fixture/wrong-upstream.git");
+        const string registered = "https://github.com/fixture/registered.git";
+        var bareUrl = new Uri(bare).AbsoluteUri;
+        GitOperations.Git(repo, "config", $"url.{bareUrl}.insteadOf", registered);
+
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "Bound fixture", Path = repo, Origin = registered };
+        var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Improve diagnostics" };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
+        var plan = MissionControlManager.SavePlan(store, new FactoryPlan
+        {
+            GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
+            Packages = [new() { Title = "Diagnostics", Description = "Improve diagnostics", Files = ["README.md"] }]
+        });
+        var original = GitOperations.Head(repo);
+        Assert(plan.Preflight?.RemoteMasterStatus == "matched" && plan.Preflight.RemoteMasterCommit == original,
+            "Unexpected remote master evidence: " + plan.Preflight?.RemoteMasterStatus);
+        Assert(plan.Preflight?.GitHubRepository == "fixture/registered" &&
+            plan.Preflight.PullRequestsChecked && plan.Preflight.IssuesChecked,
+            "Inventory was not checked in the registered GitHub repository");
+        Assert(plan.Preflight!.OpenPullRequests.Single().HeadCommit == head);
+        var revision = plan.Revision!.Value;
+
+        void Reject(Action action, string message)
+        {
+            try { action(); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains(message, StringComparison.OrdinalIgnoreCase)) { return; }
+            throw new Exception("Expected rejection: " + message);
+        }
+
+        Environment.SetEnvironmentVariable(fixtureVariable, new string('b', 40));
+        Reject(() => Planning.Adopt(store, goal.Id, "local", true, revision), "or their heads changed");
+        Environment.SetEnvironmentVariable(fixtureVariable, head);
+
+        var moved = bare + ".offline";
+        Directory.Move(bare, moved);
+        var unavailable = WorkPackagePreflight.Inspect(store.Read(), project, goal);
+        Assert(unavailable.RemoteMasterStatus == "unavailable" && unavailable.RemoteMasterCommit is null);
+        Reject(() => Planning.Adopt(store, goal.Id, "local", true, revision), "remote master could not be rechecked");
+        Directory.Move(moved, bare);
+
+        GitOperations.Git(root, "clone", bare, author);
+        File.AppendAllText(Path.Combine(author, "README.md"), "\nAdvanced remote");
+        Commit(author, "Advance remote");
+        GitOperations.Git(author, "push", "origin", "master");
+        var advanced = GitOperations.Head(author);
+        var stale = WorkPackagePreflight.Inspect(store.Read(), project, goal);
+        Assert(stale.RemoteMasterStatus == "mismatch" && stale.RemoteMasterCommit == advanced);
+        Assert(stale.BaseCommit == original && GitOperations.Head(repo) == original);
+        Assert(!Commands.Run("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/remotes/origin/master"], repo).Ok,
+            "Live verification wrote a local remote-tracking ref");
+        Reject(() => Planning.Adopt(store, goal.Id, "local", true, revision), "Local master differs");
+        Reject(() => WorkPackagePreflight.InspectDirectJob(store.Read(), project, "Diagnostics", "Update diagnostics"),
+            "Local master differs");
+        Assert(store.Read().Jobs.Count == 0);
+        var workspace = Path.Combine(root, "worktrees");
+        Reject(() => new GitOperations(workspace).Prepare(project, new FactoryJob { ProjectId = project.Id }),
+            "Local master differs");
+        Assert(!Directory.Exists(workspace) || !Directory.EnumerateDirectories(workspace).Any(),
+            "A worktree was created from stale master");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("PATH", commandPath);
+        Environment.SetEnvironmentVariable(fixtureVariable, previousHead);
+        File.Delete(gh);
+        try { Directory.Delete(root, true); } catch { }
+    }
 });
 
 await TestAsync("Plan adoption requires the reviewed plan and current goal revisions", async () =>

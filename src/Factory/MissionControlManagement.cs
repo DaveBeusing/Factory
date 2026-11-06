@@ -230,6 +230,7 @@ public static class MissionControlManager
             RequiredExecutionCapabilities = input.RequiredExecutionCapabilities });
         if (preflight is not null)
             store.Event(job.Id, "job_preflight", "master " + preflight.BaseCommit +
+                "; remote master " + preflight.RemoteMasterStatus +
                 "; source candidates " + preflight.ExistingCode.Count +
                 "; existing work " + preflight.ExistingJobs.Count +
                 "; matching PRs " + preflight.OpenPullRequests.Count +
@@ -449,6 +450,7 @@ public static class MissionControlManager
         Require(plan.GoalRevision == Planning.GoalRevision(goal), "Goal changed; reopen the current goal before saving its plan");
         var p = s.Projects.Single(p => p.Id == goal.ProjectId);
         plan.Preflight = WorkPackagePreflight.Inspect(s, p, goal);
+        WorkPackagePreflight.RequireCurrentMaster(plan.Preflight.RemoteMasterStatus);
         plan.BaseCommit = plan.Preflight.BaseCommit;
         Planning.SaveRevision(store, plan, p);
         store.Event(null, "plan_saved", goal.Id.ToString());

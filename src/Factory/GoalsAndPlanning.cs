@@ -52,13 +52,15 @@ public static class Planning
             throw new InvalidOperationException("Plan changed; reopen it before regenerating");
         var goalRevision = GoalRevision(goal);
         var preflight = WorkPackagePreflight.Inspect(current, p, goal);
+        WorkPackagePreflight.RequireCurrentMaster(preflight.RemoteMasterStatus);
         if (GitOperations.Head(p.Path) != preflight.BaseCommit ||
             !string.IsNullOrWhiteSpace(GitOperations.Git(p.Path, "status", "--porcelain")))
             throw new InvalidOperationException(
                 "Planning must inspect a clean checkout at master; do not plan from a feature branch or uncommitted source.");
         var context = Json.Stringify(new
         {
-            preflight.BaseBranch, preflight.BaseCommit, preflight.SearchTerms,
+            preflight.BaseBranch, preflight.BaseCommit, preflight.RemoteMasterCommit, preflight.RemoteMasterStatus,
+            preflight.GitHubRepository, preflight.SearchTerms,
             preflight.ExistingCode, preflight.ExistingJobs, preflight.OpenPullRequests,
             preflight.PullRequestsChecked, preflight.PullRequestCheckNote,
             preflight.OpenIssues, preflight.IssuesChecked, preflight.IssueCheckNote,
@@ -101,7 +103,8 @@ public static class Planning
             if (goal.State != "draft" || goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
                 throw new InvalidOperationException("Goal changed; reopen the current goal before saving its plan");
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
-            if (project.Path != source.Path || WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
+            if (project.Path != source.Path || project.Origin != source.Origin ||
+                WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
                 throw new InvalidOperationException("Project checkout or master changed; refresh the plan");
             if (MissionControlManager.ReadPlan(store, goal.Id)?.Revision != plan.Revision)
                 throw new InvalidOperationException("Plan changed; reopen the latest revision before saving");
@@ -178,14 +181,19 @@ public static class Planning
         if (plan.Preflight is null || plan.Preflight.BaseCommit != plan.BaseCommit)
             throw new InvalidOperationException("Plan has no current master preflight; save or regenerate before adoption");
         var fresh = WorkPackagePreflight.Inspect(snapshot, requestedProject, requestedGoal);
+        WorkPackagePreflight.RequireCurrentMaster(fresh.RemoteMasterStatus);
         if (fresh.BaseCommit != plan.BaseCommit)
             throw new InvalidOperationException("master advanced since preflight; reassess and regenerate the plan");
+        if (plan.Preflight.RemoteMasterStatus == "matched" && fresh.RemoteMasterStatus != "matched")
+            throw new InvalidOperationException("Previously verified remote master could not be rechecked; refresh preflight");
+        if (!string.Equals(plan.Preflight.GitHubRepository, fresh.GitHubRepository, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("GitHub repository binding changed; refresh preflight and plan");
         if (plan.Preflight.PullRequestsChecked && !fresh.PullRequestsChecked)
             throw new InvalidOperationException("Open pull requests could not be rechecked; review before adoption");
         if (fresh.PullRequestsChecked &&
-            !fresh.OpenPullRequests.Select(p => p.Number).OrderBy(x => x)
-                .SequenceEqual(plan.Preflight.OpenPullRequests.Select(p => p.Number).OrderBy(x => x)))
-            throw new InvalidOperationException("Matching open pull requests changed; refresh preflight and plan");
+            !WorkPackagePreflight.PullRequestRevisions(fresh)
+                .SequenceEqual(WorkPackagePreflight.PullRequestRevisions(plan.Preflight)))
+            throw new InvalidOperationException("Matching open pull requests or their heads changed; refresh preflight and plan");
         if (plan.Preflight.IssuesChecked && !fresh.IssuesChecked)
             throw new InvalidOperationException("Open issues could not be rechecked; review before adoption");
         if (fresh.IssuesChecked &&
@@ -207,7 +215,8 @@ public static class Planning
                 throw new InvalidOperationException("Plan changed; review and confirm the current plan revision before adoption");
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             WorkPackagePreflight.RequireMaster(project);
-            if (project.Path != requestedProject.Path || WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
+            if (project.Path != requestedProject.Path || project.Origin != requestedProject.Origin ||
+                WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
                 throw new InvalidOperationException("master advanced; regenerate the plan");
             var jobs = plan.Packages.Select(pkg => new FactoryJob
             {

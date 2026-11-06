@@ -164,6 +164,7 @@ Environment: FACTORY_HOME overrides the local state directory.
                 });
                 if (preflight is not null)
                     store.Event(job.Id, "job_preflight", "master " + preflight.BaseCommit +
+                        "; remote master " + preflight.RemoteMasterStatus +
                         "; source candidates " + preflight.ExistingCode.Count +
                         "; existing work " + preflight.ExistingJobs.Count +
                         "; matching PRs " + preflight.OpenPullRequests.Count +

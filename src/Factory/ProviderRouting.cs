@@ -417,3 +417,61 @@ public static class ProviderBudgetReconciliation
         });
     }
 }
+
+public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore store, Guid projectId,
+    Guid? goalId, ProviderProfile profile, string role, string model, int reservationTokens) : IAgentRuntime
+{
+    public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
+    {
+        if (!readOnly)
+            throw new InvalidOperationException("Project-scoped analysis and planning must be read-only");
+        var usageId = store.Change(state =>
+        {
+            if (!state.Projects.Any(p => p.Id == projectId && p.Status == "active"))
+                throw new InvalidOperationException("Project is unavailable");
+            if (goalId.HasValue && !state.Goals.Any(g => g.Id == goalId && g.ProjectId == projectId))
+                throw new InvalidOperationException("Planning goal is missing");
+            return ProviderBudgetLedger.Begin(state,
+                new FactoryJob { Id = Guid.Empty, ProjectId = projectId, GoalId = goalId },
+                profile, role, model, reservationTokens).Id;
+        });
+        using var scope = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
+        bool reported = false;
+        bool completed = false;
+        bool limitReached = false;
+        long lastIn = 0, lastOut = 0;
+        void Observe(AgentTokenUsage usage)
+        {
+            if (usage.InputTokens < lastIn || usage.OutputTokens < lastOut) return;
+            var remaining = store.Change(state => ProviderBudgetLedger.Record(state, usageId, usage));
+            lastIn = usage.InputTokens; lastOut = usage.OutputTokens;
+            reported = true;
+            onUsage?.Invoke(usage);
+            if (remaining <= 0) { limitReached = true; scope.Cancel(); }
+        }
+        try
+        {
+            var result = await inner.RunAsync(directory, prompt, previousSession, scope.Token,
+                onSession, readOnly: true, onUsage: Observe);
+            if (result.UsageReported)
+                Observe(new AgentTokenUsage(result.InputTokens, result.OutputTokens));
+            if (limitReached) throw new TokenBudgetExceededException("Project provider reservation exhausted");
+            if (!result.UsageReported)
+                throw new TokenBudgetExceededException("Planning provider did not report final token usage");
+            store.Change(state => ProviderBudgetLedger.Finish(state, usageId, true));
+            completed = true;
+            return result;
+        }
+        catch (OperationCanceledException) when (limitReached && !cancellation.IsCancellationRequested)
+        {
+            throw new TokenBudgetExceededException("Project provider reservation exhausted");
+        }
+        finally
+        {
+            if (!completed)
+                store.Change(state => ProviderBudgetLedger.Finish(state, usageId, false));
+        }
+    }
+}

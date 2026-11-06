@@ -383,8 +383,29 @@ async function act(action,id,index){switch(action){case'open-connection':$('conn
  case'job-start':await mutate(`jobs/${id}/start`,'POST',{});break;
  case'plan-generate':await mutate(`plans/${id}/generate`,'POST',{});break;
  case'plan-edit':planEditor(id);break;
- case'plan-view':{const plan=plansCache.get(id);if(!plan)return;const groups=plan.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(p.description)} · Depends on ${p.dependsOn.join(', ')||'none'}</small></div></div>`).join('');inspectorPanel('Plan details',`<p class="subtext">${esc(gName(id))}</p><div class="plan-packages">${groups}</div>`);break;}
- case'plan-adopt':if(!confirm('Adopt the plan into executable work packages? This changes the goal from draft to active.'))return;await mutate(`plans/${id}/adopt`,'POST',{mode:'local'});break;
+ case'plan-view':{
+ const plan=plansCache.get(id);if(!plan)return;
+ const groups=plan.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(p.description)} · Depends on ${esc(p.dependsOn.join(', ')||'none')}</small></div></div>`).join('');
+ const preflight=plan.preflight;
+ const source=(preflight?.existingCode||[]).map(c=>`<li><strong>${esc(c.path)}</strong><small>${esc(c.sample||'Candidate on master')}</small></li>`).join('');
+ const jobs=(preflight?.existingJobs||[]).map(j=>`<li>${esc(j.title)} · ${esc(j.state)}${j.integrated?' · verified integrated':''}</li>`).join('');
+ const prs=(preflight?.openPullRequests||[]).map(pr=>`<li>${safeUrl(pr.url)?`<a href="${esc(safeUrl(pr.url))}" rel="noopener noreferrer" target="_blank">#${esc(pr.number)} ${esc(pr.title)}</a>`:`#${esc(pr.number)} ${esc(pr.title)}`}</li>`).join('');
+ const status=preflight?.pullRequestsChecked?'Open PR inventory checked':esc(preflight?.pullRequestCheckNote||'Open PR inventory not checked');
+ const findings=`<h3>Master-first preflight</h3>
+  <p class="subtext">Base: ${esc(preflight?.baseBranch||'Unknown')} · ${esc(plan.baseCommit||'Unknown')}</p>
+  <p class="subtext">${status}. Existing-code matches are candidates for inspection, not proof of completeness.</p>
+  <h4>Existing source on master</h4>${source?`<ul>${source}</ul>`:'<p class="subtext">No keyword matches found; manual review is still required.</p>'}
+  <h4>Existing Factory work</h4>${jobs?`<ul>${jobs}</ul>`:'<p class="subtext">No matching local jobs recorded.</p>'}
+  <h4>Matching open PRs</h4>${prs?`<ul>${prs}</ul>`:'<p class="subtext">No matching PR returned; check the verification status above.</p>'}`;
+ inspectorPanel('Plan details',`<p class="subtext">${esc(gName(id))}</p>${findings}<h3>Proposed work packages</h3><div class="plan-packages">${groups}</div>`);
+ break;}
+ case'plan-adopt':{
+ const plan=plansCache.get(id);
+ if(!plan?.preflight){notify('Save or regenerate the plan to establish a master preflight first',true);return}
+ if(!confirm('Before adopting: have you reviewed existing master code, partial implementations and relevant open PRs, and confirmed that no duplicate work package will be created?'))return;
+ await mutate(`plans/${id}/adopt`,'POST',{mode:'local',reviewedExistingWork:true});
+ break;
+}
  case'plan-close':closeInspector();planDraft=null;break;
  case'package-add':packageForm(planDraft.packages.length);break;
  case'package-edit':packageForm(Number(index));break;

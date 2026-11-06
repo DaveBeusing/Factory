@@ -9,6 +9,7 @@ Start with the [root README](../README.md) for installation, build and CLI comma
 - [Master-first preflight](planning-preflight.md) explains how to review source, jobs, pull requests and issues before adoption.
 - [Provider routing and budgets](providers.md) covers adapter capabilities, role assignments, goal and provider limits, and usage reporting.
 - [Recovery](recovery.md) covers expired leases, same-host and cross-host recovery, and settlement of held provider and goal reservations.
+- [LT-04 operator authorization design](operator-authorization.md) describes the proposed project roles, API boundaries and acceptance tests.
 
 ## Development and release
 

@@ -1,24 +1,61 @@
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Text.Json;
 
 namespace Factory;
 
 public static class RemoteProviderExecutor
 {
+    internal sealed record ReceiptQuery(Guid TurnId, string GrantDigest);
+    private sealed record SavedReceipt(string GrantDigest, RemoteExecutorReceipt Receipt);
+
+    internal static string Digest(RemoteExecutorGrant grant) =>
+        Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(grant, Json.Options)));
+
+    private static string ReceiptPath(StateStore store, Guid turnId) =>
+        Path.Combine(store.Home, "executor-dispatches", turnId.ToString("N") + ".receipt.json");
+
+    internal static async Task<RemoteExecutorReceipt?> ReadReceiptAsync(StateStore store, ReceiptQuery query, CancellationToken ct)
+    {
+        if (query.TurnId == Guid.Empty || query.GrantDigest is not { Length: 64 })
+            throw new ArgumentException("Invalid executor receipt lookup");
+        var path = ReceiptPath(store, query.TurnId);
+        if (!File.Exists(path)) return null;
+        using var stream = File.OpenRead(path);
+        var saved = await JsonSerializer.DeserializeAsync<SavedReceipt>(stream, Json.Options, ct);
+        return saved?.GrantDigest == query.GrantDigest ? saved.Receipt : null;
+    }
+
+    internal static async Task<RemoteExecutorReceipt?> FetchReceiptAsync(string url, string token, ReceiptQuery query, CancellationToken ct)
+    {
+        using var client = CreateClient(url, token, TimeSpan.FromSeconds(15));
+        using var response = await client.PostAsJsonAsync("api/executor/receipt", query, Json.Options, ct);
+        if (response.StatusCode == System.Net.HttpStatusCode.NotFound) return null;
+        response.EnsureSuccessStatusCode();
+        return await response.Content.ReadFromJsonAsync<RemoteExecutorReceipt>(Json.Options, ct);
+    }
+
     internal static async Task<RemoteExecutorReceipt> InvokeAsync(string url, string token, RemoteExecutorGrant grant, CancellationToken ct)
     {
-        if (!RemoteProviderRouting.IsExecutorUrl(url))
-            throw new InvalidOperationException("Invalid trusted executor URL");
-        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
-        {
-            BaseAddress = new Uri(url), Timeout = TimeSpan.FromMinutes(10),
-            MaxResponseContentBufferSize = 3 * RemoteProviderRouting.MaxPatchBytes
-        };
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var client = CreateClient(url, token, TimeSpan.FromMinutes(10));
         using var response = await client.PostAsJsonAsync("api/executor/turn", grant, Json.Options, ct);
         response.EnsureSuccessStatusCode();
         return await response.Content.ReadFromJsonAsync<RemoteExecutorReceipt>(Json.Options, ct)
             ?? throw new IOException("Trusted executor returned no receipt");
+    }
+
+    private static HttpClient CreateClient(string url, string token, TimeSpan timeout)
+    {
+        if (!RemoteProviderRouting.IsExecutorUrl(url))
+            throw new InvalidOperationException("Invalid trusted executor URL");
+        var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
+        {
+            BaseAddress = new Uri(url), Timeout = timeout,
+            MaxResponseContentBufferSize = 3 * RemoteProviderRouting.MaxPatchBytes
+        };
+        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        return client;
     }
 
     internal static async Task<RemoteExecutorReceipt> RunAsync(StateStore store, FactorySettings settings,
@@ -50,6 +87,7 @@ public static class RemoteProviderExecutor
         var token = timeout.Token;
         try
         {
+            RemoteGitBundle.Validate(grant.Bundle, token);
             var bundle = Path.Combine(scratch.FullName, "input.bundle");
             await File.WriteAllBytesAsync(bundle, grant.Bundle, token);
             var workspace = Directory.CreateDirectory(Path.Combine(scratch.FullName, "workspace")).FullName;
@@ -66,8 +104,14 @@ public static class RemoteProviderExecutor
                 if (remote != grant.Commit + "\trefs/heads/master" || grant.BaseCommit != grant.Commit)
                     throw new InvalidOperationException("Executor input is not the current repository master");
             }
-            else if (await GitAsync(workspace, token, "rev-parse", grant.Commit + "^{tree}") != grant.ExpectedInputTree)
-                throw new InvalidOperationException("Executor input differs from the last verified builder output");
+            else
+            {
+                await GitAsync(workspace, token, "merge-base", "--is-ancestor", grant.BaseCommit, grant.Commit);
+                if (await GitAsync(workspace, token, "rev-list", "--count", "--merges", grant.BaseCommit + ".." + grant.Commit) != "0")
+                    throw new InvalidOperationException("Executor input introduces history outside the verified base");
+                if (await GitAsync(workspace, token, "rev-parse", grant.Commit + "^{tree}") != grant.ExpectedInputTree)
+                    throw new InvalidOperationException("Executor input differs from the last verified builder output");
+            }
             await ValidateTreeAsync(workspace, grant.Commit, token);
             await GitAsync(workspace, token, "checkout", "--detach", grant.Commit);
 
@@ -118,9 +162,23 @@ public static class RemoteProviderExecutor
                     catch (Exception ex) when (ex is InvalidOperationException or IOException) { success = false; }
                 }
             }
-            return new RemoteExecutorReceipt(grant.TurnId, grant.LeaseId, grant.Route.ProviderId, grant.Route.Role,
+            var receipt = new RemoteExecutorReceipt(grant.TurnId, grant.LeaseId, grant.Route.ProviderId, grant.Route.Role,
                 grant.Commit, result.ObservedModel, result.InputTokens, result.OutputTokens, result.UsageReported, success,
                 success ? result.FinalText : "", result.FinalTextIsFallback, tree, patch);
+            // Write before replying so a lost HTTP response never loses a completed receipt.
+            var path = ReceiptPath(store, grant.TurnId);
+            var temporary = path + ".tmp";
+            try
+            {
+                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    JsonSerializer.Serialize(stream, new SavedReceipt(Digest(grant), receipt), Json.Options);
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(temporary, path);
+            }
+            finally { File.Delete(temporary); }
+            return receipt;
         }
         finally
         {

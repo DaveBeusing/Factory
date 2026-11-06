@@ -231,3 +231,26 @@ browserTest('recovers a foreign-host hold and settles linked provider and goal b
   const fixture = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
   execFileSync('dotnet', [fixture, '--browser-recovery-fixture', home], { timeout: 15_000 });
 });
+
+browserTest('shows held provider-turn evidence without exposing lease credentials', async ({ page, nav, inspector, api }) => {
+  const snapshot = await api('state');
+  const [job] = snapshot.jobs;
+  const turns = await api(`jobs/${job.id}/provider-turns`);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].consumed, 90);
+  for (const response of [snapshot, turns]) {
+    assert.doesNotMatch(JSON.stringify(response), /fixture-lease-secret|fixture-receipt-digest/);
+  }
+  await nav.getByRole('button', { name: 'Jobs', exact: false }).click();
+  await page.getByRole('row', { name: /Blocked provider fixture/ }).getByRole('button', { name: 'Inspect' }).click();
+  await inspector.getByRole('heading', { name: 'Remote provider turns' }).waitFor();
+  const evidence = inspector.getByRole('row', { name: /fixture-provider/ });
+  await evidence.getByText('requested-v1', { exact: true }).waitFor();
+  await evidence.getByText('observed-v2', { exact: true }).waitFor();
+  await evidence.getByText('512 / 90', { exact: true }).waitFor();
+  await evidence.getByText('Model mismatch requires review', { exact: true }).waitFor();
+  assert.doesNotMatch(await inspector.innerText(), /fixture-lease-secret|fixture-receipt-digest/);
+}, (home) => {
+  const fixture = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
+  execFileSync('dotnet', [fixture, '--browser-provider-evidence-fixture', home], { timeout: 15_000 });
+});

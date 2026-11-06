@@ -458,7 +458,11 @@ public static class ProviderBudgetReconciliation
         return job;
     }
 
-    public static object Reconcile(StateStore store, Guid reservationId, ProviderBudgetReconciliationInput input)
+    public static object Reconcile(StateStore store, Guid reservationId, ProviderBudgetReconciliationInput input) =>
+        Reconcile(store, reservationId, input, observedModel: null);
+
+    internal static object Reconcile(StateStore store, Guid reservationId, ProviderBudgetReconciliationInput input,
+        string? observedModel)
     {
         var evidence = EvidenceReason(input.Reviewed, input.Reason);
         if (input.FinalInputTokens < 0 || input.FinalOutputTokens < 0)
@@ -483,7 +487,11 @@ public static class ProviderBudgetReconciliation
             reservation.Consumed = consumed;
             reservation.State = "released";
             var remoteTurn = state.RemoteProviderTurns.SingleOrDefault(turn => turn.UsageId == usage.Id);
-            if (remoteTurn is { State: "held" }) remoteTurn.State = "reconciled";
+            if (remoteTurn is { State: "held" })
+            {
+                remoteTurn.State = "reconciled";
+                if (observedModel is not null) remoteTurn.ObservedModel = observedModel;
+            }
             state.Events.Add(new FactoryEvent { JobId = usage.JobId,
                 Type = "provider_budget_reconciled",
                 Message = "Provider " + usage.ProviderId + " usage " + usage.Id +

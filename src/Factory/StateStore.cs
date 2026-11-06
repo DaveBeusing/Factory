@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed class StateStore
 {
-    private const int DatabaseVersion = 10;
+    private const int DatabaseVersion = 11;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -287,10 +287,10 @@ public sealed class StateStore
                 position INTEGER NOT NULL, id TEXT PRIMARY KEY, lease_id TEXT NOT NULL REFERENCES remote_provider_leases(id),
                 usage_id TEXT NOT NULL REFERENCES provider_usages(id), role TEXT NOT NULL,
                 input_commit TEXT NOT NULL, output_tree TEXT NOT NULL, observed_model TEXT NOT NULL,
-                state TEXT NOT NULL, started_at TEXT NOT NULL
+                state TEXT NOT NULL, started_at TEXT NOT NULL, grant_digest TEXT NOT NULL, hold_reason TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_remote_provider_turns_lease ON remote_provider_turns(lease_id);
-            PRAGMA user_version=10;
+            PRAGMA user_version=11;
             """);
     }
 
@@ -302,6 +302,16 @@ public sealed class StateStore
         var schemaVersion = Convert.ToInt32(version.ExecuteScalar(), CultureInfo.InvariantCulture);
         if (schemaVersion == DatabaseVersion)
         {
+            tx.Commit();
+            return;
+        }
+        if (schemaVersion == 10)
+        {
+            Execute(db, tx, """
+                ALTER TABLE remote_provider_turns ADD COLUMN grant_digest TEXT NOT NULL DEFAULT '';
+                ALTER TABLE remote_provider_turns ADD COLUMN hold_reason TEXT NOT NULL DEFAULT '';
+                PRAGMA user_version=11;
+                """);
             tx.Commit();
             return;
         }

@@ -1,13 +1,20 @@
 # Provider routing and token budgets
 
-Factory has a provider-independent routing boundary with two currently implemented adapters:
+Factory has a provider-independent routing boundary with three currently implemented adapters:
 
 | Adapter | Execution | Read-only tasks | Token reporting | Account allowance |
 | --- | --- | --- | --- | --- |
 | Codex `exec` / `app-server` | Workspace write | Analysis, planning and reviews | Agent-reported | Account windows if supplied by Codex CLI |
+| Claude Code CLI | **Not supported** | Analysis, planning and reviews | CLI JSON, including cache input tokens when present | Unavailable |
 | Ollama local API | **Not supported** | Text-only analysis, planning and reviews | Final `prompt_eval_count` and `eval_count`, if supplied | Unavailable |
 
 The Ollama adapter uses the native .NET HTTP client, does not invoke repository commands, and accepts only an unauthenticated HTTP loopback endpoint. It connects directly with redirects and proxies disabled. It receives the bounded context embedded in the prompt; it cannot browse the repository independently. A route that does not satisfy the role's capabilities fails closed, particularly for builder assignments.
+
+## Claude Code
+
+Install and authenticate a native Claude Code CLI that supports `--safe-mode` and `--restricted`. Factory discovers the executable under the user profile's `.local/bin` or on an absolute `PATH` entry. Set `FACTORY_CLAUDE_EXECUTABLE` to an absolute executable path to override discovery. Use the provider's own authentication and configure a profile with `"kind": "claude"` and an optional `"model"` such as `"sonnet"`.
+
+Factory starts independent print-mode turns, disables session persistence, and restricts the CLI to Plan mode and the Read, Glob and Grep tools with no MCP servers. Safe mode disables Claude Code customizations. Restricted mode confines the CLI file tools to the working directories. These are CLI controls rather than OS sandboxing. Prompts and files read by the CLI can be sent to its configured inference service. See the [CLI reference](https://code.claude.com/docs/en/cli-reference) and [programmatic mode](https://code.claude.com/docs/en/headless).
 
 ## Setup
 
@@ -19,6 +26,7 @@ Modify the existing `~/.factory/settings.json` **without replacing controller cr
 {
   "providers": [
     { "id": "codex", "kind": "codex", "runtime": "exec", "model": "", "enabled": true, "tokenLimit": 0 },
+    { "id": "claude-review", "kind": "claude", "model": "sonnet", "enabled": true },
     { "id": "ollama-local", "kind": "ollama", "model": "your-installed-model", "endpoint": "http://127.0.0.1:11434", "enabled": true, "tokenLimit": 250000 }
   ]
 }
@@ -40,7 +48,7 @@ The CLI command `factory providers` shows configured profile metadata, project r
 
 The Capacity page distinguishes input tokens, output tokens, reservations, local token ceilings and account allowances. The project-filtered Goal planner shows project usage and the tighter of the profile and project ceilings. The goal budget inspector also shows attributed input and output tokens by provider, model and role. These historical rows may cover less usage than the full goal ledger. Codex weekly/short-window account percentages are displayed only if reported by the Codex CLI; other providers show unavailable. An account percentage is **never** derived from local usage and is not interchangeable with a local token ceiling.
 
-Provider pricing, monetary billing, provider-specific remaining API credits and remote-worker heterogeneous routing are not implemented. Remote claims are therefore refused for projects with explicit provider assignments or provider budgets, or whenever a provider-wide token cap is configured. This is a fail-closed transition until the remote claim protocol can carry and independently verify provider policy and usage provenance. There is no automatic provider fallback: a missing provider or unsupported required capability blocks that action rather than silently switching or relaxing a security policy.
+Capacity and the `factory providers` command show provider-reported USD totals by provider profile and project. They sum the estimates the CLI returned, including structured error results when a cost is present. A missing report stays unknown, and historical records keep a null cost after upgrading to schema 9. Claude Code reports an estimate that can differ from the invoice. Costs remain separate from token ceilings and account quotas. Provider-specific remaining API credits and remote-worker heterogeneous routing are unavailable. Remote claims are therefore refused for projects with explicit provider assignments or provider budgets, or whenever a provider-wide token cap is configured. This is a fail-closed transition until the remote claim protocol can carry and independently verify provider policy and usage provenance. There is no automatic provider fallback: a missing provider or unsupported required capability blocks that action rather than silently switching or relaxing a security policy.
 
 ## Security
 

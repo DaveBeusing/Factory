@@ -74,9 +74,12 @@ public static class DashboardHost
                 profiles = settings.Providers.Select(p => new
                 {
                     p.Id, p.Kind, p.Model, p.Enabled, p.TokenLimit,
-                    capabilities = p.Kind == "codex"
-                        ? new[] { "read-only", "workspace-write", "token-usage", "session" }
-                        : new[] { "read-only", "text-only", "token-usage" }
+                    capabilities = p.Kind switch
+                    {
+                        "codex" => new[] { "read-only", "workspace-write", "token-usage", "session" },
+                        "claude" => new[] { "read-only", "token-usage", "reported-cost" },
+                        _ => new[] { "read-only", "text-only", "token-usage" }
+                    }
                 }),
                 assignments = snapshot.ProviderAssignments,
                 budgets = snapshot.ProviderBudgetLimits,

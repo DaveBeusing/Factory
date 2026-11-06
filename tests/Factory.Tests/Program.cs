@@ -10,6 +10,30 @@ if (args is ["--provider-crash-fixture", var fixtureHome, var projectArg, var go
     return 1;
 }
 
+if (args.FirstOrDefault() == "--safe-mode")
+{
+    var expected = new[] { "--safe-mode", "--restricted", "--print", "--output-format", "json", "--no-session-persistence",
+        "--permission-mode", "plan", "--tools", "Read,Glob,Grep", "--disable-slash-commands",
+        "--strict-mcp-config", "--mcp-config", "{}", "--disallowed-tools", "mcp__*", "--no-chrome",
+        "--model", "sonnet" };
+    if (!args.SequenceEqual(expected)) return 23;
+    var prompt = await Console.In.ReadToEndAsync();
+    switch (prompt)
+    {
+        case "complete":
+            Console.WriteLine("""{"type":"result","subtype":"success","is_error":false,"result":"fixture","usage":{"input_tokens":8,"output_tokens":4,"cache_read_input_tokens":2,"cache_creation_input_tokens":3},"total_cost_usd":0.012345}""");
+            return 0;
+        case "cost-only failure":
+            Console.WriteLine("""{"type":"result","subtype":"error_during_execution","is_error":true,"total_cost_usd":0.000004}""");
+            return 1;
+        case "missing cost":
+            Console.WriteLine("""{"type":"result","subtype":"success","is_error":false,"result":"fixture","usage":{"input_tokens":1,"output_tokens":1}}""");
+            return 0;
+        default:
+            return 24;
+    }
+}
+
 var results = new List<(string Name, bool Passed, string Error)>();
 void Test(string name, Action test)
 {
@@ -250,6 +274,7 @@ Test("Schema 7 provider reservations upgrade to held without releasing capacity"
             db.Open();
             using var downgrade = db.CreateCommand();
             downgrade.CommandText = """
+                ALTER TABLE provider_usages DROP COLUMN reported_cost_micros;
                 ALTER TABLE provider_budget_reservations DROP COLUMN owner_process_id;
                 ALTER TABLE provider_budget_reservations DROP COLUMN owner_machine;
                 ALTER TABLE provider_budget_reservations DROP COLUMN owner_started_at;
@@ -312,6 +337,105 @@ await TestAsync("A failed provider debit rolls back the matching goal debit", as
         Assert(state.ProviderUsages.Sum(u => u.InputTokens + u.OutputTokens) == 12);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Schema 8 upgrade retains usage and leaves historical cost unknown", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-cost-upgrade-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "schema 8 fixture" };
+        store.Change(s =>
+        {
+            s.Projects.Add(project);
+            var usage = ProviderBudgetLedger.Begin(s, new FactoryJob { Id = Guid.Empty, ProjectId = project.Id },
+                new ProviderProfile(), "analysis", "fixture", 512);
+            ProviderBudgetLedger.Record(s, usage.Id, new(8, 4));
+            ProviderBudgetLedger.Finish(s, usage.Id, true);
+        });
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var downgrade = db.CreateCommand();
+            downgrade.CommandText = "ALTER TABLE provider_usages DROP COLUMN reported_cost_micros; PRAGMA user_version=8;";
+            downgrade.ExecuteNonQuery();
+        }
+        var usageAfterUpgrade = new StateStore(home).Read().ProviderUsages.Single();
+        Assert(usageAfterUpgrade.InputTokens == 8 && usageAfterUpgrade.OutputTokens == 4 &&
+            usageAfterUpgrade.FinalUsageReported && usageAfterUpgrade.ReportedCostMicros is null);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Claude CLI uses independent read-only turns and persists reported costs", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-claude-" + Guid.NewGuid().ToString("N"));
+    const string executableVariable = "FACTORY_CLAUDE_EXECUTABLE";
+    var previousExecutable = Environment.GetEnvironmentVariable(executableVariable);
+    try
+    {
+        var executable = Path.Combine(AppContext.BaseDirectory, OperatingSystem.IsWindows() ? "Factory.Tests.exe" : "Factory.Tests");
+        Environment.SetEnvironmentVariable(executableVariable, executable);
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "Claude fixture" };
+        var goal = new FactoryGoal { ProjectId = project.Id, TokenBudget = 4096 };
+        var job = new FactoryJob { ProjectId = project.Id };
+        var profile = new ProviderProfile { Id = "claude-fixture", Kind = "claude", Model = "sonnet", TokenLimit = 4096 };
+        var settings = new FactorySettings { Providers = [new(), profile] };
+        var fence = store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job);
+            foreach (var role in new[] { "planner", "review:code" })
+                s.ProviderAssignments.Add(new() { ProjectId = project.Id, Role = role, ProviderId = profile.Id });
+            return JobRecovery.Assign(job, "claude-fixture", 60, local: true);
+        });
+        try { ProviderRouter.Validate(profile, "builder"); throw new Exception("Claude accepted a builder assignment"); }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("read-only")) { }
+
+        var planner = ProviderRouter.Select(settings, store.Read(), project.Id, "planner", "medium");
+        try
+        {
+            await planner.Runtime.RunAsync(home, "complete", Guid.NewGuid().ToString(), CancellationToken.None, readOnly: true);
+            throw new Exception("Claude accepted session continuation");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("independent")) { }
+
+        var projectRuntime = new ProjectScopedAgentRuntime(planner.Runtime, store, project.Id, goal.Id,
+            profile, planner.Role, planner.Model, 512);
+        Assert((await projectRuntime.RunAsync(home, "complete", "", CancellationToken.None, readOnly: true)).Success);
+        try
+        {
+            await projectRuntime.RunAsync(home, "cost-only failure", "", CancellationToken.None, readOnly: true);
+            throw new Exception("Claude accepted missing final token usage");
+        }
+        catch (TokenBudgetExceededException) { }
+
+        var reviewer = ProviderRouter.Select(settings, store.Read(), project.Id, "review:code", "medium");
+        var jobRuntime = new BudgetedAgentRuntime(reviewer.Runtime, store, job.Id, fence,
+            provider: new JobProviderMeter(profile, reviewer.Role, reviewer.Model, 512));
+        Assert((await jobRuntime.RunAsync(home, "complete", "", CancellationToken.None, readOnly: true)).Success);
+        Assert((await jobRuntime.RunAsync(home, "missing cost", "", CancellationToken.None, readOnly: true)).Success);
+
+        var persisted = new StateStore(home).Read();
+        var reported = persisted.ProviderUsages.Where(u => u.JobId is null && u.FinalUsageReported).Single();
+        Assert(reported.InputTokens == 13 && reported.OutputTokens == 4 && reported.ReportedCostMicros == 12345);
+        var incomplete = persisted.ProviderUsages.Single(u => !u.FinalUsageReported);
+        Assert(incomplete.ReportedCostMicros == 4);
+        Assert(persisted.ProviderBudgetReservations.Single(r => r.UsageId == incomplete.Id).State == "held");
+        Assert(persisted.ProviderUsages.Single(u => u.ReportedCostMicros is null).JobId == job.Id);
+        Assert(persisted.Jobs.Single().TokensIn == 14 && persisted.Jobs.Single().TokensOut == 5);
+        using var summary = System.Text.Json.JsonDocument.Parse(Json.Stringify(ProviderBudgetLedger.Summary(persisted, settings)));
+        Assert(summary.RootElement[0].GetProperty("reportedCostUsd").ValueKind == System.Text.Json.JsonValueKind.Null);
+        Assert(summary.RootElement[1].GetProperty("reportedCostUsd").GetDecimal() == 0.024694m);
+        Assert(summary.RootElement[1].GetProperty("projects")[0].GetProperty("reportedCostUsd").GetDecimal() == 0.024694m);
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable(executableVariable, previousExecutable);
+        try { Directory.Delete(home, true); } catch { }
+    }
 });
 
 Test("Project review yields commit-bound findings and draft goals", () =>
@@ -1602,7 +1726,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 8, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 9, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -2107,7 +2231,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 8);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 9);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -2607,7 +2731,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 8);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 9);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

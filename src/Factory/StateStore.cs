@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed class StateStore
 {
-    private const int DatabaseVersion = 8;
+    private const int DatabaseVersion = 9;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -212,7 +212,7 @@ public sealed class StateStore
                 execution_generation INTEGER NOT NULL,
                 provider_id TEXT NOT NULL, model TEXT NOT NULL, role TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
-                final_usage_reported INTEGER NOT NULL, at TEXT NOT NULL
+                final_usage_reported INTEGER NOT NULL, at TEXT NOT NULL, reported_cost_micros INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_provider_usage_scope
                 ON provider_usages(provider_id,project_id,job_id);
@@ -226,7 +226,7 @@ public sealed class StateStore
             );
             CREATE INDEX IF NOT EXISTS idx_provider_reservation_scope
                 ON provider_budget_reservations(provider_id,project_id,state);
-            PRAGMA user_version=8;
+            PRAGMA user_version=9;
             """);
     }
 
@@ -282,17 +282,21 @@ public sealed class StateStore
             tx.Commit();
             return;
         }
-        if (schemaVersion == 7)
+        if (schemaVersion is 7 or 8)
         {
-            // Version 7 recorded no invocation owner. Upgrades require stopped controllers.
-            // Preserve uncertain usage as a held liability for explicit reconciliation.
-            Execute(db, tx, """
-                ALTER TABLE provider_budget_reservations ADD COLUMN owner_process_id INTEGER NOT NULL DEFAULT 0;
-                ALTER TABLE provider_budget_reservations ADD COLUMN owner_machine TEXT NOT NULL DEFAULT '';
-                ALTER TABLE provider_budget_reservations ADD COLUMN owner_started_at TEXT;
-                UPDATE provider_budget_reservations SET state='held' WHERE state='active';
-                PRAGMA user_version=8;
-                """);
+            Execute(db, tx, "ALTER TABLE provider_usages ADD COLUMN reported_cost_micros INTEGER;");
+            if (schemaVersion == 7)
+            {
+                // Version 7 recorded no invocation owner. Upgrades require stopped controllers.
+                // Preserve uncertain usage as a held liability for explicit reconciliation.
+                Execute(db, tx, """
+                    ALTER TABLE provider_budget_reservations ADD COLUMN owner_process_id INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE provider_budget_reservations ADD COLUMN owner_machine TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE provider_budget_reservations ADD COLUMN owner_started_at TEXT;
+                    UPDATE provider_budget_reservations SET state='held' WHERE state='active';
+                    """);
+            }
+            Execute(db, tx, "PRAGMA user_version=9;");
             tx.Commit();
             return;
         }

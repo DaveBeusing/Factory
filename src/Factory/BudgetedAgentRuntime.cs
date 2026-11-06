@@ -71,6 +71,7 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
             bool budgetReached = false;
             bool sawUsage = false;
             bool finalUsage = false;
+            long? reportedCostMicros = null;
 
             void Record(AgentTokenUsage usage)
             {
@@ -119,6 +120,7 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
             {
                 var result = await inner.RunAsync(directory, prompt, previousSession, scope.Token,
                     onSession, readOnly, Record);
+                reportedCostMicros = result.ProviderReportedCostMicros;
                 if (result.UsageReported)
                 {
                     Record(new AgentTokenUsage(result.InputTokens, result.OutputTokens));
@@ -154,7 +156,7 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
             finally
             {
                 if (providerUsageId is { } id)
-                    store.Change(state => ProviderBudgetLedger.Finish(state, id, finalUsage));
+                    store.Change(state => ProviderBudgetLedger.Finish(state, id, finalUsage, reportedCostMicros));
             }
         }
         finally { TurnLock.Release(); }

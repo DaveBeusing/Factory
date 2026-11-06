@@ -263,7 +263,7 @@ public static class ProviderBudgetLedger
                         .Sum(x => checked(x.InputTokens + x.OutputTokens));
                     var projectPending = state.ProviderBudgetReservations.Where(r =>
                         r.ProviderId == profile.Id && r.ProjectId == p.Id && r.State != "released")
-                        .Sum(r => checked(r.Reserved - r.Consumed));
+                        .Sum(r => Math.Max(0, checked(r.Reserved - r.Consumed)));
                     return new { projectId = p.Id, p.Name, configuredLimit = limit,
                         observedTokens = projectSpent, reservedTokens = projectPending,
                         remainingTokens = limit > 0 ? (long?)Math.Max(0, limit - projectSpent - projectPending) : null };

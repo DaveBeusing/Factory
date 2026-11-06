@@ -59,7 +59,7 @@ Factory | C# / .NET 10
   release --project NAME --version X.Y.Z
   dashboard [--port 8787] | worker --server HTTPS_URL --workspace DIR --id WORKER_ID
   worker-token --id WORKER_ID
-  usage | install-skills [--overwrite]
+  usage | providers | install-skills [--overwrite]
 Environment: FACTORY_HOME overrides the local state directory.
 """);
             return 0;
@@ -88,6 +88,18 @@ Environment: FACTORY_HOME overrides the local state directory.
         {
             case "usage":
                 Print(await UsageMonitor.GetAsync(Home, CancellationToken.None)); return 0;
+            case "providers":
+                Print(new
+                {
+                    profiles = settings.Providers.Select(p => new
+                    {
+                        p.Id, p.Kind, p.Model, p.Enabled, p.TokenLimit
+                    }),
+                    assignments = store.Read().ProviderAssignments,
+                    projectBudgets = store.Read().ProviderBudgetLimits,
+                    consumption = ProviderBudgetLedger.Summary(store.Read(), settings)
+                });
+                return 0;
             case "doctor":
             {
                 var tools = new[] { "dotnet", "git", "codex", "gh" };

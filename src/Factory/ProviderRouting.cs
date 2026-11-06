@@ -282,7 +282,10 @@ public static class ProviderBudgetLedger
         catch (System.ComponentModel.Win32Exception) { return false; }
     }
 
-    public static long Record(FactoryState state, Guid usageId, AgentTokenUsage total, long? reportedCostMicros = null)
+    public static long Record(FactoryState state, Guid usageId, AgentTokenUsage total) =>
+        Record(state, usageId, total, reportedCostMicros: null);
+
+    internal static long Record(FactoryState state, Guid usageId, AgentTokenUsage total, long? reportedCostMicros)
     {
         var entry = state.ProviderUsages.Single(x => x.Id == usageId);
         var reservation = state.ProviderBudgetReservations.FirstOrDefault(x => x.UsageId == usageId);

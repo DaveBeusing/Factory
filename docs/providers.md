@@ -36,6 +36,8 @@ For configured local caps, Factory makes a transactional invocation reservation 
 
 The goal budget remains a separate control: execution runs are still governed by the existing goal ledger, and goal-specific plan generation is accounted for in provider usage and goal-level consumed/reserved totals. Usage from before this migration cannot be reconstructed and is not assigned to an invented provider.
 
+The CLI command `factory providers` shows configured profile metadata, project role assignments, local budget limits and attributed consumption without exporting credentials. The original `factory usage` command continues to expose account-reported Codex allowance windows.
+
 The Capacity page distinguishes input tokens, output tokens, reservations, total local limit/remaining, and provider account allowances. Codex weekly/short-window account percentages are displayed only if reported by the Codex CLI; other providers show unavailable. An account percentage is **never** derived from local usage and is not interchangeable with a local token ceiling.
 
 Provider pricing, monetary billing, provider-specific remaining API credits and remote-worker heterogeneous routing are not implemented. Remote claims are therefore refused for projects with explicit provider assignments or provider budgets, or whenever a provider-wide token cap is configured. This is a fail-closed transition until the remote claim protocol can carry and independently verify provider policy and usage provenance. There is no automatic provider fallback: a missing provider or unsupported required capability blocks that action rather than silently switching or relaxing a security policy.

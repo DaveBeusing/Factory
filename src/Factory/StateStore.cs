@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed class StateStore
 {
-    private const int DatabaseVersion = 9;
+    private const int DatabaseVersion = 10;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -29,6 +29,8 @@ public sealed class StateStore
         new("provider_budget_limits", nameof(FactoryState.ProviderBudgetLimits), typeof(ProviderBudgetLimit)),
         new("provider_usages", nameof(FactoryState.ProviderUsages), typeof(ProviderUsageEntry)),
         new("provider_budget_reservations", nameof(FactoryState.ProviderBudgetReservations), typeof(ProviderBudgetReservation)),
+        new("remote_provider_leases", nameof(FactoryState.RemoteProviderLeases), typeof(RemoteProviderLease)),
+        new("remote_provider_turns", nameof(FactoryState.RemoteProviderTurns), typeof(RemoteProviderTurn)),
         new("knowledge_items", nameof(FactoryState.Knowledge), typeof(KnowledgeItem)),
         new("graph_nodes", nameof(FactoryState.Graph), typeof(GraphNode)),
         new("evaluations", nameof(FactoryState.Evaluations), typeof(EvaluationResult)),
@@ -228,6 +230,7 @@ public sealed class StateStore
                 ON provider_budget_reservations(provider_id,project_id,state);
             PRAGMA user_version=9;
             """);
+        UpgradeRemoteProviders(db, tx);
     }
 
     private static void UpgradeWorkerAuthorization(SqliteConnection db, SqliteTransaction tx)
@@ -271,6 +274,26 @@ public sealed class StateStore
             """);
     }
 
+    private static void UpgradeRemoteProviders(SqliteConnection db, SqliteTransaction tx)
+    {
+        Execute(db, tx, """
+            CREATE TABLE IF NOT EXISTS remote_provider_leases(
+                position INTEGER NOT NULL, id TEXT PRIMARY KEY, job_id TEXT NOT NULL REFERENCES jobs(id),
+                execution_generation INTEGER NOT NULL, worker_id TEXT NOT NULL,
+                executor_url TEXT NOT NULL, route_json TEXT NOT NULL, turn_tokens INTEGER NOT NULL, max_job_tokens INTEGER NOT NULL,
+                UNIQUE(job_id, execution_generation)
+            );
+            CREATE TABLE IF NOT EXISTS remote_provider_turns(
+                position INTEGER NOT NULL, id TEXT PRIMARY KEY, lease_id TEXT NOT NULL REFERENCES remote_provider_leases(id),
+                usage_id TEXT NOT NULL REFERENCES provider_usages(id), role TEXT NOT NULL,
+                input_commit TEXT NOT NULL, output_tree TEXT NOT NULL, observed_model TEXT NOT NULL,
+                state TEXT NOT NULL, started_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_remote_provider_turns_lease ON remote_provider_turns(lease_id);
+            PRAGMA user_version=10;
+            """);
+    }
+
     private static void Initialize(SqliteConnection db)
     {
         // Serialize first-time initialization across concurrently starting processes.
@@ -279,6 +302,12 @@ public sealed class StateStore
         var schemaVersion = Convert.ToInt32(version.ExecuteScalar(), CultureInfo.InvariantCulture);
         if (schemaVersion == DatabaseVersion)
         {
+            tx.Commit();
+            return;
+        }
+        if (schemaVersion == 9)
+        {
+            UpgradeRemoteProviders(db, tx);
             tx.Commit();
             return;
         }
@@ -296,7 +325,7 @@ public sealed class StateStore
                     UPDATE provider_budget_reservations SET state='held' WHERE state='active';
                     """);
             }
-            Execute(db, tx, "PRAGMA user_version=9;");
+            UpgradeRemoteProviders(db, tx);
             tx.Commit();
             return;
         }
@@ -414,7 +443,7 @@ public sealed class StateStore
             INSERT INTO factory_metadata(id, schema, paused) VALUES(1,1,0);
             """);
 
-        foreach (var map in Entities)
+        foreach (var map in Entities.Where(map => map.Type != typeof(RemoteProviderLease) && map.Type != typeof(RemoteProviderTurn)))
         {
             var definitions = new List<string> { "\"position\" INTEGER NOT NULL" };
             foreach (var property in Scalars(map))

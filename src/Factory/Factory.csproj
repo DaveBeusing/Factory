@@ -10,6 +10,7 @@
     <RootNamespace>Factory</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="Factory.Tests" />
     <EmbeddedResource Include="ui/index.html" LogicalName="Factory.Ui.Index" />
     <EmbeddedResource Include="ui/app.css" LogicalName="Factory.Ui.Style" />
     <EmbeddedResource Include="ui/app.js" LogicalName="Factory.Ui.Script" />

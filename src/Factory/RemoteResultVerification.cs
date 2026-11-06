@@ -10,11 +10,18 @@ public interface IWorkerResultVerifier
         WorkerStatus status, CancellationToken ct);
 }
 
-public sealed record VerifiedWorkerResult(string EvidenceJson);
+public sealed record VerifiedWorkerResult(string EvidenceJson, string? TreeSha = null);
 
 public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
 {
     private static readonly string[] RequiredReviewRoles = ["code", "architecture", "security", "ux"];
+    private readonly Func<string[], int, CancellationToken, Task<CommandResult>> _runGitHub;
+
+    public GitHubWorkerResultVerifier() : this((args, timeout, ct) =>
+        Commands.RunAsync("gh", args, Environment.CurrentDirectory, timeout, cancellationToken: ct)) { }
+
+    internal GitHubWorkerResultVerifier(Func<string[], int, CancellationToken, Task<CommandResult>> runGitHub) =>
+        _runGitHub = runGitHub;
 
     public async Task<VerifiedWorkerResult> VerifyAsync(ProjectInfo project, FactoryJob job,
         WorkerStatus status, CancellationToken ct)
@@ -50,7 +57,20 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         WorkPackageScope.Enforce(job.ExpectedPaths, changed);
         GitOperations.EnforcePaths(changed, project.ProtectedPaths);
 
-        // Prevent accepting a PR whose head moved while the checks were inspected.
+        string? tree = null;
+        if (status.ProviderLeaseId is not null)
+        {
+            var response = await _runGitHub(["api", $"repos/{repository}/git/commits/{finished.HeadSha}"], 45, ct);
+            if (!response.Ok) throw new InvalidOperationException("Cannot independently read the verified commit tree");
+            using var commit = JsonDocument.Parse(response.Output);
+            if (commit.RootElement.GetProperty("sha").GetString() != finished.HeadSha)
+                throw new InvalidOperationException("GitHub returned a different commit");
+            tree = commit.RootElement.GetProperty("tree").GetProperty("sha").GetString();
+            if (tree is null || !IntegrationVerifier.IsCommitSha(tree))
+                throw new InvalidOperationException("GitHub did not return a valid commit tree");
+        }
+
+        // Recheck the PR after all other GitHub requests, including the commit tree lookup.
         using var latest = await PullAsync(repository, number, ct);
         ValidatePull(latest, repository, project.BaseBranch, expectedBranch, finished.HeadSha);
         return new VerifiedWorkerResult(Json.Stringify(new
@@ -63,9 +83,10 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             verifiedAt = DateTimeOffset.UtcNow,
             requiredChecks = checks.OrderBy(n => n, StringComparer.Ordinal).ToArray(),
             verifiedChangedPaths = changed,
+            verifiedTree = tree,
             // Worker data remains explicitly identified as worker-reported evidence.
             workerEvidence = evidence
-        }));
+        }), tree);
     }
 
     public static JsonElement ValidateEvidence(ProjectInfo project, FactoryJob job, WorkerStatus status)
@@ -144,11 +165,9 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         return number;
     }
 
-    private static async Task<JsonDocument> PullAsync(string repository, int number, CancellationToken ct)
+    private async Task<JsonDocument> PullAsync(string repository, int number, CancellationToken ct)
     {
-        var response = await Commands.RunAsync("gh",
-            ["api", $"repos/{repository}/pulls/{number}"], Environment.CurrentDirectory, 45,
-            cancellationToken: ct);
+        var response = await _runGitHub(["api", $"repos/{repository}/pulls/{number}"], 45, ct);
         if (!response.Ok) throw new InvalidOperationException("Cannot independently read the GitHub pull request");
         return JsonDocument.Parse(response.Output);
     }
@@ -202,23 +221,23 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         return paths.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
     }
 
-    private static async Task<IReadOnlyList<string>> PullFilePathsAsync(
+    private async Task<IReadOnlyList<string>> PullFilePathsAsync(
         string repository, int number, CancellationToken ct)
     {
-        var response = await Commands.RunAsync("gh",
+        var response = await _runGitHub(
             ["api", "--paginate", "--slurp",
              $"repos/{repository}/pulls/{number}/files?per_page=100"],
-            Environment.CurrentDirectory, 60, cancellationToken: ct);
+            60, ct);
         if (!response.Ok)
             throw new InvalidOperationException("Unable to verify changed PR files");
         return ParsePullFilePaths(response.Output);
     }
 
-    private static async Task<HashSet<string>> RequiredChecksAsync(string repository, int number, CancellationToken ct)
+    private async Task<HashSet<string>> RequiredChecksAsync(string repository, int number, CancellationToken ct)
     {
-        var result = await Commands.RunAsync("gh",
+        var result = await _runGitHub(
             ["pr", "checks", number.ToString(), "--repo", repository, "--required",
-             "--json", "name,state"], Environment.CurrentDirectory, 60, cancellationToken: ct);
+             "--json", "name,state"], 60, ct);
         if (!result.Ok) throw new InvalidOperationException("Required GitHub checks are not successful");
         using var document = JsonDocument.Parse(result.Output);
         if (document.RootElement.ValueKind != JsonValueKind.Array)

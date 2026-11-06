@@ -41,6 +41,7 @@ public static class ManagedWorkers
         psi.ArgumentList.Add("--id"); psi.ArgumentList.Add(id);
         // A managed worker receives only its scoped credential, never the admin secret.
         psi.Environment.Remove("FACTORY_TOKEN");
+        psi.Environment.Remove("FACTORY_REMOTE_EXECUTOR_TOKEN");
         psi.Environment["FACTORY_WORKER_TOKEN"] = WorkerAuthentication.CreateToken(settings.WorkerTokenKey, id);
         var process = Process.Start(psi) ?? throw new InvalidOperationException("Unable to launch worker process");
         if (!Processes.TryAdd(id, process))

@@ -126,16 +126,22 @@ public static class ProviderRouter
         }
     }
 
+    internal static string EffectiveCodexRuntime(FactorySettings settings, ProviderProfile profile) =>
+        string.IsNullOrWhiteSpace(profile.Runtime) ? settings.Runtime : profile.Runtime;
+
+    internal static string EffectiveModel(FactorySettings settings, ProviderProfile profile, string risk) =>
+        profile.Kind == "codex" && string.IsNullOrWhiteSpace(profile.Model)
+            ? (settings.ModelRoutes.GetValueOrDefault(risk) is { Length: > 0 } model ? model : settings.Model)
+            : profile.Model;
+
     public static ProviderSelection Select(FactorySettings settings, FactoryState state,
         Guid projectId, string role, string risk)
     {
         var profile = Resolve(settings, state, projectId, role);
-        var model = profile.Model;
-        if (profile.Kind == "codex" && string.IsNullOrWhiteSpace(model))
-            model = settings.ModelRoutes.GetValueOrDefault(risk) is { Length: > 0 } route ? route : settings.Model;
+        var model = EffectiveModel(settings, profile, risk);
         IAgentRuntime adapter = profile.Kind switch
         {
-            "codex" => (string.IsNullOrWhiteSpace(profile.Runtime) ? settings.Runtime : profile.Runtime)
+            "codex" => EffectiveCodexRuntime(settings, profile)
                 == "app-server" ? new AppServerAgentRuntime(model) : new ExecAgentRuntime(model),
             "ollama" => new OllamaAgentRuntime(profile.Endpoint, model),
             "claude" => new ClaudeReadOnlyAgentRuntime(model),
@@ -171,6 +177,8 @@ public sealed class OllamaAgentRuntime(string endpoint, string model) : IAgentRu
         var root = doc.RootElement;
         var response = new AgentRunResult
         {
+            ObservedModel = root.TryGetProperty("model", out var reportedModel) && reportedModel.ValueKind == JsonValueKind.String
+                ? reportedModel.GetString() ?? "" : "",
             Success = root.TryGetProperty("done", out var done) && done.ValueKind == JsonValueKind.True,
             FinalText = root.TryGetProperty("response", out var text) ? text.GetString() ?? "" : ""
         };
@@ -192,7 +200,7 @@ public sealed class OllamaAgentRuntime(string endpoint, string model) : IAgentRu
 public static class ProviderBudgetLedger
 {
     public static ProviderUsageEntry Begin(FactoryState state, FactoryJob job, ProviderProfile profile,
-        string role, string model, int reservationTokens)
+        string role, string model, int reservationTokens, bool reserveUncapped = false)
     {
         var usage = new ProviderUsageEntry { ProjectId = job.ProjectId, GoalId = job.GoalId,
             JobId = job.Id == Guid.Empty ? null : job.Id, ExecutionGeneration = job.ExecutionGeneration,
@@ -202,7 +210,7 @@ public static class ProviderBudgetLedger
         var globalCap = profile.TokenLimit;
         var isPlanning = job.Id == Guid.Empty && job.GoalId.HasValue;
         long allowed = 0;
-        if (globalCap > 0 || projectCap > 0 || isPlanning)
+        if (globalCap > 0 || projectCap > 0 || isPlanning || reserveUncapped)
         {
             long Used(Func<ProviderUsageEntry, bool> filter) =>
                 state.ProviderUsages.Where(filter).Sum(x => checked(x.InputTokens + x.OutputTokens));
@@ -474,6 +482,8 @@ public static class ProviderBudgetReconciliation
             usage.FinalUsageReported = true;
             reservation.Consumed = consumed;
             reservation.State = "released";
+            var remoteTurn = state.RemoteProviderTurns.SingleOrDefault(turn => turn.UsageId == usage.Id);
+            if (remoteTurn is { State: "held" }) remoteTurn.State = "reconciled";
             state.Events.Add(new FactoryEvent { JobId = usage.JobId,
                 Type = "provider_budget_reconciled",
                 Message = "Provider " + usage.ProviderId + " usage " + usage.Id +

@@ -9,7 +9,7 @@ public static class WorkerAuthorization
     private static readonly HashSet<string> KnownCapabilities = new(StringComparer.Ordinal)
     {
         "native-agent", "git-cli", "runtime:exec", "runtime:app-server",
-        "native-checks", "container-checks"
+        "native-checks", "container-checks", RemoteProviderRouting.Capability
     };
 
     public static bool IsKnownCapability(string? capability) =>

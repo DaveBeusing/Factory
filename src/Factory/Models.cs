@@ -23,6 +23,8 @@ public sealed class FactoryState
     public List<ProviderBudgetLimit> ProviderBudgetLimits { get; set; } = [];
     public List<ProviderUsageEntry> ProviderUsages { get; set; } = [];
     public List<ProviderBudgetReservation> ProviderBudgetReservations { get; set; } = [];
+    public List<RemoteProviderLease> RemoteProviderLeases { get; set; } = [];
+    public List<RemoteProviderTurn> RemoteProviderTurns { get; set; } = [];
     public List<FactoryEvent> Events { get; set; } = [];
     public List<KnowledgeItem> Knowledge { get; set; } = [];
     public List<GraphNode> Graph { get; set; } = [];
@@ -247,6 +249,10 @@ public sealed class FactorySettings
     {
         ["low"] = "", ["medium"] = "", ["high"] = ""
     };
+    public bool EnableRemoteProviderRouting { get; set; }
+    public string RemoteProviderExecutorUrl { get; set; } = "";
+    public bool EnableRemoteProviderExecutor { get; set; }
+    public int RemoteProviderTurnTokens { get; set; } = 1024;
     public bool AllowPush { get; set; }
     public bool AutoMerge { get; set; }
     // Administrator credential. Never pass it to worker processes or API responses.

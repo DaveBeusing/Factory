@@ -5,7 +5,7 @@ using System.Text;
 
 namespace Factory;
 
-public sealed class WorkerClaimRequest { public string WorkerId { get; set; } = ""; }
+public sealed class WorkerClaimRequest { public string WorkerId { get; set; } = ""; public int ProtocolVersion { get; set; } }
 public sealed class WorkerClaim
 {
     public string WorkerId { get; set; } = "";
@@ -13,6 +13,8 @@ public sealed class WorkerClaim
     public ProjectInfo Project { get; set; } = new();
     public FactoryGoal? Goal { get; set; }
     public FactorySettings Settings { get; set; } = new();
+    public Guid? ProviderLeaseId { get; set; }
+    public RemoteProviderRoute[]? ProviderRoutes { get; set; }
 }
 public sealed class WorkerStatus
 {
@@ -26,6 +28,7 @@ public sealed class WorkerStatus
     public long ExecutionGeneration { get; set; }
     public string LeaseToken { get; set; } = "";
     public bool UsageComplete { get; set; }
+    public Guid? ProviderLeaseId { get; set; }
 }
 
 public sealed class WorkerBudgetExtensionRequest
@@ -58,7 +61,7 @@ public static class WorkerProtocol
         return CryptographicOperations.FixedTimeEquals(left, right);
     }
 
-    public static WorkerClaim? Claim(StateStore store, FactorySettings settings, string workerId)
+    public static WorkerClaim? Claim(StateStore store, FactorySettings settings, string workerId, int protocolVersion = 0)
     {
         if (!WorkerAuthentication.IsValidWorkerId(workerId)) return null;
         JobRecovery.QuarantineExpired(store, JobExecutionModes.Remote);
@@ -73,14 +76,14 @@ public static class WorkerProtocol
                 job =>
                 {
                     var project = s.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
-                    // Current remote worker claims do not transmit provider assignments or
-                    // attributed provider-budget evidence. Never let a remote claim bypass
-                    // explicitly configured provider policy or a local token ceiling.
-                    return project is not null && !string.IsNullOrWhiteSpace(project.Origin) &&
-                        !s.ProviderAssignments.Any(a => a.ProjectId == project.Id) &&
-                        !s.ProviderBudgetLimits.Any(b => b.ProjectId == project.Id) &&
-                        !settings.Providers.Any(p => p.TokenLimit > 0) &&
-                        WorkerAuthorization.CanExecute(s, registered, project, job, settings);
+                    // Explicit provider policy requires the versioned lease path.
+                    if (project is null || string.IsNullOrWhiteSpace(project.Origin) ||
+                        !WorkerAuthorization.CanExecute(s, registered, project, job, settings)) return false;
+                    return RemoteProviderRouting.Required(project, job)
+                        ? protocolVersion == RemoteProviderRouting.ProtocolVersion && RemoteProviderRouting.Plan(s, settings, job) is not null
+                        : !s.ProviderAssignments.Any(a => a.ProjectId == project.Id) &&
+                          !s.ProviderBudgetLimits.Any(b => b.ProjectId == project.Id) &&
+                          !settings.Providers.Any(p => p.TokenLimit > 0);
                 },
                 reservationTokens: settings.GoalReservationTokens);
             foreach (var job in selected)
@@ -89,8 +92,23 @@ public static class WorkerProtocol
                 if (job.GoalId is not null &&
                     GoalBudgetLedger.Allocation(s, job, settings.GoalReservationTokens) == 0)
                     continue;
+                var requiresProviderLease = RemoteProviderRouting.Required(project, job);
+                var routes = requiresProviderLease ? RemoteProviderRouting.Plan(s, settings, job) : null;
+                if (requiresProviderLease && routes is null) continue;
                 JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
                     state: s, reservationTokens: settings.GoalReservationTokens);
+                RemoteProviderLease? providerLease = null;
+                if (routes is not null)
+                {
+                    providerLease = new RemoteProviderLease
+                    {
+                        JobId = job.Id, ExecutionGeneration = job.ExecutionGeneration, WorkerId = workerId,
+                        ExecutorUrl = settings.RemoteProviderExecutorUrl, TurnTokens = settings.RemoteProviderTurnTokens,
+                        MaxJobTokens = settings.MaxJobReservationTokens,
+                        RouteJson = Json.Stringify(routes)
+                    };
+                    s.RemoteProviderLeases.Add(providerLease);
+                }
                 FactoryGoal? goalCopy = null;
                 if (job.GoalId is { } goalId)
                 {
@@ -111,6 +129,7 @@ public static class WorkerProtocol
                return new WorkerClaim
                 {
                     WorkerId = workerId,
+                    ProviderLeaseId = providerLease?.Id, ProviderRoutes = routes,
                     Project = project, Job = job, Goal = goalCopy,
                     Settings = new FactorySettings
                     {
@@ -149,6 +168,9 @@ public static class WorkerProtocol
                 !JobRecovery.Matches(job, fence) ||
                 job.Mode != JobExecutionModes.Remote || job.GoalId is null)
                 return null;
+            var providerLease = RemoteProviderRouting.Current(state, job);
+            if (providerLease is not null && !RemoteProviderRouting.CanContinue(state, settings, job, providerLease))
+                return null;
             var extension = GoalBudgetLedger.ExtendRemote(state, job, fence,
                 request.RequestId, request.RequestedTokens, settings.GoalExtensionIncrementTokens,
                 settings.MaxJobReservationTokens);
@@ -176,7 +198,20 @@ public static class WorkerProtocol
                 !JobRecovery.Matches(j,
                 new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
                 return false;
-           if (req.TokensIn < 0 || req.TokensOut < 0) return false;
+            var providerLease = RemoteProviderRouting.Current(s, j);
+            if (providerLease is not null)
+            {
+                if (req.ProviderLeaseId != providerLease.Id ||
+                    !RemoteProviderRouting.CanContinue(s, settings, j, providerLease))
+                {
+                    RemoteProviderRouting.Fence(s, j, "Remote provider lease no longer authorized");
+                    return false;
+                }
+                worker.Heartbeat = DateTimeOffset.UtcNow;
+                j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(settings.LeaseSeconds);
+                return true;
+            }
+            if (req.TokensIn < 0 || req.TokensOut < 0) return false;
            worker.Heartbeat = DateTimeOffset.UtcNow;
            var remaining = GoalBudgetLedger.Record(s, j, req.TokensIn, req.TokensOut,
                req.UsageComplete);
@@ -214,6 +249,8 @@ public static class WorkerProtocol
                 new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
             return false;
         var project = state.Projects.Single(p => p.Id == claimed.ProjectId);
+        var providerLease = RemoteProviderRouting.Current(state, claimed);
+        if (req.ProviderLeaseId != providerLease?.Id) return false;
         var successReported = req.Job is { State: JobStates.PrReady };
         VerifiedWorkerResult? verified = null;
         var failure = "Worker returned no verified PR result";
@@ -273,14 +310,32 @@ public static class WorkerProtocol
 
             // Reported cumulative usage is debited under the same transaction as
             // completion. Fenced stale completions never modify the budget ledger.
-            var reportedIn = Math.Max(req.TokensIn, req.Job?.TokensIn ?? 0);
-            var reportedOut = Math.Max(req.TokensOut, req.Job?.TokensOut ?? 0);
-            if (reportedIn < 0 || reportedOut < 0) return false;
-            var remaining = GoalBudgetLedger.Record(s, j, reportedIn, reportedOut,
-                req.UsageComplete);
+            long remaining;
+            var finalUsage = req.UsageComplete;
+            if (providerLease is not null)
+            {
+                var current = RemoteProviderRouting.Current(s, j);
+                finalUsage = current?.Id == providerLease.Id &&
+                    RemoteProviderRouting.CanContinue(s, executionSettings, j, providerLease) &&
+                    verified?.TreeSha is { } tree &&
+                    RemoteProviderRouting.VerifyCompletion(s, providerLease, req.Job!.HeadSha, tree);
+                if (!finalUsage)
+                {
+                    RemoteProviderRouting.HoldTurns(s, j);
+                    failure = "Missing or inconsistent trusted provider turn evidence";
+                }
+                remaining = GoalBudgetLedger.Record(s, j, j.TokensIn, j.TokensOut, finalUsage);
+            }
+            else
+            {
+                var reportedIn = Math.Max(req.TokensIn, req.Job?.TokensIn ?? 0);
+                var reportedOut = Math.Max(req.TokensOut, req.Job?.TokensOut ?? 0);
+                if (reportedIn < 0 || reportedOut < 0) return false;
+                remaining = GoalBudgetLedger.Record(s, j, reportedIn, reportedOut, finalUsage);
+            }
 
             if (verified is not null && successReported &&
-                (j.GoalId is null || (req.UsageComplete && remaining >= 0)))
+                (j.GoalId is null || (finalUsage && remaining >= 0)))
             {
                 j.State = JobStates.PrReady; j.Stage = "pr";
                 j.Branch = req.Job!.Branch; j.PrUrl = req.Job.PrUrl;
@@ -291,7 +346,7 @@ public static class WorkerProtocol
             }
             else
             {
-                if (j.GoalId is not null && (remaining < 0 || !req.UsageComplete) &&
+                if (j.GoalId is not null && (remaining < 0 || !finalUsage) &&
                     successReported && verified is not null)
                     failure = "Unverified or exhausted final goal usage";
                 var scopeBlocked = req.Job is { State: JobStates.Blocked, Stage: "scope" } candidate &&
@@ -332,7 +387,7 @@ public static class RemoteWorker
             register.EnsureSuccessStatusCode();
         while (!ct.IsCancellationRequested)
         {
-            using var claimResponse = await http.PostAsJsonAsync("api/worker/claim", new WorkerClaimRequest { WorkerId = workerId }, ct);
+            using var claimResponse = await http.PostAsJsonAsync("api/worker/claim", new WorkerClaimRequest { WorkerId = workerId, ProtocolVersion = RemoteProviderRouting.ProtocolVersion }, ct);
            claimResponse.EnsureSuccessStatusCode();
            if (claimResponse.StatusCode == System.Net.HttpStatusCode.NoContent)
             {
@@ -350,7 +405,7 @@ public static class RemoteWorker
            var report = new WorkerStatus { WorkerId = workerId, JobId = claim.Job.Id,
                 TokensIn = claim.Job.TokensIn, TokensOut = claim.Job.TokensOut,
                 ExecutionGeneration = claim.Job.ExecutionGeneration,
-                LeaseToken = claim.Job.LeaseToken };
+                LeaseToken = claim.Job.LeaseToken, ProviderLeaseId = claim.ProviderLeaseId };
            using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
            using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
            var heartbeat = Task.Run(async () =>
@@ -477,7 +532,9 @@ public static class RemoteWorker
                }
                var engine = new FactoryEngine(localState, claim.Settings,
                    executionMode: JobExecutionModes.Remote,
-                   remoteBudgetExtension: RequestControllerExtension);
+                   remoteBudgetExtension: RequestControllerExtension,
+                   remoteProviderRuntime: claim.ProviderLeaseId is null ? null : role =>
+                       new RemoteProviderAgent(server, token, claim, role));
                await engine.RunQueueAsync(executionCancel.Token);
                report.Job = localState.Job(claim.Job.Id);
                report.TokensIn = report.Job.TokensIn;

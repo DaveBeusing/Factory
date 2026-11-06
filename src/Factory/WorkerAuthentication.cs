@@ -14,7 +14,7 @@ public static class WorkerAuthentication
     private static readonly string[] WorkerEndpoints =
     [
         "/api/worker/register", "/api/worker/claim",
-        "/api/worker/heartbeat", "/api/worker/complete", "/api/worker/budget/extend"
+        "/api/worker/heartbeat", "/api/worker/complete", "/api/worker/budget/extend", "/api/worker/turn"
     ];
 
     private static bool IsAsciiLetterOrDigit(char c) =>
@@ -40,10 +40,12 @@ public static class WorkerAuthentication
         return Convert.ToHexString(HMACSHA256.HashData(Convert.FromHexString(workerKey), bytes));
     }
 
-    public static bool IsWorkerNamespace(string? path) =>
+    private static bool IsNamespace(string? path, string root) =>
         path is not null &&
-        (path.Equals("/api/worker", StringComparison.OrdinalIgnoreCase) ||
-         path.StartsWith("/api/worker/", StringComparison.OrdinalIgnoreCase));
+        (path.Equals(root, StringComparison.OrdinalIgnoreCase) ||
+         path.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase));
+
+    public static bool IsWorkerNamespace(string? path) => IsNamespace(path, "/api/worker");
 
     // Fail closed for unknown worker URLs and HTTP methods; never grant them admin privileges.
     public static bool IsWorkerEndpoint(string method, string? path) =>
@@ -53,6 +55,10 @@ public static class WorkerAuthentication
     public static bool Authorized(string method, string? path, string? bearer, string? workerId,
         FactorySettings settings)
     {
+        if (IsNamespace(path, "/api/executor"))
+            return string.Equals(path?.TrimEnd('/'), "/api/executor/turn", StringComparison.OrdinalIgnoreCase) &&
+                settings.EnableRemoteProviderExecutor && method.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                RemoteProviderRouting.ExecutorCredential(settings) is { } executor && WorkerProtocol.Authorized(bearer, executor);
         if (IsWorkerNamespace(path))
             return IsWorkerEndpoint(method, path) && IsValidWorkerId(workerId) &&
                 IsValidKey(settings.WorkerTokenKey) &&

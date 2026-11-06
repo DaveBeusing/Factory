@@ -7,6 +7,7 @@ public sealed class FactoryEngine
     private readonly GitOperations _git;
     private readonly IAgentRuntime _agent;
     private readonly bool _runtimeOverridden;
+    private readonly Func<string, IAgentRuntime>? _remoteProviderRuntime;
     private readonly string _executionMode;
     private readonly Func<Guid, CancellationToken, Task>? _remoteBudgetExtension;
     private readonly IReadOnlyList<IFactoryPlugin> _plugins;
@@ -14,12 +15,14 @@ public sealed class FactoryEngine
 
     public FactoryEngine(StateStore store, FactorySettings settings, IReadOnlyList<IFactoryPlugin>? plugins = null,
         IAgentRuntime? agent = null, string executionMode = JobExecutionModes.Local,
-        Func<Guid, CancellationToken, Task>? remoteBudgetExtension = null)
+        Func<Guid, CancellationToken, Task>? remoteBudgetExtension = null,
+        Func<string, IAgentRuntime>? remoteProviderRuntime = null)
     {
         if (!JobExecutionModes.IsSupported(executionMode))
             throw new ArgumentException("Unsupported execution mode", nameof(executionMode));
         _executionMode = executionMode;
         _remoteBudgetExtension = remoteBudgetExtension;
+        _remoteProviderRuntime = remoteProviderRuntime;
         _store = store; _settings = settings;
         _git = new GitOperations(string.IsNullOrEmpty(settings.WorkspaceRoot)
             ? Path.Combine(store.Home, "worktrees") : settings.WorkspaceRoot);
@@ -215,19 +218,19 @@ public sealed class FactoryEngine
         IAgentRuntime RuntimeFor(string role)
         {
             var snapshot = _store.Read();
-            var selected = _runtimeOverridden ? (ProviderSelection?)null :
+            var selected = _runtimeOverridden || _remoteProviderRuntime is not null ? (ProviderSelection?)null :
                 ProviderRouter.Select(_settings, snapshot, p.Id, role, j.Risk);
             var meter = selected is { } choice
                 ? new JobProviderMeter(ProviderRouter.Resolve(_settings, snapshot, p.Id, role),
                     role, choice.Model, _settings.GoalReservationTokens)
                 : null;
-            return new BudgetedAgentRuntime(selected?.Runtime ?? _agent, _store, id, fence, extensionPolicy,
+            return new BudgetedAgentRuntime(_remoteProviderRuntime?.Invoke(role) ?? selected?.Runtime ?? _agent, _store, id, fence, extensionPolicy,
                 _remoteBudgetExtension is null ? null : token => _remoteBudgetExtension(id, token),
                 _settings.GoalExtensionThresholdTokens, meter);
         }
         var runtime = RuntimeFor("builder");
         var qualityEngine = new QualityEngine(runtime,
-            _runtimeOverridden ? null : role => RuntimeFor("review:" + role));
+            _runtimeOverridden && _remoteProviderRuntime is null ? null : role => RuntimeFor("review:" + role));
         var worktree = _git.Prepare(p, j);
         UpdateOwned(id, fence, x =>
         {

@@ -82,6 +82,7 @@ public static class JobRecovery
                 j.LeaseUntil <= DateTimeOffset.UtcNow &&
                 JobStates.Active.Contains(j.State)))
             {
+                RemoteProviderRouting.HoldTurns(s, job);
                 GoalBudgetLedger.Hold(s, job, "expired worker lease");
                 var previousOwner = job.LeaseOwner;
                 var previousGeneration = job.ExecutionGeneration;

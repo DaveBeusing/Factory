@@ -66,7 +66,7 @@ dotnet .\tests\Factory.Tests\bin\Release\net10.0\Factory.Tests.dll --verify-wind
 
 The check archives and extracts the framework-dependent `win-x64` output into a temporary directory. It verifies the executable version and checksum against the build manifest, checks that the skills and agent definitions are packaged, then registers a synthetic Git repository with the extracted `Factory.exe` and an empty `FACTORY_HOME`.
 
-For upgrade and recovery, the test creates a schema 8 fixture with recorded provider usage and takes a SQLite backup. The extracted executable must migrate both the original database and a restored copy to schema 9. The check compares project identity, token counts, final usage, historical cost and settings, and verifies that the original backup stays at schema 8. Follow the [recovery guide](recovery.md#restore-or-upgrade-state) for operator backups.
+For upgrade and recovery, the test creates a schema 8 fixture with recorded provider usage and takes a SQLite backup. The extracted executable must migrate both the original database and a restored copy to the current schema. The check compares project identity, token counts, final usage, historical cost and settings, and verifies that the original backup stays at schema 8. Follow the [recovery guide](recovery.md#restore-or-upgrade-state) for operator backups.
 
 Record the package version, Windows and .NET versions, installation and migration outcomes, and any outstanding live checks in the preview decision. The authenticated Claude Code ledger check remains open in [issue #22](https://github.com/DaveBeusing/Factory/issues/22).
 

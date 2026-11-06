@@ -27,7 +27,7 @@ Examples:
 | General review | Claude Code | opus |
 | Security review | Codex | provider default |
 
-Provider routing is a project policy choice. Failed executions do not silently switch vendors, identities or permission modes.
+Provider routing is a project policy choice. Failed executions do not silently switch vendors, identities or permission modes. **Remote workers are currently ineligible for projects with any explicit provider route** (even a Codex model override): the existing worker claim protocol does not transport and attest per-role routes or controller-side provider accounting. The controller checks this under the same database transaction as the claim, and it rejects route changes while a remote job has an active lease. Remove routes only after draining/reconciling remote work, or run the routed project locally until remote contract propagation is implemented.
 
 ## Provider-level token budgets
 

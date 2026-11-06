@@ -24,6 +24,8 @@ Factory can manage multiple repositories and local or remote workers. Git pushes
 13. [Command reference](#13-command-reference)
 14. [Validation and known limitations](#14-validation-and-known-limitations)
 15. [Versioning and release governance](#15-versioning-and-release-governance)
+16. [Project-scoped AI providers and budgets](#16-project-scoped-ai-providers-and-budgets)
+17. [Project review to draft goals](#17-project-review-to-draft-goals)
 
 ## 1. Requirements
 
@@ -549,3 +551,18 @@ dotnet run --project tools/Factory.Versioning -- self-test
 Dedicated release branches may use `dotnet run --project tools/Factory.Versioning -- bump minor`, `bump patch`, or `channel rc`/`channel stable`; the resulting `Directory.Build.props` change requires review and release-owner approval before merging. No tag, GitHub release, deployment or automatic merge is performed by this tool.
 
 See [the complete versioning and compatibility policy](docs/versioning.md) and [ADR-0001](docs/adr/0001-versioning.md). `dist/build-manifest.json` records the effective version, full source SHA and executable checksum. Database schema and wire contracts remain separately versioned; a product bump does not automatically migrate or validate them.
+
+
+## 16. Project-scoped AI providers and budgets
+
+Factory routes agent operations through provider profiles and project-scoped role assignments. Codex remains the default and the only implemented workspace-writing adapter. The optional local Ollama integration supports read-only text tasks; it cannot edit a worktree. In Mission Control, open **Projects → Inspect → Configure AI providers** to select provider profiles for planning, building and review roles, and to set optional local per-project provider token ceilings.
+
+The **Capacity** view displays attributed input/output tokens, local project/provider limits, active or held liabilities and genuine account allowance windows where explicitly reported. These are distinct concepts; missing account data is not estimated. Configured lifetime token caps are not rolling provider allowances. Provider reservations are reconciled through explicit administrator verification; price/billing data and provider API credit balances are not yet supported.
+
+Read the [provider setup, capability and budget guide](docs/providers.md) and [ADR-0002 proposal](docs/adr/0002-provider-routing.md). All secrets remain in the local Factory configuration; do not commit `.factory` contents. Database schema 7 adds provider records without inventing historical provider attribution. Back up your data before upgrading.
+
+## 17. Project review to draft goals
+
+Mission Control's **Project review** page inspects an explicitly selected repository at a recorded commit and lists bounded, deterministic findings. Review an individual finding to create an editable **draft** goal with acceptance criteria and a token budget. Continue through Goals and Plans to propose, validate and explicitly adopt work packages. No finding is an execution approval.
+
+The current inspection checks configured quality gates, a top-level test-directory heuristic, root README presence, and blocked or failed Factory jobs. It does not claim semantic code review, security auditing, test coverage measurement, or AI-certified findings. See the [project review operator guide](docs/project-reviews.md) and the [documentation index](docs/README.md) for scope and limitations.

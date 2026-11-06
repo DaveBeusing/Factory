@@ -4,6 +4,14 @@ using Microsoft.Data.Sqlite;
 
 namespace Factory;
 
+internal sealed record ViewerProject(Guid Id, string Name, string Status);
+internal sealed record ViewerGoal(Guid Id, string Objective, string State, long TokenBudget);
+internal sealed record ViewerJob(Guid Id, string Title, string State, Guid? GoalId);
+internal sealed record ViewerUsage(string ProviderId, long InputTokens, long OutputTokens, long? ReportedCostMicros);
+internal sealed record ViewerProjectSummary(ViewerProject Project, List<ViewerGoal> Goals,
+    List<ViewerJob> Jobs, List<ViewerUsage> Usage);
+internal sealed record ViewerJobEvidence(Guid Id, string HeadSha, string EvidenceFile);
+
 public sealed partial class StateStore
 {
     private const string ViewerTokenPrefix = "factory-viewer-";
@@ -80,7 +88,57 @@ public sealed partial class StateStore
 
     private static string ViewerVerifier(byte[] secret) => Convert.ToHexString(SHA256.HashData(secret));
 
-    internal (bool Authenticated, FactoryState? Snapshot) ReadViewerProject(string authorization, Guid projectId)
+    internal (bool Authenticated, ViewerProjectSummary? Value) ReadViewerSummary(string authorization, Guid projectId) =>
+        ReadViewerProject<ViewerProjectSummary>(authorization, projectId, (db, tx) =>
+        {
+            using var query = Command(db, tx, "SELECT name, status FROM projects WHERE id=$project;",
+                ("$project", projectId));
+            using var reader = query.ExecuteReader();
+            if (!reader.Read()) return null;
+            var project = new ViewerProject(projectId, reader.GetString(0), reader.GetString(1));
+            reader.Close();
+
+            var goals = ReadViewerRows(db, tx, projectId, """
+                SELECT id, objective, state, token_budget FROM goals WHERE project_id=$project ORDER BY position,id;
+                """, row => new ViewerGoal(Guid.Parse(row.GetString(0)), row.GetString(1), row.GetString(2), row.GetInt64(3)));
+            var jobs = ReadViewerRows(db, tx, projectId, """
+                SELECT j.id, j.title, j.state, g.id
+                FROM jobs j LEFT JOIN goals g ON g.id=j.goal_id AND g.project_id=j.project_id
+                WHERE j.project_id=$project ORDER BY j.position,j.id;
+                """, row => new ViewerJob(Guid.Parse(row.GetString(0)), row.GetString(1), row.GetString(2),
+                    row.IsDBNull(3) ? null : Guid.Parse(row.GetString(3))));
+            var usage = ReadViewerRows(db, tx, projectId, """
+                SELECT provider_id, SUM(input_tokens), SUM(output_tokens), SUM(reported_cost_micros)
+                FROM provider_usages WHERE project_id=$project
+                GROUP BY provider_id ORDER BY MIN(position),provider_id;
+                """, row => new ViewerUsage(row.GetString(0), row.GetInt64(1), row.GetInt64(2),
+                    row.IsDBNull(3) ? null : row.GetInt64(3)));
+            return new ViewerProjectSummary(project, goals, jobs, usage);
+        });
+
+    internal (bool Authenticated, ViewerJobEvidence? Value) ReadViewerJobEvidence(
+        string authorization, Guid projectId, Guid jobId) =>
+        ReadViewerProject<ViewerJobEvidence>(authorization, projectId, (db, tx) =>
+        {
+            using var query = Command(db, tx, """
+                SELECT head_sha, evidence_file FROM jobs WHERE project_id=$project AND id=$job;
+                """, ("$project", projectId), ("$job", jobId));
+            using var reader = query.ExecuteReader();
+            return reader.Read() ? new ViewerJobEvidence(jobId, reader.GetString(0), reader.GetString(1)) : null;
+        });
+
+    private static List<T> ReadViewerRows<T>(SqliteConnection db, SqliteTransaction tx, Guid projectId,
+        string sql, Func<SqliteDataReader, T> projectRow)
+    {
+        using var query = Command(db, tx, sql, ("$project", projectId));
+        using var reader = query.ExecuteReader();
+        var rows = new List<T>();
+        while (reader.Read()) rows.Add(projectRow(reader));
+        return rows;
+    }
+
+    private (bool Authenticated, T? Value) ReadViewerProject<T>(string authorization, Guid projectId,
+        Func<SqliteConnection, SqliteTransaction, T?> read) where T : class
     {
         if (!AuthenticationHeaderValue.TryParse(authorization, out var header) ||
             !header.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase) ||
@@ -96,7 +154,7 @@ public sealed partial class StateStore
         using var grant = Command(db, tx, """
             SELECT 1 FROM viewer_project_grants WHERE subject_id=$subject AND project_id=$project;
             """, ("$subject", subjectId), ("$project", projectId));
-        // Authorization and resource ownership are resolved from the same snapshot.
-        return (true, grant.ExecuteScalar() is null ? null : Load(db, tx));
+        // The grant and the scoped projection share one SQLite snapshot.
+        return (true, grant.ExecuteScalar() is null ? null : read(db, tx));
     }
 }

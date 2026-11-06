@@ -9,15 +9,22 @@ namespace Factory;
 /// </summary>
 public static class JobEvidenceReader
 {
-    public static object? Read(StateStore store, Guid jobId) => Read(store, store.Job(jobId), includeDetails: true);
-
-    internal static object? Read(StateStore store, FactoryJob job, bool includeDetails)
+    public static object? Read(StateStore store, Guid jobId)
     {
-        if (string.IsNullOrWhiteSpace(job.EvidenceFile)) return null;
+        var job = store.Job(jobId);
+        return Read(store, job.Id, job.HeadSha, job.EvidenceFile, includeDetails: true);
+    }
+
+    internal static object? ReadViewer(StateStore store, ViewerJobEvidence job) =>
+        Read(store, job.Id, job.HeadSha, job.EvidenceFile, includeDetails: false);
+
+    private static object? Read(StateStore store, Guid jobId, string headSha, string evidenceFile, bool includeDetails)
+    {
+        if (string.IsNullOrWhiteSpace(evidenceFile)) return null;
 
         var expectedDirectory = Path.GetFullPath(
-            Path.Combine(store.Home, "evidence", job.Id.ToString("N")));
-        var path = Path.GetFullPath(job.EvidenceFile);
+            Path.Combine(store.Home, "evidence", jobId.ToString("N")));
+        var path = Path.GetFullPath(evidenceFile);
         var comparison = OperatingSystem.IsWindows()
             ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         if (!path.StartsWith(Path.TrimEndingDirectorySeparator(expectedDirectory) +
@@ -33,14 +40,14 @@ public static class JobEvidenceReader
         var root = doc.RootElement;
         if (!root.TryGetProperty("jobId", out var idElement) ||
             !Guid.TryParse(idElement.GetString(), out var evidenceJob) ||
-            evidenceJob != job.Id ||
+            evidenceJob != jobId ||
             !root.TryGetProperty("commit", out var commitElement) ||
             commitElement.ValueKind != JsonValueKind.String)
             throw new InvalidOperationException("Quality evidence identity mismatch");
 
         var commit = commitElement.GetString() ?? "";
-        var current = !string.IsNullOrWhiteSpace(job.HeadSha) &&
-            string.Equals(commit, job.HeadSha, StringComparison.OrdinalIgnoreCase);
+        var current = !string.IsNullOrWhiteSpace(headSha) &&
+            string.Equals(commit, headSha, StringComparison.OrdinalIgnoreCase);
         if (!root.TryGetProperty("report", out var reportElement) ||
             reportElement.ValueKind != JsonValueKind.Object)
             return includeDetails

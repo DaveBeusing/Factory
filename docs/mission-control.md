@@ -14,15 +14,13 @@ The **F** brand symbol in the sidebar opens the connection-settings dialog. Its 
 
 The pulse honors the operating system's reduced-motion preference. The sidebar connection text and footer are also kept up-to-date so status is never represented by color alone.
 
-The old topbar connection pill and separate connection-settings avatar have been removed. Switching API tokens clears the old heartbeat observation before establishing the new connection.
-
 ## Topbar actions
 
 An icon-only **+** button is immediately left of Search and opens creation shortcuts for projects, goals, jobs and workers. Search opens the command palette; Ctrl+K and Cmd+K also open it.
 
 ## Planning and operations
 
-Use **Project review** to create a source-commit-bound review, inspect evidence-backed findings, and create editable draft goals. Use Goals and Plans for package dependency planning and explicit adoption. Use **Projects → Inspect → Configure AI providers** to route operations to enabled provider profiles. The **Capacity** page displays actual provider/model/role usage and Factory-local project limits separately from genuinely reported account allowances.
+Use **Project review** to create a source-commit-bound review, inspect evidence-backed findings, and create editable draft goals. Use **Goal planner** to filter by project, inspect live preflight evidence, select dependencies by title, review budgets and adopt packages explicitly. Use **Projects → Inspect → Configure AI providers** to route operations to enabled provider profiles. The **Capacity** page displays actual provider/model/role usage and Factory-local project limits separately from genuinely reported account allowances.
 
 See [Project review](project-reviews.md), [Provider routing and budgets](providers.md) and the [root README](../README.md) for workflow instructions and limitations.
 

@@ -30,11 +30,14 @@ const dateTime = s => s ? new Date(s).toLocaleString() : '—';
 const badge = (s) => { const value=String(s||'unknown').replace(/_/g,' ');const tone=/^(active|online|integrated|passed|completed|completed local|pr ready|enabled|healthy)$/.test(value)?'success':/^(failed|blocked|stopped|disabled|offline|error)$/.test(value)?'danger':/^(paused|draining|awaiting approval|degraded|pending)$/.test(value)?'warning':'info';return `<span class="badge ${tone}">${esc(value)}</span>`; };
 const readToken = () => {try{return sessionStorage.getItem('factory-token')||''}catch{return ''}};
 let token=readToken(), state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};
+let planProject="";
+const generatingPlans=new Set();
+const number=value=>Number(value||0).toLocaleString();
 let settings={}, usage=null, providerData=null, projectReview=null, analysisProject='', health=null, view='overview', search='', filter='all', streamController=null,lastHeartbeat=0, connected=false, lastStateUpdate=0, modalHandler=null, inspector=null, planDraft=null, planGoal=null, loading=false;
 async function api(path,method='GET',body){if(!token)throw new Error('Connect your API token first');const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});if(!res.ok){let msg='Request failed ('+res.status+')';try{let obj=await res.json();msg=obj.error||obj.title||msg}catch{}throw new Error(msg)}if(res.status===204||res.status===202)return null;return res.json()}
 const notify=(message,error=false)=>{const el=document.createElement('div');el.className='toast'+(error?' error':'');el.innerHTML=`<span class="toast-icon">${ico(error?'shield':'check')}</span><span>${esc(message)}</span>`;$('toast-stack').append(el);setTimeout(()=>el.remove(),5500)};
 function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.classList.toggle('hidden',!val)); }
-function nav(v){view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
+function nav(v){view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=({plans:'Goal planner',analysis:'Project review'})[v]||v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
 function statusFromHealth(){
  const since=lastHeartbeat?Date.now()-lastHeartbeat:Infinity;
  const status=!token?'offline':!lastHeartbeat?(connected?'connecting':'offline'):connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
@@ -95,14 +98,14 @@ function renderAnalysis(){
  body+=`<section class="card"><div class="card-body" style="padding-top:18px">
   <div class="field-row"><div class="field"><label for="analysis-project">Repository</label>
    <select id="analysis-project">${options}</select></div>
-   <div style="display:flex;align-items:center;gap:10px"><button class="button button-primary" data-act="analysis-run">${ico('eye')} Analyze project</button>
-   <button class="button button-muted" data-view="goals">View goals</button></div></div>
+   <div style="display:flex;align-items:center;gap:10px"><button class="button button-primary" data-act="analysis-run" ${reviewingProjects.has(selected.id)?'disabled':''}>${ico('eye')} ${reviewingProjects.has(selected.id)?'Analyzing…':'Analyze project'}</button>
+   <button class="button button-muted" data-act="project-plans" data-id="${selected.id}">Plan goals for this project</button></div></div>
   <p class="subtext">Read-only repository inspection; source commit is verified when converting findings to goals.</p>
  </div></section>`;
  if(projectReview&&projectReview.projectId===selected.id){
   body+=`<div class="grid metrics-grid" style="margin-top:17px">${metric('Findings',projectReview.findings.length,'Review before generating goals','shield')}
    ${metric('Indexed files',projectReview.indexedFiles,'Bounded static index','folder')}
-   ${metric('Reference commit',shorten(projectReview.commit,11),'Captured repository HEAD','route')}
+   ${metric('Reference commit',shorten(projectReview.commit,11),'Captured master commit','route')}
    ${metric('Reviewed at',dateTime(projectReview.observedAt),'Snapshot time','clock')}</div>`;
   if(projectReview.advisory){
     body+=card('Provider advisory review',
@@ -121,23 +124,38 @@ function renderAnalysis(){
  }else body+=`<section class="card" style="margin-top:17px">${empty('eye','No review loaded','Choose Analyze project to create a commit-bound review snapshot.')}</section>`;
  return body;
 }
+let reviewRequest=0;
+const reviewingProjects=new Set();
 async function loadProjectReview(id){
  analysisProject=id||analysisProject||state.projects[0]?.id||'';
  if(!analysisProject)return;
- try{projectReview=await api('projects/'+analysisProject+'/analysis')}
- catch{projectReview=null}
+ const request=++reviewRequest, selected=analysisProject;
+ if(projectReview?.projectId!==selected)projectReview=null;
  if(view==='analysis')render();
+ try{
+  const review=await api('projects/'+selected+'/analysis');
+  if(request===reviewRequest)projectReview=review;
+ }catch(error){
+  if(request===reviewRequest&&error.message!=='No review exists yet')notify(error.message,true);
+ }
+ if(request===reviewRequest&&view==='analysis')render();
 }
 async function startProjectReview(){
  const id=analysisProject||state.projects[0]?.id;
- if(!id)return;
- notify('Inspecting repository at its current commit');
- projectReview=await api('projects/'+id+'/analysis','POST',{});
- render();
- notify('Project review saved');
+ if(!id||reviewingProjects.has(id))return;
+ reviewingProjects.add(id);render();
+ try{
+  const review=await api('projects/'+id+'/analysis','POST',{});
+  if(analysisProject===id||!analysisProject){
+   reviewRequest++;
+   projectReview=review;
+  }
+  notify('Project review saved');
+ }finally{reviewingProjects.delete(id);if(view==='analysis')render();await fetchProviders()}
 }
 function createReviewGoal(findingId){
- const finding=projectReview?.findings?.find(f=>f.id===findingId);
+ const review=projectReview;
+ const finding=review?.findings?.find(f=>f.id===findingId);
  if(!finding)return;
  const body=field('objective','Goal outcome',finding.proposedGoal,'textarea')+
   field('criteria','Acceptance criteria (one per line)',finding.acceptanceCriteria.join('\n'),'textarea')+
@@ -145,14 +163,55 @@ function createReviewGoal(findingId){
  openForm('Goal from reviewed finding','Creating a draft goal does not approve execution. Review scope and acceptance criteria.',
   body,async form=>{
     const x=values(form);
-    await mutate('projects/'+projectReview.projectId+'/analysis/goals','POST',{
-      findingId,objective:x.objective,acceptanceCriteria:lines(x.criteria),tokenBudget:Number(x.budget)
+    const goal=await mutate('projects/'+review.projectId+'/analysis/goals','POST',{
+      reviewId:review.id,findingId,objective:x.objective,acceptanceCriteria:lines(x.criteria),tokenBudget:Number(x.budget)
     });
-    nav('goals');
+    planProject=review.projectId;
+    nav('plans');await loadPlans();
+    inspect('goal',goal.id);
   },'Create draft goal');
 }
-function renderGoals(){const items=filtered(state.goals,['objective']);const map=Object.fromEntries(state.projects.map(p=>[p.id,p.name]));return header('Goals','Define outcomes, acceptance criteria and token budgets.','create-goal','Create goal')+`<section class="card">${toolbar('goals',['draft','active','paused','stopped','completed','archived'])}<div class="cards-list" style="padding:18px">${items.length?items.map(g=>{const jobs=state.jobs.filter(j=>j.goalId===g.id);const done=jobs.filter(j=>j.integrated).length;return `<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('target')}</span><div><div class="entity-name">${esc(shorten(g.objective,85))}</div><div class="entity-sub">${esc(map[g.projectId]||'Unknown project')}</div></div></div><div class="entity-body">${g.acceptanceCriteria.length} acceptance criteria · ${g.tokenBudget.toLocaleString()} tokens<br>${jobs.length} work packages · ${done} integrated</div>${jobs.length?`<div class="progress-track"><div class="progress-fill" style="width:${Math.round(done/jobs.length*100)}%"></div></div>`:''}<div class="entity-foot">${badge(g.state)}<div class="tiny-actions"><button class="tiny-button" data-inspect="goal:${g.id}">Inspect</button><button class="tiny-button" data-edit="goal:${g.id}">Edit</button><button class="tiny-button" data-view="plans">Plans</button></div></div></div>`}).join(''):empty('target','No matching goals','Create a goal and set clear success criteria.','create-goal','Create goal')}</div></section>`}
-function renderPlans(){let cards=state.goals.map(g=>{const p=plansCache.get(g.id);return `<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('route')}</span><div><div class="entity-name">${esc(shorten(g.objective,75))}</div><div class="entity-sub">${p?`${p.packages.length} work packages · Base ${shorten(p.baseCommit,10)}`:'No plan created yet'}</div></div></div><div class="entity-body">${p?`Dependencies and execution groups are validated before adoption.`:'Create a manual plan or let the planning agent propose work packages.'}</div><div class="entity-foot">${badge(g.state)}<div class="tiny-actions"><button class="tiny-button" data-act="plan-view" data-id="${g.id}" ${!p?'disabled':''}>View</button><button class="tiny-button" data-act="plan-edit" data-id="${g.id}" ${g.state!=='draft'?'disabled':''}>Edit</button><button class="tiny-button" data-act="plan-generate" data-id="${g.id}" ${g.state!=='draft'?'disabled':''}>Generate</button>${p&&g.state==='draft'?`<button class="tiny-button" data-act="plan-adopt" data-id="${g.id}">Adopt</button>`:''}${g.state==='active'?`<button class="tiny-button" data-act="queue-run">Run</button><button class="tiny-button" data-control="goal:${g.id}:pause">Pause</button><button class="tiny-button" data-control="goal:${g.id}:stop">Stop</button>`:''}${['paused','stopped'].includes(g.state)?`<button class="tiny-button" data-control="goal:${g.id}:activate">Resume</button>`:''}</div></div></div>`}).join('');return header('Plans','Create, generate, edit, validate and adopt dependency-aware execution plans.','create-goal','Create goal')+`<div class="cards-list">${cards||empty('route','No plans available','Create a goal to design its execution plan.','create-goal','Create goal')}</div>`}
+function renderGoals(){const items=filtered(state.goals,['objective']);const map=Object.fromEntries(state.projects.map(p=>[p.id,p.name]));return header('Goals','Define outcomes, acceptance criteria and token budgets.','create-goal','Create goal')+`<section class="card">${toolbar('goals',['draft','active','paused','stopped','completed','archived'])}<div class="cards-list" style="padding:18px">${items.length?items.map(g=>{const jobs=state.jobs.filter(j=>j.goalId===g.id);const done=jobs.filter(j=>j.integrated).length;return `<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('target')}</span><div><div class="entity-name">${esc(shorten(g.objective,85))}</div><div class="entity-sub">${esc(map[g.projectId]||'Unknown project')}</div></div></div><div class="entity-body">${g.acceptanceCriteria.length} acceptance criteria · ${g.tokenBudget.toLocaleString()} tokens<br>${jobs.length} work packages · ${done} integrated</div>${jobs.length?`<div class="progress-track"><div class="progress-fill" style="width:${Math.round(done/jobs.length*100)}%"></div></div>`:''}<div class="entity-foot">${badge(g.state)}<div class="tiny-actions"><button class="tiny-button" data-inspect="goal:${g.id}">Inspect</button><button class="tiny-button" data-edit="goal:${g.id}">Edit</button><button class="tiny-button" data-act="project-plans" data-id="${g.projectId}">Plan goals</button></div></div></div>`}).join(''):empty('target','No matching goals','Create a goal and set clear success criteria.','create-goal','Create goal')}</div></section>`}
+function projectProviderCapacity(projectId){
+ if(!providerData)return '<p class="subtext">Provider capacity is unavailable.</p>';
+ const planner=providerData.assignments.find(a=>a.projectId===projectId&&a.role==='planner')?.providerId||'codex';
+ const rows=providerData.usage.map(provider=>{
+  const project=provider.projects.find(p=>p.projectId===projectId);
+  if(!project)return '';
+  const localCaps=[provider.localRemainingTokens,project.remainingTokens].filter(Number.isFinite);
+  const remaining=localCaps.length?number(Math.min(...localCaps)):'No local cap';
+  return `<tr><td>${esc(provider.id)}${provider.id===planner?'<small>Planner route</small>':''}${provider.enabled?'':'<small>Disabled</small>'}</td>
+   <td>${number(project.inputTokens)}</td><td>${number(project.outputTokens)}</td><td>${number(project.reservedTokens)}</td><td>${remaining}</td></tr>`;
+ }).join('');
+ return `<h3>Project provider capacity</h3><p class="subtext">Remaining local capacity uses the tighter of each project and profile ceiling. Account allowances are shown in Capacity when available.</p>
+ ${table(['Provider','Input','Output','Reserved','Local remaining'],rows)}`;
+}
+function renderPlans(){
+ const projects=state.projects.map(p=>`<option value="${esc(p.id)}" ${p.id===planProject?'selected':''}>${esc(p.name)}</option>`).join('');
+ const goals=state.goals.filter(g=>!planProject||g.projectId===planProject);
+ const cards=goals.map(g=>{
+  const plan=plansCache.get(g.id), busy=generatingPlans.has(g.id);
+  const project=state.projects.find(p=>p.id===g.projectId);
+  return `<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('route')}</span>
+   <div><div class="entity-name">${esc(shorten(g.objective,85))}</div><div class="entity-sub">${esc(project?.name||'Unknown project')}</div></div></div>
+   <div class="entity-body">${plan?`${plan.packages.length} work packages · master ${esc(shorten(plan.baseCommit,10))}`:'No saved plan'}<br>
+   ${number(g.tokenBudget)} goal tokens · ${g.acceptanceCriteria.length} acceptance criteria</div>
+   <div class="entity-foot">${badge(g.state)}<div class="tiny-actions">
+    <button class="tiny-button" data-inspect="goal:${g.id}">Goal &amp; budget</button>
+    <button class="tiny-button" data-act="plan-preflight" data-id="${g.id}">Check master &amp; open work</button>
+    ${plan?`<button class="tiny-button" data-act="plan-view" data-id="${g.id}">Review plan</button>`:''}
+    ${g.state==='draft'?`<button class="tiny-button" data-act="plan-edit" data-id="${g.id}" ${busy?'disabled':''}>${plan?'Edit plan':'Build plan'}</button>
+    <button class="tiny-button" data-act="plan-generate" data-id="${g.id}" ${busy?'disabled':''}>${busy?'Generating…':plan?'Regenerate':'Generate'}</button>`:''}
+    ${g.state==='active'?`<button class="tiny-button" data-act="queue-run">Run</button><button class="tiny-button" data-control="goal:${g.id}:pause">Pause</button><button class="tiny-button" data-control="goal:${g.id}:stop">Stop</button>`:''}
+    ${['paused','stopped'].includes(g.state)?`<button class="tiny-button" data-control="goal:${g.id}:activate">Resume</button>`:''}
+   </div></div></div>`;
+ }).join('');
+ return header('Goal planner','Review existing work, plan dependencies and inspect provider capacity.','create-goal','Create goal')+
+ `<section class="card" style="margin-bottom:17px"><div class="card-body">
+ <div class="field"><label for="plan-project">Project</label><select id="plan-project"><option value="">All projects</option>${projects}</select></div>
+ ${planProject?`<button class="button button-muted" data-act="open-project-analysis" data-id="${esc(planProject)}">Project review</button>${projectProviderCapacity(planProject)}`:''}</div></section>`+
+ `<div class="cards-list">${cards||empty('route','No goals in this view','Create a draft goal to plan its work packages.')}</div>`;
+}
 function renderJobs(){const items=filtered(state.jobs,['title','description','state','risk']);return header('Jobs','Inspect execution, manage priority and safely control work packages.','create-job','Create job')+`<section class="card">${toolbar('jobs',['queued','preparing','building','gating','reviewing','reworking','awaiting_approval','pr_ready','completed_local','integrated','paused','stopped','failed','blocked'])}${items.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(items.slice().reverse())):empty('layers','No matching jobs','Create a work package or adopt an approved plan.','create-job','Create job')}</section>`}
 function renderWorkers(){const w=state.workers;return header('Workers','Monitor health and control remote-worker admission. Drain/disable never force-kills a running process.','create-worker','Register worker')+`<div class="grid metrics-grid">${metric('Registered',w.length,'Known workers','cpu')}${metric('Online',w.filter(workerActive).length,'Heartbeat < 20 seconds','activity')}${metric('Draining',w.filter(x=>x.draining).length,'No new work assigned','pause')}${metric('Available',w.filter(x=>x.enabled&&!x.draining&&workerActive(x)).length,'Eligible for claims','check')}</div><div class="cards-list">${w.length?w.map(x=>`<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('cpu')}</span><div><div class="entity-name">${esc(x.id)}</div><div class="entity-sub">${esc(x.platform)}</div></div></div><div class="entity-body"><div class="worker-heartbeat"><span class="live-dot ${workerActive(x)?'':'offline'}"></span>${workerActive(x)?'Live heartbeat':'Heartbeat unavailable'} · ${esc(relative(x.heartbeat))}</div><p>Admission: ${x.enabled?(x.draining?'Draining':'Enabled'):'Disabled'}</p></div><div class="entity-foot">${badge(!x.enabled?'disabled':x.draining?'draining':workerActive(x)?'online':'offline')}<div class="tiny-actions"><button class="tiny-button" data-inspect="worker:${encodeURIComponent(x.id)}">Inspect</button><button class="tiny-button" data-act="worker-edit" data-id="${encodeURIComponent(x.id)}">Edit</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${managedWorkers.includes(x.id)?'stop':'start'}">${managedWorkers.includes(x.id)?'Stop local':'Start local'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${x.draining||!x.enabled?'enable':'drain'}">${x.draining||!x.enabled?'Enable':'Drain'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:disable" ${!x.enabled?'disabled':''}>Disable</button></div></div></div>`).join(''):empty('cpu','No registered workers','Register a remote worker, then start it with the same ID to track its heartbeat.','create-worker','Register worker')}</div>`}
 function renderQueue(){const queued=state.jobs.filter(j=>j.state==='queued');const active=state.jobs.filter(j=>['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state));const waiting=queued.filter(j=>j.dependsOn.some(dep=>!state.jobs.some(o=>o.id===dep&&o.integrated)));return header('Queue & scheduling','Control admission, prioritize work and inspect dependency blockers.')+`<div class="overview-hero"><div class="overview-hero-left"><div class="hero-orb">${ico('queue')}</div><div><h2>${state.paused?'Queue paused':'Scheduler ready'}</h2><p>${queued.length} queued · ${active.length} active · ${waiting.length} waiting for dependencies</p></div></div><div class="queue-controls"><button class="button button-primary" data-act="queue-run">${ico('play')} Run</button><button class="button button-muted" data-act="queue-pause">${ico('pause')} Pause</button><button class="button button-muted" data-act="queue-resume">${ico('refresh')} Resume</button><button class="button button-danger" data-act="queue-stop">${ico('stop')} Stop</button></div></div><div class="grid metrics-grid">${metric('Ready or queued',queued.length,'Eligible after constraints','layers')}${metric('Active',active.length,'Working or validating','activity')}${metric('Waiting dependencies',waiting.length,'Must integrate predecessors','route')}${metric('Global concurrency',settings.maxParallel??'—','Configured worker slots','cpu')}</div>${card('Work schedule','Prioritized by eligibility and conflict',queued.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(queued.slice().sort((a,b)=>b.priority-a.priority))):empty('check','Queue is empty','No pending jobs. Add a job or adopt a plan.','create-job','Add job'))}<div style="margin-top:17px">${card('In flight','Active jobs continue during queue pause',active.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(active)):empty('activity','Nothing running','Start the queue when jobs are ready.'))}</div>`}
@@ -164,7 +223,7 @@ function renderUsage(){
    <td>${Number(p.inputTokens||0).toLocaleString()}</td><td>${Number(p.outputTokens||0).toLocaleString()}</td>
    <td>${Number(p.reservedTokens||0).toLocaleString()}</td>
    <td>${p.localRemainingTokens===null?'Not configured':Number(p.localRemainingTokens).toLocaleString()}</td>
-   <td>${p.kind==='codex'&&usage?.weekly?.remainingPercent!==undefined?esc(usage.weekly.remainingPercent.toFixed(1))+'% weekly':'Unavailable'}</td></tr>`).join('');
+   <td>${p.kind==='codex'&&usage?'See Codex account below':'Unavailable'}</td></tr>`).join('');
  body+=card('Provider and model consumption','Observed usage after provider attribution; unreported prior history cannot be reconstructed.',
    rows?table(['Provider','Input tokens','Output tokens','Held / active','Local remaining','Account allowance'],rows):
    empty('gauge','Provider data unavailable','Connect to the controller to load provider utilization.'));
@@ -186,7 +245,7 @@ function renderUsage(){
  const holds=(providerData?.heldReservations||[]).map(h=>
    `<tr><td>${esc(h.providerId)}</td><td>${esc(h.usage?.jobId||'Unknown')}</td>
     <td>${Number(h.usage?.inputTokens||0).toLocaleString()} / ${Number(h.usage?.outputTokens||0).toLocaleString()}</td>
-    <td>${Number(h.reserved-h.consumed).toLocaleString()}</td>
+    <td>${number(Math.max(0,h.reserved-h.consumed))}</td>
     <td><button class="tiny-button" data-act="provider-reconcile" data-id="${esc(h.id)}">Reconcile</button></td></tr>`).join('');
  if(holds)body+=`<div style="margin-top:17px">`+
   card('Held provider reservations','Unknown final usage must be independently verified before releasing unused capacity.',
@@ -244,10 +303,16 @@ function renderOperationalPulse(){
 }
 const JobStatesActiveUi=['preparing','building','gating','reviewing','reworking','awaiting_approval'];
 
-function render(){if(!token){$('main').innerHTML=`<div class="loading-screen"><div style="text-align:center">${ico('shield')}<h2>Connect to Mission Control</h2><p class="muted">Enter the API token to manage your Factory workspace.</p><button class="button button-primary" data-act="open-connection">Connect</button></div></div>`;return}
-const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals,analysis:renderAnalysis,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings};$('main').innerHTML=(renders[view]||renderOverview)();
+let renderedMain;
+function render(){if(!token){renderedMain=null;$('main').innerHTML=`<div class="loading-screen"><div style="text-align:center">${ico('shield')}<h2>Connect to Mission Control</h2><p class="muted">Enter the API token to manage your Factory workspace.</p><button class="button button-primary" data-act="open-connection">Connect</button></div></div>`;return}
+const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals,analysis:renderAnalysis,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings};const next=(renders[view]||renderOverview)();
+ const mainChanged=next!==renderedMain;
+ if(mainChanged){$('main').innerHTML=next;renderedMain=next;}
  for(const name of ['projects','goals','jobs','workers'])document.querySelectorAll(`[data-count="${name}"]`).forEach(el=>el.textContent=(state[name]||[]).length||'');
   document.querySelectorAll('[data-count="recovery"]').forEach(el=>el.textContent=recoveryCandidates().length||'');
+ if(!mainChanged)return;
+ const projectFilter=$('plan-project');
+ if(projectFilter)projectFilter.addEventListener('change',e=>{planProject=e.target.value;render();$('plan-project').focus()});
  const selector=$('analysis-project');
  if(selector)selector.addEventListener('change',e=>{analysisProject=e.target.value;loadProjectReview(analysisProject)});
  const s=$('table-search');if(s){s.addEventListener('input',e=>{const pos=e.target.selectionStart;search=e.target.value;render();$('table-search').focus();$('table-search').setSelectionRange(pos,pos)});$('table-filter').addEventListener('change',e=>{filter=e.target.value;render()})}}
@@ -316,8 +381,10 @@ function formProjectProviders(id){
   },'Save provider routing');
 }
 function formGoal(id){const g=state.goals.find(g=>g.id===id);if(!g&&!state.projects.length){notify('Register a project first',true);return}let v=g||{projectId:state.projects[0].id,objective:'',acceptanceCriteria:[],tokenBudget:100000};const html=field('projectId','Project',v.projectId,'select',projectOptions())+field('objective','Outcome / objective',v.objective,'textarea')+field('acceptanceCriteria','Acceptance criteria (one per line)',v.acceptanceCriteria.join('\n'),'textarea')+field('tokenBudget','Token budget',v.tokenBudget,'number');openForm(g?'Edit goal':'Create goal','Describe a measurable outcome and its success criteria.',html,async f=>{let x=values(f);await mutate(g?`goals/${g.id}`:'goals',g?'PUT':'POST',{projectId:x.projectId,objective:x.objective,acceptanceCriteria:lines(x.acceptanceCriteria),tokenBudget:Number(x.tokenBudget)})},g?'Update goal':'Create goal')}
-function formJob(id){const j=state.jobs.find(j=>j.id===id);if(!j&&!state.projects.length){notify('Register a project first',true);return}const v=j||{projectId:state.projects[0].id,goalId:'',title:'',description:'',mode:'local',risk:'medium',priority:50,dependsOn:[],expectedPaths:[]};let html=field('projectId','Project',v.projectId,'select',projectOptions())+field('goalId','Linked goal (optional)',v.goalId||'','select',goalOptions())+field('title','Title',v.title)+field('description','Work package description',v.description,'textarea')+`<div class="field-row">${field('mode','Execution',v.mode,'select',[['local','Local'],['remote','Remote']])}${field('risk','Risk',v.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}</div>`+field('priority','Priority (0-100)',v.priority,'number')+field('expectedPaths','Expected paths (one per line)',v.expectedPaths.join('\n'),'textarea')+field('dependsOn','Dependencies (job IDs, one per line)',v.dependsOn.join('\n'),'textarea');
- openForm(j?'Edit job':'Create job','Execution starts only when dependencies and policies allow it.',html,async f=>{const x=values(f);await mutate(j?`jobs/${j.id}`:'jobs',j?'PUT':'POST',{projectId:x.projectId,goalId:x.goalId||null,title:x.title,description:x.description,mode:x.mode,risk:x.risk,priority:Number(x.priority),expectedPaths:lines(x.expectedPaths),dependsOn:lines(x.dependsOn)})},j?'Save job':'Queue job')}
+function formJob(id){const j=state.jobs.find(j=>j.id===id);if(!j&&!state.projects.length){notify('Register a project first',true);return}const v=j||{projectId:state.projects[0].id,goalId:'',title:'',description:'',mode:'local',risk:'medium',priority:50,dependsOn:[],expectedPaths:[]};let html=field('projectId','Project',v.projectId,'select',projectOptions())+field('goalId','Linked goal (optional)',v.goalId||'','select',goalOptions())+field('title','Title',v.title)+field('description','Work package description',v.description,'textarea')+`<div class="field-row">${field('mode','Execution',v.mode,'select',[['local','Local'],['remote','Remote']])}${field('risk','Risk',v.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}</div>`+field('priority','Priority (0-100)',v.priority,'number')+field('expectedPaths','Expected paths (one per line)',v.expectedPaths.join('\n'),'textarea')+field('dependsOn','Dependencies (job IDs, one per line)',v.dependsOn.join('\n'),'textarea')
+ +field('reviewedExistingWork','I reviewed existing master code and overlapping work before creating this package',false,'checkbox');
+ openForm(j?'Edit job':'Create job','Execution starts only when dependencies and policies allow it.',html,async f=>{const x=values(f);await mutate(j?`jobs/${j.id}`:'jobs',j?'PUT':'POST',{projectId:x.projectId,goalId:x.goalId||null,title:x.title,description:x.description,mode:x.mode,risk:x.risk,priority:Number(x.priority),expectedPaths:lines(x.expectedPaths),dependsOn:lines(x.dependsOn),
+ reviewedExistingWork:!!f.elements.reviewedExistingWork?.checked})},j?'Save job':'Queue job')}
 function formWorker(id){const w=state.workers.find(w=>w.id===id);openForm(w?'Configure worker':'Register worker','Remote workers authenticate with the Factory token. Local workers may be launched directly from this dashboard.',field('id','Unique worker ID',w?.id||'')+field('platform','Platform / capabilities',w?.platform||'remote'),async f=>{const x=values(f);if(w&&x.id!==w.id)throw Error('Worker ID cannot be changed');await mutate('workers/register','POST',x)},w?'Save worker':'Register worker')}
 function formSettings(){
  const supportsExtensions=Number.isFinite(settings.goalExtensionIncrementTokens)&&
@@ -369,9 +436,27 @@ async function runQueue(action){if(action==='stop'){if(!confirm('Stop local acti
 async function verify(id){if(!confirm('Verify this job is integrated into its base branch?'))return;await mutate(`jobs/${id}/verify`,'POST',{})}
 const plansCache=new Map(); let managedWorkers=[];async function loadPlans(){if(!token)return;try{const plans=await api('plans');plansCache.clear();for(const p of plans)if(p.plan)plansCache.set(p.id,p.plan);if(view==='plans')render()}catch{}}
 function planEditor(goalId){const g=state.goals.find(g=>g.id===goalId);if(!g)return;const existing=plansCache.get(goalId);planGoal=goalId;planDraft=structuredClone(existing||{goalId,projectId:g.projectId,baseCommit:'',packages:[]});renderPlanEditor()}
-function renderPlanEditor(){if(!planDraft)return;const html=`<div class="card" style="margin-top:17px"><div class="card-head"><div><h2>Work packages</h2><p>Dependencies use zero-based package indexes; cycles are rejected by the server.</p></div><button class="button button-muted" data-act="package-add">${ico('plus')} Add package</button></div><div class="card-body"><div class="plan-packages">${planDraft.packages.length?planDraft.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(shorten(p.description,100))} · Priority ${p.priority} · ${esc(p.risk)} · Depends on ${esc(p.dependsOn.join(', ')||'none')}</small></div><div class="tiny-actions"><button class="tiny-button" data-act="package-edit" data-index="${i}">Edit</button><button class="tiny-button" data-act="package-remove" data-index="${i}">Remove</button></div></div>`).join(''):empty('route','No packages yet','Add work packages and dependencies before saving.')}</div><div class="head-actions" style="margin-top:20px;justify-content:flex-end"><button class="button button-muted" data-act="plan-close">Cancel</button><button class="button button-primary" data-act="plan-save">${ico('check')} Save plan</button></div></div></div>`;$('inspector-title').textContent='Plan Designer';$('inspector-body').innerHTML=`<p class="muted">${esc(gName(planGoal))}</p>${html}`;showInspector()}
+function renderPlanEditor(){if(!planDraft)return;const html=`<div class="card" style="margin-top:17px"><div class="card-head"><div><h2>Work packages</h2><p>Select dependencies by title. The server validates paths and cycles before saving.</p></div><button class="button button-muted" data-act="package-add">${ico('plus')} Add package</button></div><div class="card-body"><div class="plan-packages">${planDraft.packages.length?planDraft.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(shorten(p.description,100))} · Priority ${p.priority} · ${esc(p.risk)} · Depends on ${esc(p.dependsOn.map(n=>planDraft.packages[n]?.title||('Package '+n)).join(', ')||'none')}</small></div><div class="tiny-actions"><button class="tiny-button" data-act="package-edit" data-index="${i}">Edit</button><button class="tiny-button" data-act="package-remove" data-index="${i}">Remove</button></div></div>`).join(''):empty('route','No packages yet','Add work packages and dependencies before saving.')}</div><div class="head-actions" style="margin-top:20px;justify-content:flex-end"><button class="button button-muted" data-act="plan-close">Cancel</button><button class="button button-primary" data-act="plan-save">${ico('check')} Save plan</button></div></div></div>`;$('inspector-title').textContent='Plan Designer';$('inspector-body').innerHTML=`<p class="muted">${esc(gName(planGoal))}</p>${html}`;showInspector()}
 const gName=id=>state.goals.find(g=>g.id===id)?.objective||'';
-function packageForm(i){const p=planDraft.packages[i]||{title:'',description:'',risk:'medium',priority:50,files:[],dependsOn:[]};let html=field('title','Package title',p.title)+field('description','Description / acceptance criteria',p.description,'textarea')+`<div class="field-row">${field('risk','Risk',p.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}${field('priority','Priority',p.priority,'number')}</div>`+field('files','Expected file paths, one per line',p.files.join('\n'),'textarea')+field('dependsOn','Dependency indexes, comma-separated',p.dependsOn.join(','));openForm(i===planDraft.packages.length?'Add work package':'Edit work package','Keep packages independently executable where possible.',html,async f=>{const x=values(f);const item={title:x.title,description:x.description,risk:x.risk,priority:Number(x.priority),files:lines(x.files),dependsOn:x.dependsOn.split(',').map(x=>x.trim()).filter(Boolean).map(Number)};if(item.dependsOn.some(n=>!Number.isInteger(n)||n<0||n===i||n>=planDraft.packages.length))throw Error('Invalid dependency indexes');planDraft.packages[i]=item;renderPlanEditor()})}
+function packageForm(i){
+ const packages=planDraft.packages;
+ const p=packages[i]||{title:'',description:'',risk:'medium',priority:50,files:[],dependsOn:[]};
+ const options=packages.map((candidate,n)=>n===i?'':`<label class="checkbox-line">
+  <input type="checkbox" name="dependency" value="${n}" ${p.dependsOn.includes(n)?'checked':''}> ${esc(candidate.title)}</label>`).join('');
+ const html=field('title','Package title',p.title)+field('description','Description / acceptance criteria',p.description,'textarea')+
+  `<div class="field-row">${field('risk','Risk',p.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}${field('priority','Priority',p.priority,'number')}</div>`+
+  field('files','Expected file paths, one per line',p.files.join('\n'),'textarea')+
+  (options?`<fieldset><legend>Depends on</legend>${options}</fieldset>`:'');
+ openForm(i===packages.length?'Add work package':'Edit work package','A dependency must integrate before this package can start.',html,async f=>{
+  const x=values(f);
+  const item={title:x.title.trim(),description:x.description.trim(),risk:x.risk,priority:Number(x.priority),
+   files:lines(x.files),dependsOn:new FormData(f).getAll('dependency').map(Number)};
+  if(!item.title||!item.description||!item.files.length)throw Error('Title, description and expected paths are required');
+  if(!Number.isInteger(item.priority)||item.priority<0||item.priority>100)throw Error('Priority must be an integer from 0 to 100');
+  packages[i]=item;
+  renderPlanEditor();
+ });
+}
 
 let inspectorKey=null;
 function jobInspectorDetails(j,kv){
@@ -447,8 +532,10 @@ async function renderGoalBudget(goalId){
   if(inspectorKey!=='goal:'+goalId||!$('inspector-goal-budget'))return;
   const nf=x=>Number(x||0).toLocaleString();
   const rows=budget.reservations||[];
-  const active=rows.filter(r=>r.state==='active').reduce((a,r)=>a+Number(r.outstanding||0),0);
-  const held=rows.filter(r=>r.state==='held').reduce((a,r)=>a+Number(r.outstanding||0),0);
+  const active=budget.activeOutstanding;
+  const held=budget.heldOutstanding;
+ const goal=state.goals.find(g=>g.id===goalId);
+ const providerRows=(budget.providers||[]).map(p=>`<tr><td>${esc(p.providerId)}</td><td>${esc(p.model||"Provider default")}</td><td>${esc(p.role)}</td><td>${nf(p.inputTokens)}</td><td>${nf(p.outputTokens)}</td></tr>`).join("");
   const total=Number(budget.total||0),used=Number(budget.consumed||0),committed=Number(budget.committed||0);
   const percent=total>0?Math.min(100,Math.max(0,100*(used+committed)/total)):0;
   const records=rows.map(r=>{const j=state.jobs.find(j=>j.id===r.jobId);
@@ -484,7 +571,11 @@ async function renderGoalBudget(goalId){
    </div><div class="progress-track" role="meter" aria-label="Consumed and reserved goal capacity" aria-valuenow="${percent.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${percent.toFixed(1)}%"></div></div>
    <p class="subtext">Goal-budget accounting is separate from provider account allowances. Final usage that is unknown must remain unsettled.</p>
    <h3>Reservations</h3>${rows.length?table(['Job','Status','Reserved','Consumed','Outstanding'],records):'<p class="subtext">No reservations reported.</p>'}
-   ${held>0?`<button class="button button-muted" data-act="budget-reconcile" data-id="${goalId}">Review held usage</button>`:''}
+   ${rows.some(r=>r.state==='held')?`<button class="button button-muted" data-act="budget-reconcile" data-id="${goalId}">Review held usage</button>`:''}
+   ${budget.planningHeld>0?'<p class="subtext">Reconcile held planning tokens in Capacity → Held provider reservations.</p>':''}
+   <h3>Goal usage by provider</h3>
+   ${providerRows?table(['Provider','Model','Role','Input','Output'],providerRows):'<p class="subtext">No attributed provider usage for this goal yet.</p>'}
+   ${goal?projectProviderCapacity(goal.projectId):''}
    <h3>Per-job reported usage</h3>
    ${usageRows?table(['Job','Current owner','Input','Output','Total','Final usage'],usageRows):'<p class="subtext">No linked job usage reported.</p>'}
    <p class="subtext">Owner is the current lease assignment, not a complete historical worker attribution. Unconfirmed final usage is not a provider-account allowance.</p>
@@ -541,23 +632,76 @@ function inspect(type,id){const entity=(type==='project'?state.projects:type==='
   if(type==='goal')renderGoalBudget(id);
   if(type==='job')renderJobQuality(id);
 }
+function preflightDetails(preflight){
+ if(!preflight)return '<p class="subtext">Save or regenerate the plan to capture master and open work.</p>';
+ const source=preflight.existingCode.map(c=>`<li><strong>${esc(c.path)}</strong><small>${esc(c.sample)}</small></li>`).join('');
+ const jobs=preflight.existingJobs.map(j=>`<li>${esc(j.title)} · ${esc(j.state)}${j.integrated?' · verified integrated':''}</li>`).join('');
+ const links=items=>(items||[]).map(item=>{
+  const label=`#${esc(item.number)} ${esc(item.title)}`;
+  const url=safeUrl(item.url);
+  return `<li>${url?`<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">${label}</a>`:label}</li>`;
+ }).join('');
+ const section=(title,items,note)=>`<h4>${title}</h4>${note?`<p class="subtext">${esc(note)}</p>`:''}${items?`<ul>${items}</ul>`:'<p class="subtext">No matching candidates returned.</p>'}`;
+ return `<h3>Master-first preflight</h3><p class="subtext">master · ${esc(preflight.baseCommit)} · ${esc(dateTime(preflight.capturedAt))}</p>
+ <p class="subtext">Inspect matching source, jobs, PRs and issues before adopting. Extend existing work where possible.</p>
+ ${section('Existing source on master',source)}${section('Existing Factory work',jobs)}
+ ${section('Open pull requests',links(preflight.openPullRequests),preflight.pullRequestsChecked?'Inventory checked':preflight.pullRequestCheckNote||'Inventory unchecked')}
+ ${section('Open issues',links(preflight.openIssues),preflight.issuesChecked?'Inventory checked':preflight.issueCheckNote||'Inventory unchecked')}`;
+}
 async function act(action,id,index){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'project-providers':formProjectProviders(id);break;
  case'analysis-run':await startProjectReview();break;case'analysis-goal':createReviewGoal(id);break;case'provider-reconcile':formProviderReconciliation(id);break;
- case'open-project-analysis':analysisProject=id;nav('analysis');await loadProjectReview(id);break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
+ case'project-plans':planProject=id;nav('plans');await loadPlans();break;
+ case'open-project-analysis':closeInspector();analysisProject=id;nav('analysis');await loadProjectReview(id);break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
  case'queue-run':case'queue-pause':case'queue-resume':case'queue-stop':await runQueue(action.slice(6));break;
  case'verify':await verify(id);break;
  case'job-start':await mutate(`jobs/${id}/start`,'POST',{});break;
- case'plan-generate':await mutate(`plans/${id}/generate`,'POST',{});break;
+ case'plan-generate':{
+ if(generatingPlans.has(id))break;
+ if(plansCache.has(id)&&!confirm('Replace the saved plan with a new proposal?'))break;
+ generatingPlans.add(id);render();
+ try{
+  const plan=await api('plans/'+id+'/generate?wait=true','POST',{});
+  plansCache.set(id,plan);
+  notify('Plan generated');
+  if(view==='plans')await act('plan-view',id);
+ }finally{generatingPlans.delete(id);render();await fetchProviders()}
+ break;}
  case'plan-edit':planEditor(id);break;
- case'plan-view':{const plan=plansCache.get(id);if(!plan)return;const groups=plan.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(p.description)} · Depends on ${p.dependsOn.join(', ')||'none'}</small></div></div>`).join('');inspectorPanel('Plan details',`<p class="subtext">${esc(gName(id))}</p><div class="plan-packages">${groups}</div>`);break;}
- case'plan-adopt':if(!confirm('Adopt the plan into executable work packages? This changes the goal from draft to active.'))return;await mutate(`plans/${id}/adopt`,'POST',{mode:'local'});break;
+ case'plan-preflight':{
+ const evidence=await api('goals/'+id+'/preflight');
+ inspectorPanel('Check master & open work',preflightDetails(evidence));
+ break;}
+ case'plan-view':{
+ const plan=plansCache.get(id);if(!plan)return;
+ const goal=state.goals.find(g=>g.id===id);
+ const packages=plan.packages.map((p,i)=>'<div class="package-row"><span class="package-num">'+(i+1)+'</span><div><strong>'+
+  esc(p.title)+'</strong><small>'+esc(p.description)+'</small><small>Depends on '+esc(p.dependsOn.map(n=>plan.packages[n]?.title).join(', ')||'none')+
+  '</small><small>Paths '+esc(p.files.join(', '))+'</small></div></div>').join('');
+ const adopt=goal?.state==='draft'&&plan.preflight?'<button class="button button-primary" data-act="plan-adopt" data-id="'+id+'">Adopt reviewed plan</button>':'';
+ inspectorPanel('Plan details','<p class="subtext">'+esc(gName(id))+'</p>'+preflightDetails(plan.preflight)+
+  '<h3>Proposed work packages</h3><div class="plan-packages">'+packages+'</div><p>'+adopt+'</p>');
+ break;}
+ case'plan-adopt':{
+ const plan=plansCache.get(id);
+ if(!plan?.preflight){notify('Save or regenerate the plan to establish a master preflight first',true);return}
+ if(!confirm('Before adopting: have you reviewed existing master code, partial implementations and relevant open PRs and issues, and confirmed that no duplicate work package will be created?'))return;
+ await mutate(`plans/${id}/adopt`,'POST',{mode:'local',reviewedExistingWork:true});
+ break;
+}
  case'plan-close':closeInspector();planDraft=null;break;
  case'package-add':packageForm(planDraft.packages.length);break;
  case'package-edit':packageForm(Number(index));break;
  case'package-remove':{const i=Number(index);if(planDraft.packages.some((p,n)=>n!==i&&p.dependsOn.includes(i))){notify('Remove dependent references first',true);return}planDraft.packages.splice(i,1);for(const p of planDraft.packages)p.dependsOn=p.dependsOn.map(n=>n>i?n-1:n);renderPlanEditor();break;}
- case'plan-save':if(!planDraft.packages.length){notify('Add at least one work package',true);return}await mutate(`plans/${planGoal}`,'PUT',planDraft);closeInspector();await loadPlans();break;
+ case'plan-save':{
+ if(!planDraft?.packages.length){notify('Add at least one work package',true);return}
+ const goalId=planGoal;
+ const saved=await mutate('plans/'+goalId,'PUT',planDraft);
+ plansCache.set(goalId,saved);
+ render();
+ await act('plan-view',goalId);
+ break;}
  }}
-function showPalette(){const commands=[['Overview','overview','overview'],['Projects','projects','folder'],['Goals','goals','target'],['Project review','analysis','eye'],['Plans','plans','route'],['Jobs','jobs','layers'],['Queue','queue','queue'],['Recovery','recovery','shield'],['Workers','workers','cpu'],['Activity','events','activity'],['Settings','settings','settings']];const q=$('palette-input').value.toLowerCase();$('palette-results').innerHTML=commands.filter(([a])=>a.toLowerCase().includes(q)).map(([title,to,i])=>`<button class="palette-entry" data-view="${to}">${ico(i)}${title}<small>Navigate</small></button>`).join('')||`<div class="empty">No matching commands</div>`}
+function showPalette(){const commands=[['Overview','overview','overview'],['Projects','projects','folder'],['Goals','goals','target'],['Project review','analysis','eye'],['Goal planner','plans','route'],['Jobs','jobs','layers'],['Queue','queue','queue'],['Recovery','recovery','shield'],['Workers','workers','cpu'],['Activity','events','activity'],['Settings','settings','settings']];const q=$('palette-input').value.toLowerCase();$('palette-results').innerHTML=commands.filter(([a])=>a.toLowerCase().includes(q)).map(([title,to,i])=>`<button class="palette-entry" data-view="${to}">${ico(i)}${title}<small>Navigate</small></button>`).join('')||`<div class="empty">No matching commands</div>`}
 document.addEventListener('click',async e=>{const btn=e.target.closest('[data-view],[data-act],[data-inspect],[data-edit],[data-control]');if(!btn)return;try{if(btn.dataset.view){nav(btn.dataset.view);if($('palette').open)$('palette').close();if(view==='plans')loadPlans();if(view==='analysis')loadProjectReview();return}
  if(btn.dataset.inspect){const [type,id]=btn.dataset.inspect.split(':');inspect(type,decodeURIComponent(id));return}
  if(btn.dataset.edit){const [type,id]=btn.dataset.edit.split(':');if(type==='project')formProject(id);else if(type==='goal')formGoal(id);else if(type==='job')formJob(id);return}

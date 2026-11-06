@@ -49,13 +49,13 @@ public static class Program
             Console.WriteLine("""
 Factory | C# / .NET 10
   version | doctor | init <repo> --name NAME [--base master] [--checks-json PATH]
-  enqueue --project NAME --title TITLE --description TEXT [--mode local|remote] [--paths file1,file2]
+  enqueue --project NAME --title TITLE --description TEXT [--mode local|remote] [--paths file1,file2] --reviewed-existing-work
   run | recover | reconcile <job-guid> --reviewed --reason TEXT | status | pause | resume | verify <job-guid>
   goal add --project NAME --objective TEXT [--criteria TEXT] [--budget TOKENS]
-  plan --goal GUID | adopt --goal GUID [--mode local|remote]
+  plan --goal GUID | adopt --goal GUID [--mode local|remote] [--reviewed-existing-work]
   graph --project NAME | impact --project NAME --file RELATIVE_PATH
   knowledge --project NAME [--topic TOPIC --content TEXT]
-  analytics | eval --suite FILE | test-audit --project NAME [--enqueue]
+  analytics | eval --suite FILE | test-audit --project NAME [--enqueue --reviewed-existing-work]
   release --project NAME --version X.Y.Z
   dashboard [--port 8787] | worker --server HTTPS_URL --workspace DIR --id WORKER_ID
   worker-token --id WORKER_ID
@@ -123,7 +123,9 @@ Environment: FACTORY_HOME overrides the local state directory.
                 var repo = GitOperations.RepositoryRoot(args[1]);
                 var name = Required(args, "name");
                 var baseBranch = Option(args, "base", "master");
-                GitOperations.Git(repo, "rev-parse", "--verify", baseBranch);
+                if (baseBranch != "master")
+                    throw new InvalidOperationException("All Factory work packages must be based on master");
+                GitOperations.Git(repo, "rev-parse", "--verify", "refs/heads/master");
                 var checksFile = Option(args, "checks-json");
                 var checks = string.IsNullOrEmpty(checksFile) ? new List<CheckCommand>() : CheckLoader.Read(checksFile);
                 var project = new ProjectInfo
@@ -144,15 +146,28 @@ Environment: FACTORY_HOME overrides the local state directory.
                 var p = store.Project(Required(args, "project"));
                 var mode = Option(args, "mode", "local");
                 if (mode is not ("local" or "remote")) throw new ArgumentException("Invalid mode");
+                var title = Required(args, "title");
+                var description = Required(args, "description");
+                WorkPackagePreflight.RequireMaster(p);
+                var preflight = WorkPackagePreflight.InspectDirectJob(store.Read(), p, title, description);
+                if (preflight is not null && !Flag(args, "reviewed-existing-work"))
+                    throw new InvalidOperationException(
+                        "Inspect master code and open work first; explicitly pass --reviewed-existing-work");
                 var job = store.AddJob(new FactoryJob
                 {
-                    ProjectId = p.Id, Title = Required(args, "title"), Description = Required(args, "description"),
+                    ProjectId = p.Id, Title = title, Description = description,
                     Mode = mode, Priority = int.Parse(Option(args, "priority", "50")),
                     Risk = Option(args, "risk", "medium"), MaxRounds = settings.MaxReviewRounds,
                     ExpectedPaths = Option(args, "paths").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList(),
                     DependsOn = Option(args, "depends").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                         .Select(GuidArg).ToList()
                 });
+                if (preflight is not null)
+                    store.Event(job.Id, "job_preflight", "master " + preflight.BaseCommit +
+                        "; source candidates " + preflight.ExistingCode.Count +
+                        "; existing work " + preflight.ExistingJobs.Count +
+                        "; matching PRs " + preflight.OpenPullRequests.Count +
+                        "; PR inventory checked " + preflight.PullRequestsChecked);
                 Print(job); return 0;
             }
             case "run": await engine.RunQueueAsync(CancellationToken.None); return 0;
@@ -183,10 +198,11 @@ Environment: FACTORY_HOME overrides the local state directory.
             {
                 var goal = store.Read().Goals.Single(g => g.Id == GuidArg(Required(args, "goal")));
                 var project = store.Read().Projects.Single(p => p.Id == goal.ProjectId);
-                Print(await Planning.ProposeAsync(store, project, goal, AgentRuntimeFactory.Create(settings), CancellationToken.None));
+                Print(await Planning.ProposeAsync(store, project, goal, settings, CancellationToken.None));
                 return 0;
             }
-            case "adopt": Print(Planning.Adopt(store, GuidArg(Required(args, "goal")), Option(args, "mode", "local"))); return 0;
+            case "adopt": Print(Planning.Adopt(store, GuidArg(Required(args, "goal")),
+                Option(args, "mode", "local"), Flag(args, "reviewed-existing-work"))); return 0;
             case "graph":
             {
                 var p = store.Project(Required(args, "project"));
@@ -240,7 +256,7 @@ Environment: FACTORY_HOME overrides the local state directory.
             {
                 var p = store.Project(Required(args, "project"));
                 Console.WriteLine(await TestEngineering.AuditAsync(store, p, AgentRuntimeFactory.Create(settings),
-                    Flag(args, "enqueue"), CancellationToken.None));
+                    Flag(args, "enqueue"), CancellationToken.None, Flag(args, "reviewed-existing-work")));
                 return 0;
             }
             case "release": Print(Releases.Prepare(store, store.Project(Required(args, "project")), Required(args, "version"))); return 0;

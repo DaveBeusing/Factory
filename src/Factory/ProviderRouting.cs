@@ -146,7 +146,10 @@ public sealed class OllamaAgentRuntime(string endpoint, string model) : IAgentRu
         if (!readOnly) throw new InvalidOperationException("Ollama adapter supports read-only work only");
         if (!string.IsNullOrEmpty(previousSession))
             throw new InvalidOperationException("Ollama adapter does not support session continuation");
-        using var client = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+        using var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false })
+        {
+            Timeout = TimeSpan.FromMinutes(5)
+        };
         using var result = await client.PostAsJsonAsync(new Uri(new Uri(endpoint.TrimEnd('/') + "/"), "api/generate"),
             new { model, prompt, stream = false }, cancellation);
         result.EnsureSuccessStatusCode();
@@ -259,12 +262,13 @@ public static class ProviderBudgetLedger
                 {
                     var limit = state.ProviderBudgetLimits.FirstOrDefault(b =>
                         b.ProjectId == p.Id && b.ProviderId == profile.Id)?.TokenLimit ?? 0;
-                    var projectSpent = records.Where(x => x.ProjectId == p.Id)
-                        .Sum(x => checked(x.InputTokens + x.OutputTokens));
+                    var projectRecords = records.Where(x => x.ProjectId == p.Id).ToArray();
+                    var projectSpent = projectRecords.Sum(x => checked(x.InputTokens + x.OutputTokens));
                     var projectPending = state.ProviderBudgetReservations.Where(r =>
                         r.ProviderId == profile.Id && r.ProjectId == p.Id && r.State != "released")
                         .Sum(r => Math.Max(0, checked(r.Reserved - r.Consumed)));
                     return new { projectId = p.Id, p.Name, configuredLimit = limit,
+                        inputTokens = projectRecords.Sum(x => x.InputTokens), outputTokens = projectRecords.Sum(x => x.OutputTokens),
                         observedTokens = projectSpent, reservedTokens = projectPending,
                         remainingTokens = limit > 0 ? (long?)Math.Max(0, limit - projectSpent - projectPending) : null };
                 }).ToArray()
@@ -443,14 +447,16 @@ public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore st
         {
             if (!state.Projects.Any(p => p.Id == projectId && p.Status == "active"))
                 throw new InvalidOperationException("Project is unavailable");
-            if (goalId.HasValue && !state.Goals.Any(g => g.Id == goalId && g.ProjectId == projectId))
-                throw new InvalidOperationException("Planning goal is missing");
+            if (goalId.HasValue && !state.Goals.Any(g => g.Id == goalId && g.ProjectId == projectId && g.State == "draft"))
+                throw new InvalidOperationException("Planning requires a draft goal");
+            if (goalId.HasValue && state.ProviderBudgetReservations.Any(r => r.State == "active" &&
+                state.ProviderUsages.Any(u => u.Id == r.UsageId && u.GoalId == goalId && !u.JobId.HasValue)))
+                throw new InvalidOperationException("A planning turn is already active for this goal");
             return ProviderBudgetLedger.Begin(state,
                 new FactoryJob { Id = Guid.Empty, ProjectId = projectId, GoalId = goalId },
                 profile, role, model, reservationTokens).Id;
         });
         using var scope = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        bool reported = false;
         bool completed = false;
         bool limitReached = false;
         long lastIn = 0, lastOut = 0;
@@ -459,7 +465,6 @@ public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore st
             if (usage.InputTokens < lastIn || usage.OutputTokens < lastOut) return;
             var remaining = store.Change(state => ProviderBudgetLedger.Record(state, usageId, usage));
             lastIn = usage.InputTokens; lastOut = usage.OutputTokens;
-            reported = true;
             onUsage?.Invoke(usage);
             if (remaining <= 0) { limitReached = true; scope.Cancel(); }
         }

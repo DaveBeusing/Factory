@@ -7,7 +7,7 @@ Factory has a provider-independent routing boundary with two currently implement
 | Codex `exec` / `app-server` | Workspace write | Analysis, planning and reviews | Agent-reported | Account windows if supplied by Codex CLI |
 | Ollama local API | **Not supported** | Text-only analysis, planning and reviews | Final `prompt_eval_count` and `eval_count`, if supplied | Unavailable |
 
-The Ollama adapter uses the native .NET HTTP client, does not invoke repository commands, and accepts only an unauthenticated HTTP loopback endpoint. It receives the bounded context embedded in the prompt; it cannot browse the repository independently. A route that does not satisfy the role's capabilities fails closed, particularly for builder assignments.
+The Ollama adapter uses the native .NET HTTP client, does not invoke repository commands, and accepts only an unauthenticated HTTP loopback endpoint. It connects directly with redirects and proxies disabled. It receives the bounded context embedded in the prompt; it cannot browse the repository independently. A route that does not satisfy the role's capabilities fails closed, particularly for builder assignments.
 
 ## Setup
 
@@ -38,7 +38,7 @@ The goal budget remains a separate control: execution runs are still governed by
 
 The CLI command `factory providers` shows configured profile metadata, project role assignments, local budget limits and attributed consumption without exporting credentials. The original `factory usage` command continues to expose account-reported Codex allowance windows.
 
-The Capacity page distinguishes input tokens, output tokens, reservations, total local limit/remaining, and provider account allowances. Codex weekly/short-window account percentages are displayed only if reported by the Codex CLI; other providers show unavailable. An account percentage is **never** derived from local usage and is not interchangeable with a local token ceiling.
+The Capacity page distinguishes input tokens, output tokens, reservations, local token ceilings and account allowances. The project-filtered Goal planner shows project usage and the tighter of the profile and project ceilings. The goal budget inspector also shows attributed input and output tokens by provider, model and role. These historical rows may cover less usage than the full goal ledger. Codex weekly/short-window account percentages are displayed only if reported by the Codex CLI; other providers show unavailable. An account percentage is **never** derived from local usage and is not interchangeable with a local token ceiling.
 
 Provider pricing, monetary billing, provider-specific remaining API credits and remote-worker heterogeneous routing are not implemented. Remote claims are therefore refused for projects with explicit provider assignments or provider budgets, or whenever a provider-wide token cap is configured. This is a fail-closed transition until the remote claim protocol can carry and independently verify provider policy and usage provenance. There is no automatic provider fallback: a missing provider or unsupported required capability blocks that action rather than silently switching or relaxing a security policy.
 

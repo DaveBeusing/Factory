@@ -1,18 +1,14 @@
-# Project review and goal creation
+# Project review and goal planning
 
-Mission Control's **Project review** view provides a read-only, commit-bound analysis workflow:
+1. In Mission Control, open **Project review** and select a repository.
+2. Select **Analyze project**. Factory reads the committed `master` tree and takes a snapshot of configured quality gates and blocked or failed jobs.
+3. Read the findings. The test-directory and README checks use committed paths. The test-directory heuristic provides a starting point for checking test discovery.
+4. Select **Review & create draft goal** on a finding. Edit the objective, acceptance criteria and total token budget before saving.
+5. Continue in the project-filtered **Goal planner**. Use **Goal & budget** to inspect provider usage and available capacity. Use **Check master & open work** to see matching source, jobs, PRs and issues before generating or editing packages.
+6. Select package dependencies by title. Review the saved plan's source, package paths and overlap evidence before choosing **Adopt reviewed plan**. Adoption requires explicit acknowledgement. See [master-first preflight](planning-preflight.md).
 
-1. Select a registered project.
-2. Run **Analyze project** to create an immutable-at-source snapshot.
-3. Inspect findings, severity, evidence and suggested outcomes.
-4. Use **Review & create draft goal** to adjust the outcome, acceptance criteria and token budget before creating the goal.
-5. Continue in **Goals → Plans** to propose or edit work packages and dependencies.
-6. Review the local goal/provider budgets and explicitly adopt an eligible plan.
+The default review inspects committed paths and Factory state. If the project assigns an **analysis** provider, Factory also requests advisory commentary using a bounded path list and the deterministic findings. Advisory mode requires a clean checkout at the reviewed master commit and uses the selected provider's local budget. The advisory is displayed separately so operators can distinguish model observations from verified findings. For provider configuration and capacity semantics, see [provider routing and budgets](providers.md).
 
-The deterministic inspection currently checks configured quality gates, a heuristic for a root test directory, root README presence and the controller's blocked/failed project jobs. When an administrator explicitly assigns an enabled AI provider to the project's **analysis** role, Factory additionally asks that provider for read-only commentary based only on a bounded repository index and deterministic findings. Its output appears in a separately labeled **Provider advisory review** section, never as certified evidence or an automatically adopted finding. This invocation is counted in provider usage and subject to configured local provider caps. The default project review runs no model. It builds a bounded source index and associates results with the observed Git HEAD. These checks are **not** a comprehensive source-code audit, vulnerability scan, coverage analysis or independent model review. An absence of findings is not proof of quality.
+Factory stores the latest review per project in `project-reviews/<project-id>.json` under the Factory data directory. Creating a goal checks that master still matches the reviewed commit. Mission Control also sends the review ID so a form opened before a replacement review cannot use the newer snapshot by accident.
 
-Reviews are persisted under the user's Factory data directory, `.factory/project-reviews/<project-id>.json`, never inside the target repository. Goal creation rejects stale snapshots whose source HEAD has advanced, and a generated goal starts in `draft` state. A finding cannot independently authorize plan adoption, job execution, privileged actions, Git push, merging or deployment.
-
-API endpoints: `GET/POST /api/projects/{id}/analysis` and `POST /api/projects/{id}/analysis/goals`. The latter accepts a finding ID, optional edited objective/acceptance criteria and a positive token budget. These endpoints are controller-admin operations under the current token authorization model. Project-based user RBAC is not yet implemented.
-
-Future richer project analysis can integrate read-only provider routing, verified quality evidence and issue host metadata. Until that work is implemented, findings must be described as deterministic observations rather than model-certified conclusions.
+The administrator API exposes `GET/POST /api/projects/{id}/analysis` and `POST /api/projects/{id}/analysis/goals`. Goal creation accepts `reviewId`, `findingId`, edited objective and acceptance criteria, and a positive token budget. The returned goal is a draft.

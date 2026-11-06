@@ -45,13 +45,24 @@ public static class GoalBudgetLedger
         var committed = Outstanding(state, goalId);
         var reservations = state.BudgetReservations.Where(r => r.GoalId == goalId).ToArray();
         var goalJobs = state.Jobs.Where(j => j.GoalId == goalId).ToArray();
+        var usages = state.ProviderUsages.Where(u => u.GoalId == goalId).ToArray();
+        var planningIds = usages.Where(u => !u.JobId.HasValue).Select(u => u.Id).ToHashSet();
+        var planningReservations = state.ProviderBudgetReservations.Where(r => planningIds.Contains(r.UsageId)).ToArray();
+        long PlanningOutstanding(string status) => planningReservations.Where(r => r.State == status)
+            .Sum(r => Math.Max(0, r.Reserved - r.Consumed));
         return new
         {
             goalId, total = goal.TokenBudget, consumed, committed,
             activeOutstanding = reservations.Where(r => r.State == Active)
-                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)),
+                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)) + PlanningOutstanding(Active),
             heldOutstanding = reservations.Where(r => r.State == Held)
-                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)),
+                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)) + PlanningOutstanding(Held),
+            providers = usages.GroupBy(u => new { u.ProviderId, u.Model, u.Role }).Select(group => new
+            {
+                group.Key.ProviderId, group.Key.Model, group.Key.Role,
+                inputTokens = group.Sum(u => u.InputTokens), outputTokens = group.Sum(u => u.OutputTokens)
+            }).ToArray(),
+            planningHeld = PlanningOutstanding(Held),
             available = Available(state, goalId),
             requiresReconciliation = reservations.Any(r => r.State == Held),
             jobs = goalJobs.Select(j => new

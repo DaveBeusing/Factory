@@ -167,27 +167,32 @@ public static class DashboardHost
             new { g.Id, g.ProjectId, g.State, g.Objective, Plan = MissionControlManager.ReadPlan(store, g.Id) })));
         app.MapGet("/api/plans/{goalId:guid}", (Guid goalId) =>
             MissionControlManager.ReadPlan(store, goalId) is { } plan ? (IResult)Results.Ok(plan) : Results.NotFound());
+        app.MapGet("/api/goals/{goalId:guid}/preflight", (Guid goalId) =>
+        {
+            var snapshot = store.Read();
+            var goal = snapshot.Goals.Single(g => g.Id == goalId);
+            var project = snapshot.Projects.Single(p => p.Id == goal.ProjectId);
+            return Results.Ok(WorkPackagePreflight.Inspect(snapshot, project, goal));
+        });
         app.MapPut("/api/plans/{goalId:guid}", (Guid goalId, FactoryPlan plan) =>
         {
             if (plan.GoalId != goalId) return (IResult)Results.BadRequest(new { error = "Plan goal ID mismatch" });
             return Results.Ok(MissionControlManager.SavePlan(store, plan));
         });
-        app.MapPost("/api/plans/{goalId:guid}/generate", (Guid goalId) =>
+        app.MapPost("/api/plans/{goalId:guid}/generate", async (Guid goalId, bool? wait) =>
         {
             var state = store.Read();
             var goal = state.Goals.Single(g => g.Id == goalId);
             if (goal.State != "draft") return (IResult)Results.Conflict(new { error = "Only draft goals can generate plans" });
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
+            if (wait == true)
+                return Results.Ok(await Planning.ProposeAsync(store, project, goal, settings, CancellationToken.None));
             _ = Task.Run(async () =>
             {
                 store.Event(null, "plan_generating", goalId.ToString());
                 try
                 {
-                    var provider = ProviderRouter.Select(settings, store.Read(), project.Id, "planner", "medium");
-                    var profile = ProviderRouter.Resolve(settings, store.Read(), project.Id, "planner");
-                    var tracked = new ProjectScopedAgentRuntime(provider.Runtime, store, project.Id, goal.Id,
-                        profile, "planner", provider.Model, settings.GoalReservationTokens);
-                    await Planning.ProposeAsync(store, project, goal, tracked, CancellationToken.None);
+                    await Planning.ProposeAsync(store, project, goal, settings, CancellationToken.None);
                     store.Event(null, "plan_generated", goalId.ToString());
                 }
                 catch (Exception ex) { store.Event(null, "plan_error", goalId + ": " + ex.Message); }
@@ -195,7 +200,7 @@ public static class DashboardHost
             return Results.Accepted();
         });
         app.MapPost("/api/plans/{goalId:guid}/adopt", (Guid goalId, PlanAdoptInput input) =>
-            Results.Ok(Planning.Adopt(store, goalId, input.Mode)));
+            Results.Ok(Planning.Adopt(store, goalId, input.Mode, input.ReviewedExistingWork)));
 
         app.MapPost("/api/projects", (ProjectInput input) => Results.Created("/api/state", MissionControlManager.CreateProject(store, input)));
         app.MapPut("/api/projects/{id:guid}", (Guid id, ProjectInput input) => Results.Ok(MissionControlManager.UpdateProject(store, id, input)));
@@ -360,6 +365,7 @@ public static class DashboardHost
 public sealed class PlanAdoptInput
 {
     public string Mode { get; set; } = "local";
+    public bool ReviewedExistingWork { get; set; }
 }
 
 public sealed class BudgetReconciliationInput

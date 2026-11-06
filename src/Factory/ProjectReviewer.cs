@@ -30,6 +30,7 @@ public sealed class ProjectReviewSnapshot
 
 public sealed class ReviewGoalInput
 {
+    public Guid? ReviewId { get; set; }
     public string FindingId { get; set; } = "";
     public string Objective { get; set; } = "";
     public List<string> AcceptanceCriteria { get; set; } = [];
@@ -62,7 +63,7 @@ public static class ProjectReviewer
             ct.ThrowIfCancellationRequested();
             var state = store.Read();
             var project = state.Projects.Single(p => p.Id == projectId);
-            var commit = GitOperations.Head(project.Path);
+            var commit = WorkPackagePreflight.MasterCommit(project);
             var review = new ProjectReviewSnapshot { ProjectId = projectId, Commit = commit };
             void Add(string id, string severity, string category, string title, string evidence,
                 string goal, params string[] criteria)
@@ -82,8 +83,10 @@ public static class ProjectReviewer
                     "Document how the checks run in a clean checkout");
             ct.ThrowIfCancellationRequested();
             var root = project.Path;
-            var hasTestDirectory = Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly)
-                .Any(dir => Path.GetFileName(dir).Contains("test", StringComparison.OrdinalIgnoreCase));
+            var paths = GitOperations.Git(root, "ls-tree", "-r", "-z", "--name-only", commit)
+                .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+            var hasTestDirectory = paths.Any(path => path.IndexOf('/') is var separator && separator > 0 &&
+                path[..separator].Contains("test", StringComparison.OrdinalIgnoreCase));
             if (!hasTestDirectory)
                 Add("test-discovery", "medium", "testing", "No top-level test directory detected",
                     "A top-level directory with 'test' in its name was not found. This heuristic does not establish the absence of tests.",
@@ -91,7 +94,7 @@ public static class ProjectReviewer
                     "Identify existing test projects and their locations",
                     "Add or document a repeatable test command",
                     "Record demonstrable test results");
-            if (!File.Exists(Path.Combine(root, "README.md")))
+            if (!paths.Contains("README.md", StringComparer.OrdinalIgnoreCase))
                 Add("missing-readme", "low", "documentation", "No root README.md detected",
                     "The repository root does not contain README.md.",
                     "Create an operational README for this repository",
@@ -107,17 +110,19 @@ public static class ProjectReviewer
                     "Reconcile uncertain Git side effects and budget liabilities",
                     "Rerun required checks against the correct commit");
             ct.ThrowIfCancellationRequested();
-            // Bounded native index: no untrusted repository scripts or model-generated actions.
-            var index = KnowledgeGraph.Scan(project).Take(500).ToArray();
+            var index = paths.Take(500).ToArray();
             review.IndexedFiles = index.Length;
             if (settings != null && state.ProviderAssignments.Any(x =>
                 x.ProjectId == projectId && x.Role == "analysis"))
             {
+                if (GitOperations.Head(root) != commit ||
+                    !string.IsNullOrWhiteSpace(GitOperations.Git(root, "status", "--porcelain")))
+                    throw new InvalidOperationException("Provider advisory requires a clean checkout at master");
                 var choice = ProviderRouter.Select(settings, state, projectId, "analysis", "medium");
                 var profile = ProviderRouter.Resolve(settings, state, projectId, "analysis");
                 var runtime = new ProjectScopedAgentRuntime(choice.Runtime, store, projectId, null,
                     profile, "analysis", choice.Model, settings.GoalReservationTokens);
-                var boundedIndex = Json.Stringify(index.Take(80).Select(x => new { x.File, x.Symbols, x.Imports }));
+                var boundedIndex = Json.Stringify(index.Take(80));
                 if (boundedIndex.Length > 24000) boundedIndex = boundedIndex[..24000];
                 var prompt = "READ ONLY: Provide advisory repository review observations based ONLY on the bounded " +
                     "index and verified deterministic findings provided below. Do not claim direct validation, " +
@@ -131,7 +136,7 @@ public static class ProjectReviewer
                 review.AdvisoryProvider = choice.Id;
                 review.AdvisoryModel = choice.Model;
             }
-            if (GitOperations.Head(root) != commit)
+            if (WorkPackagePreflight.MasterCommit(project) != commit)
                 throw new InvalidOperationException("Repository advanced during review; rerun against a stable commit");
             var file = FilePath(store, projectId);
             Directory.CreateDirectory(Path.GetDirectoryName(file)!);
@@ -154,8 +159,10 @@ public static class ProjectReviewer
         var review = Read(store, projectId)
             ?? throw new InvalidOperationException("Analyze the project before creating review-derived goals");
         var project = store.Read().Projects.Single(p => p.Id == projectId);
-        if (GitOperations.Head(project.Path) != review.Commit)
-            throw new InvalidOperationException("Review is stale: repository HEAD advanced; run analysis again");
+        if (input.ReviewId is { } id && id != review.Id)
+            throw new InvalidOperationException("Review was replaced; reopen the current finding");
+        if (WorkPackagePreflight.MasterCommit(project) != review.Commit)
+            throw new InvalidOperationException("Review is stale: master advanced; run analysis again");
         var finding = review.Findings.SingleOrDefault(f => f.Id == input.FindingId)
             ?? throw new InvalidOperationException("Unknown review finding");
         var objective = string.IsNullOrWhiteSpace(input.Objective) ? finding.ProposedGoal : input.Objective;

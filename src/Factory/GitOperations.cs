@@ -38,7 +38,17 @@ public sealed class GitOperations
         var path = Path.Combine(_workspace, job.Id.ToString("N"));
         var branch = string.IsNullOrEmpty(job.Branch) ? $"factory/{job.Id:N}" : job.Branch;
         if (Directory.Exists(path) && (File.Exists(Path.Combine(path, ".git")) || Directory.Exists(Path.Combine(path, ".git"))))
+        {
+            // Never discard an existing partial implementation. Ensure it belongs to
+            // this job branch and still contains the current master base.
+            var currentBranch = Git(path, "branch", "--show-current").Trim();
+            if (currentBranch != branch ||
+                !Commands.Run("git", ["-C", path, "merge-base", "--is-ancestor", masterCommit, "HEAD"],
+                    Environment.CurrentDirectory).Ok)
+                throw new InvalidOperationException(
+                    "Existing job worktree differs from current master or expected branch. Inspect and reconcile; do not overwrite it.");
             return path;
+        }
         var branchFound = Commands.Run("git", ["-C", repo, "show-ref", "--verify", "--quiet", $"refs/heads/{branch}"], Environment.CurrentDirectory).Ok;
         if (branchFound && !Commands.Run("git",
             ["-C", repo, "merge-base", "--is-ancestor", masterCommit, branch],

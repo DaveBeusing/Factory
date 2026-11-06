@@ -31,15 +31,33 @@ public sealed class GitOperations
     }
     public string Prepare(ProjectInfo project, FactoryJob job, string? rootOverride = null)
     {
+        WorkPackagePreflight.RequireMaster(project);
         var repo = rootOverride ?? project.Path;
+        var masterCommit = WorkPackagePreflight.MasterCommit(
+            new ProjectInfo { Path = repo, BaseBranch = "master" });
         var path = Path.Combine(_workspace, job.Id.ToString("N"));
         var branch = string.IsNullOrEmpty(job.Branch) ? $"factory/{job.Id:N}" : job.Branch;
         if (Directory.Exists(path) && (File.Exists(Path.Combine(path, ".git")) || Directory.Exists(Path.Combine(path, ".git"))))
+        {
+            // Never discard an existing partial implementation. Ensure it belongs to
+            // this job branch and still contains the current master base.
+            var currentBranch = Git(path, "branch", "--show-current").Trim();
+            if (currentBranch != branch ||
+                !Commands.Run("git", ["-C", path, "merge-base", "--is-ancestor", masterCommit, "HEAD"],
+                    Environment.CurrentDirectory).Ok)
+                throw new InvalidOperationException(
+                    "Existing job worktree differs from current master or expected branch. Inspect and reconcile; do not overwrite it.");
             return path;
+        }
         var branchFound = Commands.Run("git", ["-C", repo, "show-ref", "--verify", "--quiet", $"refs/heads/{branch}"], Environment.CurrentDirectory).Ok;
+        if (branchFound && !Commands.Run("git",
+            ["-C", repo, "merge-base", "--is-ancestor", masterCommit, branch],
+            Environment.CurrentDirectory).Ok)
+            throw new InvalidOperationException(
+                "Existing work-package branch is not based on current master. Review and rebase it explicitly; do not discard existing code.");
         var args = branchFound
             ? new[] { "-C", repo, "worktree", "add", path, branch }
-            : new[] { "-C", repo, "worktree", "add", "-b", branch, path, project.BaseBranch };
+            : new[] { "-C", repo, "worktree", "add", "-b", branch, path, masterCommit };
         Commands.Require(Commands.Run("git", args, Environment.CurrentDirectory, 120), "git worktree add");
         return path;
     }

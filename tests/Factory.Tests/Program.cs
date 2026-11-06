@@ -30,6 +30,166 @@ void GrantRemoteWorker(StateStore store, string workerId, params Guid[] projectI
     });
 }
 
+Test("Master-first preflight finds existing code and preserves adoption review", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-master-preflight-" + Guid.NewGuid().ToString("N"));
+    var repo = Path.Combine(root, "repo");
+    Directory.CreateDirectory(repo);
+    try
+    {
+        void Git(params string[] args) =>
+            Commands.Require(Commands.Run("git", ["-C", repo, ..args], root, 30), "preflight fixture");
+        Git("init", "-b", "master");
+        Git("config", "user.name", "Factory Test");
+        Git("config", "user.email", "test@example.invalid");
+        Directory.CreateDirectory(Path.Combine(repo, "src"));
+        File.WriteAllText(Path.Combine(repo, "src", "GoalPlanner.cs"),
+            "public class GoalPlanner { public void FinalizePlanning() { } }");
+        Git("add", ".");
+        Git("commit", "-m", "Add partial planner");
+        var master = GitOperations.Head(repo);
+        Git("checkout", "-b", "feature/other-work");
+        File.WriteAllText(Path.Combine(repo, "src", "ShadowFeature.cs"),
+            "public class ShadowFeature { }");
+        Git("add", ".");
+        Git("commit", "-m", "Independent feature");
+        Assert(GitOperations.Head(repo) != master);
+
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "preflight", Path = repo, BaseBranch = "master" };
+        var goal = new FactoryGoal
+        {
+            ProjectId = project.Id, Objective = "Finalize GoalPlanner implementation",
+            AcceptanceCriteria = ["GoalPlanner has verified tests"]
+        };
+        store.Change(state => { state.Projects.Add(project); state.Goals.Add(goal); });
+        var report = WorkPackagePreflight.Inspect(store.Read(), project, goal);
+        Assert(report.BaseCommit == master && report.BaseBranch == "master");
+        Assert(report.ExistingCode.Any(c => c.Path == "src/GoalPlanner.cs"),
+            "Preflight failed to detect existing master implementation");
+        Assert(!report.MasterFiles.Contains("src/ShadowFeature.cs"),
+            "Preflight used feature checkout instead of master");
+
+        try
+        {
+            Planning.ProposeAsync(store, project, goal, new FakeAgent(),
+                CancellationToken.None).GetAwaiter().GetResult();
+            throw new Exception("Planner accepted a non-master checkout");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("clean checkout at master")) { }
+
+        var plan = MissionControlManager.SavePlan(store, new FactoryPlan
+        {
+            GoalId = goal.Id, ProjectId = project.Id,
+            Packages = [new PlannedPackage
+            {
+                Title = "Complete existing GoalPlanner", Description = "Finish and test existing code",
+                Files = ["src/GoalPlanner.cs"]
+            }]
+        });
+        Assert(plan.BaseCommit == master && plan.Preflight is not null,
+            "Manual plan was not pinned to an inspected master");
+        try
+        {
+            Planning.Adopt(store, goal.Id, "local");
+            throw new Exception("Existing implementation was adopted without human review");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("explicit review")) { }
+        var adopted = Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true);
+        Assert(adopted.Count == 1 && adopted[0].Title.Contains("Complete existing"));
+        Assert(store.Read().Goals.Single().State == "active");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
+Test("Direct job intake checks master before allowing new work", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-direct-intake-" + Guid.NewGuid().ToString("N"));
+    var repo = Path.Combine(root, "repo");
+    Directory.CreateDirectory(repo);
+    try
+    {
+        void Git(params string[] args) =>
+            Commands.Require(Commands.Run("git", ["-C", repo, ..args], root, 30), "job intake fixture");
+        Git("init", "-b", "master");
+        Git("config", "user.name", "Factory Test");
+        Git("config", "user.email", "test@example.invalid");
+        File.WriteAllText(Path.Combine(repo, "GoalPlanner.cs"), "public class GoalPlanner { }");
+        Git("add", "."); Git("commit", "-m", "Partial implementation");
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "intake", Path = repo };
+        store.Change(s => s.Projects.Add(project));
+        var input = new JobInput
+        {
+            ProjectId = project.Id, Title = "Complete GoalPlanner", Description = "Add missing acceptance tests",
+            ExpectedPaths = ["GoalPlanner.cs"]
+        };
+        try
+        {
+            MissionControlManager.CreateJob(store, input, new FactorySettings());
+            throw new Exception("New job bypassed existing-code review");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("acknowledge reviewedExistingWork")) { }
+        input.ReviewedExistingWork = true;
+        var created = MissionControlManager.CreateJob(store, input, new FactorySettings());
+        Assert(created.ProjectId == project.Id);
+        Assert(store.Read().Events.Any(e => e.JobId == created.Id && e.Type == "job_preflight"),
+            "Direct job preflight audit event was not persisted");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
+Test("Master-first preflight rejects stale master and non-master projects", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-master-stale-" + Guid.NewGuid().ToString("N"));
+    var repo = Path.Combine(root, "repo");
+    Directory.CreateDirectory(repo);
+    try
+    {
+        void Git(params string[] args) =>
+            Commands.Require(Commands.Run("git", ["-C", repo, ..args], root, 30), "preflight fixture");
+        Git("init", "-b", "master");
+        Git("config", "user.name", "Factory Test");
+        Git("config", "user.email", "test@example.invalid");
+        File.WriteAllText(Path.Combine(repo, "README.md"), "Original");
+        Git("add", ".");
+        Git("commit", "-m", "Initial");
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "stale", Path = repo };
+        var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Improve diagnostics" };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
+        var plan = MissionControlManager.SavePlan(store, new FactoryPlan
+        {
+            GoalId = goal.Id, ProjectId = project.Id,
+            Packages = [new PlannedPackage { Title = "Diagnostics", Description = "Improve output",
+                Files = ["README.md"] }]
+        });
+        try
+        {
+            Planning.Adopt(store, goal.Id, "local");
+            throw new Exception("Plan without matches bypassed review acknowledgement");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("explicit review")) { }
+        File.AppendAllText(Path.Combine(repo, "README.md"), "\nUpdate");
+        Git("add", ".");
+        Git("commit", "-m", "Advance master");
+        try
+        {
+            Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true);
+            throw new Exception("Stale base was accepted");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("master advanced")) { }
+        project.BaseBranch = "develop";
+        try
+        {
+            WorkPackagePreflight.MasterCommit(project);
+            throw new Exception("Non-master project accepted for work-package creation");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("must be based on master")) { }
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
 Test("Job quality inspector validates commit identity and file boundary", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-quality-view-" + Guid.NewGuid().ToString("N"));
@@ -90,6 +250,8 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     var html = Resource("Factory.Ui.Index");
     var script = Resource("Factory.Ui.Script");
     var style = Resource("Factory.Ui.Style");
+    Assert(script.Contains("reviewedExistingWork", StringComparison.Ordinal),
+        "Direct job intake acknowledgement is not exposed in Mission Control");
     Assert(html.Contains("data-view=\"recovery\"", StringComparison.Ordinal));
     Assert(script.Contains("renderRecovery()", StringComparison.Ordinal));
     Assert(script.Contains("renderGoalBudget(goalId)", StringComparison.Ordinal));

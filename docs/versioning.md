@@ -83,6 +83,16 @@ Validated `0.3.0-preview.31+g70a1eb6f0210` on Windows x64 `10.0.26300.9711` with
 
 The updated workflow uses Node.js 24 Actions while the Chromium suite still uses Node.js 22. Verification of the runner warning on GitHub awaits the first CI run on the updated workflow. The authenticated Claude Code check remains pending for the preview decision.
 
+### LT-01 Windows preview at `5324771`
+
+Built `0.3.0-preview.35+g532477176e95` from the clean `master` commit on Windows x64 `10.0.26300.9711` with .NET SDK `10.0.403` and runtime `10.0.14`. All 103 .NET tests passed. The local ZIP was extracted to an isolated directory and all 32 packaged files matched the build output byte for byte. The executable matched the SHA-256 in the build manifest.
+
+The packaged executable initialized a fresh state directory at schema 11. The existing schema 8 fixture and its restored backup upgraded to schema 11 with project identity, usage and settings preserved. A separate build of `8a4eba1` created a schema 10 database with a real project and goal via the CLI. The new package upgraded that database and a separate SQLite backup copy to schema 11, with matching project, goal and settings data. The original backup retained schema 10 and its SHA-256. The checks ran on the current Windows host with isolated Factory state.
+
+The [master CI log](https://github.com/DaveBeusing/Factory/actions/runs/42271003259) emitted `DEP0040` during setup and post-setup for `actions/setup-node@v5`. Upstream traced it to a transitive dependency of `@actions/cache` and shipped the fix with `setup-node` v6.2.0. A local Node 24.22.1 comparison reproduced the warning in both v5 entry points and ran the pinned v6.5.0 entry points without it. The workflow update keeps Node 22 for Chromium. Verification of the updated workflow on the GitHub Windows runner is pending. [Upstream diagnosis and fix](https://github.com/actions/setup-node/pull/1449) · [Pinned release](https://github.com/actions/setup-node/releases/tag/v6.5.0)
+
+The live remote pilot, package 05, remains skipped. The authenticated Claude Code ledger test remains open in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+
 ## Parallel development and provenance
 
 Agent work packages MUST NOT modify `Directory.Build.props` for ordinary implementation PRs. Versioning changes require a dedicated change owner and a PR. No agent edits `master` directly. The full first-parent commit count removes the shared-file race between parallel implementation agents. CI uses `fetch-depth: 0`, checks build/test outcomes, ensures executable and manifest versions agree, and verifies source SHA and binary hash. CI is validation only; it does not approve, merge, sign or distribute anything.

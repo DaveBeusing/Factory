@@ -104,6 +104,12 @@ function renderAnalysis(){
    ${metric('Indexed files',projectReview.indexedFiles,'Bounded static index','folder')}
    ${metric('Reference commit',shorten(projectReview.commit,11),'Captured repository HEAD','route')}
    ${metric('Reviewed at',dateTime(projectReview.observedAt),'Snapshot time','clock')}</div>`;
+  if(projectReview.advisory){
+    body+=card('Provider advisory review',
+      'Read-only model commentary, not verified test results or automatic approval.',
+      `<p class="subtext">${esc(projectReview.advisoryProvider)} · ${esc(projectReview.advisoryModel||'Default model')}</p>
+       <pre style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(projectReview.advisory)}</pre>`);
+  }
   const findings=projectReview.findings.map(f=>`<div class="entity-card"><div class="entity-top">
    <span class="entity-avatar">${ico('shield')}</span><div><div class="entity-name">${esc(f.title)}</div>
    <div class="entity-sub">${esc(f.category)}</div></div></div><p class="subtext">${esc(f.evidence)}</p>

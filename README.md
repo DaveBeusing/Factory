@@ -430,7 +430,7 @@ flowchart TD
 ### Quality engineering and integration
 
 - Deterministic build and test gates before reviews.
-- Independent code, architecture, security and UX reviews.
+- Independent code, architecture, security and UX reviews require a successful response with exactly `VERDICT: PASS` on the first line. Reviewers receive the full patch for the checked commit. Empty, unavailable or oversized patches and patches with binary content changes stop the review gate.
 - Bounded rework cycles with escalation for unresolved findings.
 - Protected paths, heuristic secret checks and commit-bound evidence.
 - Optional draft pull requests; no automatic merge or deployment.

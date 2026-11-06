@@ -7,6 +7,7 @@ public sealed class AgentRunResult
 {
     public bool Success { get; set; }
     public string FinalText { get; set; } = "";
+    public bool FinalTextIsFallback { get; set; }
     public string Error { get; set; } = "";
     public string SessionId { get; set; } = "";
     public long InputTokens { get; set; }
@@ -137,7 +138,11 @@ public sealed class ExecAgentRuntime(string model) : IAgentRuntime
         }, cancellation);
         response.Success = command.Ok && string.IsNullOrEmpty(response.Error);
         if (!response.Success) response.Error += " " + command.Error.Trim();
-        if (string.IsNullOrEmpty(response.FinalText)) response.FinalText = command.Output[^Math.Min(command.Output.Length, 12000)..];
+        if (string.IsNullOrEmpty(response.FinalText))
+        {
+            response.FinalText = command.Output[^Math.Min(command.Output.Length, 12000)..];
+            response.FinalTextIsFallback = true;
+        }
         return response;
     }
 }

@@ -21,9 +21,9 @@ if (args is ["--browser-recovery-fixture", var browserFixtureHome])
     return 0;
 }
 
-if (args is ["--browser-provider-evidence-fixture", var providerEvidenceFixtureHome])
+if (args is ["--browser-provider-evidence-fixture", var providerEvidenceFixtureHome, var fixtureExecutorUrl])
 {
-    BrowserRecoveryFixture.SeedProviderEvidence(providerEvidenceFixtureHome);
+    BrowserRecoveryFixture.SeedProviderEvidence(providerEvidenceFixtureHome, fixtureExecutorUrl);
     return 0;
 }
 

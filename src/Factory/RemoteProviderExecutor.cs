@@ -164,7 +164,8 @@ public static class RemoteProviderExecutor
             }
             var receipt = new RemoteExecutorReceipt(grant.TurnId, grant.LeaseId, grant.Route.ProviderId, grant.Route.Role,
                 grant.Commit, result.ObservedModel, result.InputTokens, result.OutputTokens, result.UsageReported, success,
-                success ? result.FinalText : "", result.FinalTextIsFallback, tree, patch);
+                success ? result.FinalText : "", result.FinalTextIsFallback, tree, patch,
+                result.ProviderReportedCostMicros);
             // Write before replying so a lost HTTP response never loses a completed receipt.
             var path = ReceiptPath(store, grant.TurnId);
             var temporary = path + ".tmp";

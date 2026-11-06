@@ -27,7 +27,7 @@ An icon-only **+** button is immediately left of Search and opens creation short
 | **Goals** | Edit objectives, acceptance criteria and token budgets. Activate, pause, stop, complete or archive goals. |
 | **Goal planner** | Filter by project, check master and open work, edit named dependencies, review budget and adopt a plan |
 | **Project review** | Inspect master and project health, then turn a reviewed finding into an editable draft goal |
-| **Jobs** | Create/edit, prioritize, directly start eligible local jobs, inspect stages and evidence, request local pause/stop, acknowledge review and requeue, verify integration |
+| **Jobs** | Create/edit, prioritize, directly start eligible local jobs, inspect stages and evidence, recover remote provider receipts, request local pause/stop, acknowledge review and requeue, verify integration |
 | **Queue** | Start, pause new scheduling, resume, or request cancellation of locally active jobs |
 | **Workers** | Register/configure, start/stop locally managed worker processes, view real heartbeats and platform, enable, drain or disable new remote-job claims |
 | **Recovery** | Review interrupted jobs, checkpoints and actions that require operator evidence |
@@ -39,11 +39,11 @@ An icon-only **+** button is immediately left of Search and opens creation short
 
 Start with [Project review and goal planning](project-reviews.md) for the workflow from a repository finding to an adopted plan. Review [master and open work](planning-preflight.md) before adopting packages.
 
-Use **Projects → Inspect → Configure AI providers** to route operations to enabled profiles. In **Capacity**, review attributed usage, Factory-local project limits and any account windows reported by the provider. See [Provider routing and budgets](providers.md) for configuration and accounting. Use the [recovery guide](recovery.md) to review interrupted jobs and settle held usage.
+Use **Projects → Inspect → Configure AI providers** to route operations to enabled profiles. **Capacity** shows attributed usage, Factory-local limits and any account windows reported by the provider. The **Goal Planner** also shows the shared controller Codex allowance next to local project capacity. See [Provider routing and budgets](providers.md) for configuration and accounting. Use the [recovery guide](recovery.md) to review interrupted jobs and settle held usage.
 
 ## Browser validation
 
-GitHub Actions runs the [Chromium browser suite](../tests/mission-control/README.md) against a local Factory controller. It covers sidebar authentication and navigation, project review through plan adoption, rejection of a stale plan, and reconciliation of linked budget reservations after a host change.
+GitHub Actions runs the [Chromium browser suite](../tests/mission-control/README.md) against a local Factory controller. It covers sidebar authentication and navigation, project review through plan adoption, rejection of a stale plan, account allowances in the Planner, reconciliation after a host change and remote receipt recovery with a simulated executor.
 
 ## Authentication and safety
 

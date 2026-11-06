@@ -2,7 +2,7 @@ using Factory;
 
 internal static class BrowserRecoveryFixture
 {
-    public static void SeedProviderEvidence(string directory)
+    public static void SeedProviderEvidence(string directory, string executorUrl)
     {
         var store = new StateStore(directory);
         store.Change(state =>
@@ -11,7 +11,8 @@ internal static class BrowserRecoveryFixture
             var job = new FactoryJob { ProjectId = project.Id, Title = "Blocked provider fixture",
                 Mode = JobExecutionModes.Remote, State = JobStates.Blocked, Stage = "reconcile",
                 LeaseToken = "fixture-lease-secret" };
-            var lease = new RemoteProviderLease { JobId = job.Id, ExecutionGeneration = 4, WorkerId = "fixture" };
+            var lease = new RemoteProviderLease { JobId = job.Id, ExecutionGeneration = 4, WorkerId = "fixture",
+                ExecutorUrl = executorUrl };
             var usage = new ProviderUsageEntry { JobId = job.Id, ProjectId = project.Id,
                 ProviderId = "fixture-provider", Model = "requested-v1", Role = "builder", InputTokens = 60, OutputTokens = 30 };
             state.Projects.Add(project);
@@ -24,9 +25,13 @@ internal static class BrowserRecoveryFixture
                 Reserved = 512, Consumed = 90, State = "held"
             });
             state.RemoteProviderTurns.Add(new RemoteProviderTurn { Id = Guid.NewGuid(), LeaseId = lease.Id,
-                UsageId = usage.Id, Role = usage.Role, ObservedModel = "observed-v2", State = "held",
-                HoldReason = "Model mismatch requires review", GrantDigest = "fixture-receipt-digest" });
+                UsageId = usage.Id, Role = usage.Role, State = "held",
+                HoldReason = "Executor response was interrupted", GrantDigest = new string('A', 64) });
         });
+        File.WriteAllText(Path.Combine(directory, "settings.json"), Json.Stringify(new FactorySettings
+        {
+            RemoteProviderExecutorUrl = executorUrl
+        }));
     }
 
     public static void Seed(string home)

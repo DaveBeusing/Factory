@@ -32,7 +32,9 @@ For automation with administrator authentication, submit `POST /api/providers/bu
 
 Open **Jobs → Inspect → Remote provider turns** to find the turn ID, lease generation, requested and observed model, recorded usage and reason for the hold. If the executor saved the receipt before the connection dropped, Factory can retrieve it without running the provider again.
 
-After quarantining the expired lease and reviewing the interrupted job, send `POST /api/jobs/{id}/provider-turns/{turnId}/recover` with administrator authentication, `reviewed: true` and a `reason` of 10–1000 characters. Include `confirmOverrun: true` after verifying any overrun. Recovery requires the original configured executor, its retained receipt and final usage matching the recorded provider, model and turn. It updates the budget ledgers and leaves the job blocked for separate review.
+After quarantining the expired lease and reviewing the interrupted job, select **Recover receipt** on the held turn. Record the review evidence and confirm any verified overrun. Recovery requires the original configured executor, its retained receipt and final usage matching the recorded provider, model and turn. It updates the budget ledgers and leaves the job blocked for separate review.
+
+For automation, send `POST /api/jobs/{id}/provider-turns/{turnId}/recover` with administrator authentication, `reviewed: true` and a `reason` of 10–1000 characters. Include `confirmOverrun: true` after verifying any overrun.
 
 If the executor has no matching receipt, keep the reservation held until you can verify final usage independently. Use the settlement workflow below for that evidence or for turns recorded before schema 11.
 

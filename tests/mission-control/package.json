@@ -1,0 +1,10 @@
+{
+  "name": "factory-mission-control-browser-tests",
+  "private": true,
+  "scripts": {
+    "test": "node --test browser.test.cjs"
+  },
+  "devDependencies": {
+    "playwright": "1.62.1"
+  }
+}

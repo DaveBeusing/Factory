@@ -805,4 +805,5 @@ setInterval(statusFromHealth,1100);
 setInterval(()=>{if(token&&Date.now()-lastStateUpdate>11000)refreshState()},10000);
 setInterval(refreshUsage,60000);
 setInterval(()=>{if(view==='plans'&&token)loadPlans();if(view==='workers'&&token)fetchManagedWorkers()},15000);
+document.querySelectorAll('[data-icon]').forEach(el=>{el.innerHTML=ico(el.dataset.icon)});
 render();statusFromHealth();if(token)connect();else setTimeout(()=>$('connection-modal').showModal(),350);

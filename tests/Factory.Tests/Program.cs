@@ -1,6 +1,12 @@
 using System.Diagnostics;
 using Factory;
 
+if (args is ["--browser-recovery-fixture", var browserFixtureHome])
+{
+    BrowserRecoveryFixture.Seed(browserFixtureHome);
+    return 0;
+}
+
 if (args is ["--provider-crash-fixture", var fixtureHome, var projectArg, var goalArg])
 {
     var store = new StateStore(fixtureHome);

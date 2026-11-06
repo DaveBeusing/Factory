@@ -37,7 +37,7 @@ function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.cla
 function nav(v){view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
 function statusFromHealth(){
  const since=lastHeartbeat?Date.now()-lastHeartbeat:Infinity;
- const status=!token?'offline':!lastHeartbeat?'connecting':connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
+ const status=!token?'offline':!lastHeartbeat?(connected?'connecting':'offline'):connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
  const label=status==='connected'?'Connected':status==='degraded'?'Connection delayed':status==='connecting'?'Connecting':'Offline';
  const brand=$('brand-connection'),dot=$('brand-connection-dot');
  dot.className='brand-connection-dot '+status;

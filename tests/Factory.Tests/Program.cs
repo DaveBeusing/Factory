@@ -231,6 +231,21 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     var html = Resource("Factory.Ui.Index");
     var script = Resource("Factory.Ui.Script");
     var style = Resource("Factory.Ui.Style");
+    Assert(html.Contains("data-view=\"analysis\"", StringComparison.Ordinal));
+    Assert(script.Contains("startProjectReview()", StringComparison.Ordinal));
+    Assert(script.Contains("formProjectProviders(id)", StringComparison.Ordinal));
+    Assert(script.Contains("formProviderReconciliation(id)", StringComparison.Ordinal));
+    Assert(html.Contains("id=\"brand-connection\"", StringComparison.Ordinal));
+    Assert(html.Contains("id=\"brand-connection-dot\"", StringComparison.Ordinal));
+    Assert(!html.Contains("id=\"connection-pill\"", StringComparison.Ordinal));
+    Assert(!html.Contains("id=\"open-connection\"", StringComparison.Ordinal));
+    Assert(html.IndexOf("id=\"top-create\"", StringComparison.Ordinal) <
+        html.IndexOf("id=\"open-search\"", StringComparison.Ordinal));
+    Assert(html.Contains("id=\"top-create\" aria-label=\"Create new\"", StringComparison.Ordinal));
+    Assert(script.Contains("$('brand-connection').addEventListener", StringComparison.Ordinal));
+    Assert(!script.Contains("$('connection-pill')", StringComparison.Ordinal));
+    Assert(style.Contains("@keyframes brand-heartbeat", StringComparison.Ordinal));
+    Assert(style.Contains("prefers-reduced-motion:reduce", StringComparison.Ordinal));
     Assert(html.Contains("data-view=\"recovery\"", StringComparison.Ordinal));
     Assert(script.Contains("renderRecovery()", StringComparison.Ordinal));
     Assert(script.Contains("renderGoalBudget(goalId)", StringComparison.Ordinal));

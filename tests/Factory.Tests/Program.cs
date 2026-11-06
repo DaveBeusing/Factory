@@ -148,11 +148,8 @@ Test("Provider budget reservations guard concurrent capacity and preserve unknow
     }
     catch (TokenBudgetExceededException) { }
     ProviderBudgetLedger.Finish(state, first.Id, true);
-    var second = ProviderBudgetLedger.Begin(state, j, provider, "review:code", "", 300);
-    Assert(state.ProviderBudgetReservations.Last().Reserved == 300);
-    ProviderBudgetLedger.Record(state, second.Id, new AgentTokenUsage(50, 25));
-    ProviderBudgetLedger.Finish(state, second.Id, true);
-    Assert(state.ProviderBudgetReservations.Last().State == "released");
+    Assert(state.ProviderBudgetReservations.Single().State == "held" && !first.FinalUsageReported,
+        "A late runner response released a held reservation without operator reconciliation");
 });
 
 Test("Provider usage, assignments and local budgets persist in SQLite", () =>
@@ -357,6 +354,103 @@ await TestAsync("A failed provider debit rolls back the matching goal debit", as
         Assert(state.ProviderUsages.Sum(u => u.InputTokens + u.OutputTokens) == 12);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Budget recovery links late usage after restoring a controller on another host", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-linked-recovery-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(Path.Combine(root, "source"));
+        var restoredHome = Directory.CreateDirectory(Path.Combine(root, "restored")).FullName;
+        var project = new ProjectInfo { Name = "Recovery fixture" };
+        var goal = new FactoryGoal { ProjectId = project.Id, TokenBudget = 1500, State = "active" };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        var profile = new ProviderProfile { Id = "fixture", TokenLimit = 3000 };
+        store.Change(state =>
+        {
+            state.Projects.Add(project); state.Goals.Add(goal); state.Jobs.Add(job);
+            JobRecovery.Assign(job, "source-controller", 120, local: true, state: state, reservationTokens: 600);
+            var finished = ProviderBudgetLedger.Begin(state, job, profile, "builder", "", 512);
+            ProviderBudgetLedger.Record(state, finished.Id, new(40, 10));
+            GoalBudgetLedger.Record(state, job, 40, 10);
+            ProviderBudgetLedger.Finish(state, finished.Id, true);
+            var late = ProviderBudgetLedger.Begin(state, job, profile, "review:code", "", 512);
+            ProviderBudgetLedger.Record(state, late.Id, new(100, 20));
+            GoalBudgetLedger.Record(state, job, 140, 30);
+            state.ProviderBudgetReservations.Single(r => r.UsageId == late.Id).OwnerMachine = "retired-fixture-host";
+        });
+        using (var source = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(store.Home, "factory.sqlite3")}"))
+        using (var destination = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={Path.Combine(restoredHome, "factory.sqlite3")}"))
+        {
+            source.Open(); destination.Open();
+            source.BackupDatabase(destination);
+        }
+        var restored = new StateStore(restoredHome);
+        var original = restored.Read();
+        var goalHold = original.BudgetReservations.Single();
+        var providerHold = original.ProviderBudgetReservations.Single(r => r.State == "active");
+        const string evidence = "Fixture verified old host stopped and final usage evidence";
+        void Reject(Action action, string reason)
+        {
+            try { action(); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains(reason, StringComparison.OrdinalIgnoreCase)) { return; }
+            throw new Exception("Expected rejection: " + reason);
+        }
+        Reject(() => ProviderBudgetReconciliation.HoldAfterHostRecovery(restored, providerHold.Id, true, evidence),
+            "stop the associated job");
+        restored.Change(s => s.Jobs.Single().LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        JobRecovery.QuarantineExpired(restored);
+        Assert(restored.Read().ProviderBudgetReservations.Single(r => r.Id == providerHold.Id).State == "active");
+        Reject(() => ProviderBudgetReconciliation.HoldAfterHostRecovery(restored, providerHold.Id, false, evidence),
+            "Verified evidence");
+        ProviderBudgetReconciliation.HoldAfterHostRecovery(restored, providerHold.Id, true, evidence);
+        var held = restored.Read();
+        Assert(held.ProviderBudgetReservations.Single(r => r.Id == providerHold.Id).State == "held");
+        Assert(held.BudgetReservations.Single().State == GoalBudgetLedger.Held &&
+            GoalBudgetLedger.Available(held, goal.Id) == 900);
+        Reject(() => restored.Change(s => ProviderBudgetLedger.Record(s, providerHold.UsageId, new(110, 20))),
+            "no longer active");
+        restored.Change(s => ProviderBudgetLedger.Finish(s, providerHold.UsageId, true));
+        Assert(!restored.Read().ProviderUsages.Single(u => u.Id == providerHold.UsageId).FinalUsageReported);
+
+        Reject(() => GoalBudgetLedger.Reconcile(restored, goal.Id, goalHold.Id, 140, 30, true, evidence),
+            "outstanding provider turns");
+        var lateInput = new ProviderBudgetReconciliationInput
+        {
+            FinalInputTokens = 560, FinalOutputTokens = 30, Reviewed = true, Reason = evidence
+        };
+        Reject(() => ProviderBudgetReconciliation.Reconcile(restored, providerHold.Id, lateInput), "explicitly confirm");
+        Assert(restored.Read().BudgetReservations.Single().Consumed == 170 && restored.Job(job.Id).TokensIn == 140);
+        lateInput.ConfirmOverrun = true;
+        ProviderBudgetReconciliation.Reconcile(restored, providerHold.Id, lateInput);
+        var linked = restored.Read();
+        Assert(linked.ProviderBudgetReservations.Single(r => r.Id == providerHold.Id).Consumed == 590);
+        Assert(linked.Jobs.Single().TokensIn == 600 && linked.Jobs.Single().TokensOut == 40);
+        Assert(linked.BudgetReservations.Single().State == GoalBudgetLedger.Held &&
+            linked.BudgetReservations.Single().Consumed == 640);
+        Assert(linked.Events.Any(e => e.Type == "provider_budget_reconciled" && e.Message.Contains(goalHold.Id.ToString())));
+        Reject(() => ProviderBudgetReconciliation.Reconcile(restored, providerHold.Id, lateInput), "Only held");
+        Reject(() => GoalBudgetLedger.Reconcile(restored, goal.Id, goalHold.Id, 601, 40, true, evidence, true),
+            "additional usage on its provider turn");
+        Reject(() => GoalBudgetLedger.Reconcile(restored, goal.Id, goalHold.Id, 600, 40, true, evidence),
+            "explicitly confirm");
+        var final = GoalBudgetLedger.Reconcile(restored, goal.Id, goalHold.Id, 600, 40, true, evidence, true);
+        Assert(final.State == GoalBudgetLedger.Released && GoalBudgetLedger.Available(restored.Read(), goal.Id) == 860);
+        Assert(restored.Read().Events.Any(e => e.Type == "budget_reconciled" && e.Message.Contains("verified overrun 40")));
+        Assert(store.Read().ProviderBudgetReservations.Single(r => r.Id == providerHold.Id).State == "active");
+
+        restored.Change(state =>
+        {
+            var fresh = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+            state.Jobs.Add(fresh);
+            JobRecovery.Assign(fresh, "new-controller", 120, local: true, state: state, reservationTokens: 512);
+            var turn = ProviderBudgetLedger.Begin(state, fresh, new ProviderProfile(), "builder", "", 512);
+            Assert(state.ProviderBudgetReservations.Single(r => r.UsageId == turn.Id).Reserved == 0);
+            Assert(ProviderBudgetLedger.Record(state, turn.Id, new(80, 20)) == long.MaxValue);
+        });
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
 });
 
 Test("Schema 8 upgrade retains usage and leaves historical cost unknown", () =>

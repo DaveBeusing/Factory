@@ -46,6 +46,10 @@ public static class GoalBudgetLedger
         var reservations = state.BudgetReservations.Where(r => r.GoalId == goalId).ToArray();
         var goalJobs = state.Jobs.Where(j => j.GoalId == goalId).ToArray();
         var usages = state.ProviderUsages.Where(u => u.GoalId == goalId).ToArray();
+        var unsettledJobTurns = usages.Where(u => u.JobId.HasValue)
+            .Join(state.ProviderBudgetReservations, u => u.Id, r => r.UsageId, (u, r) => (Usage: u, Hold: r))
+            .Where(turn => !turn.Usage.FinalUsageReported || turn.Hold.State != Released)
+            .ToLookup(turn => (turn.Usage.JobId, turn.Usage.ExecutionGeneration));
         var planningIds = usages.Where(u => !u.JobId.HasValue).Select(u => u.Id).ToHashSet();
         var planningReservations = state.ProviderBudgetReservations.Where(r => planningIds.Contains(r.UsageId)).ToArray();
         long PlanningOutstanding(string status) => planningReservations.Where(r => r.State == status)
@@ -81,7 +85,8 @@ public static class GoalBudgetLedger
                 {
                     r.Id, r.JobId, r.ExecutionGeneration, r.State,
                     r.Reserved, r.Consumed,
-                    outstanding = Math.Max(0, r.Reserved - r.Consumed)
+                    outstanding = Math.Max(0, r.Reserved - r.Consumed),
+                    pendingProviderTurns = unsettledJobTurns[((Guid?)r.JobId, r.ExecutionGeneration)].Count()
                 }).ToArray()
         };
     }
@@ -286,11 +291,46 @@ public static class GoalBudgetLedger
         else Hold(state, job, job.UsageComplete ? "job did not complete" : "final usage unavailable");
     }
 
+    internal static GoalBudgetReservation? LinkedReservation(FactoryState state, ProviderUsageEntry usage) =>
+        usage.JobId is null || usage.GoalId is null ? null : state.BudgetReservations.SingleOrDefault(r =>
+            r.JobId == usage.JobId && r.GoalId == usage.GoalId && r.ExecutionGeneration == usage.ExecutionGeneration);
+
+    internal static GoalBudgetReservation? ApplyProviderReconciliation(FactoryState state, FactoryJob job,
+        ProviderUsageEntry usage, long inputDelta, long outputDelta, bool confirmOverrun)
+    {
+        if (usage.GoalId is null) return null;
+        var reservation = LinkedReservation(state, usage)
+            ?? throw new InvalidOperationException("Matching goal budget reservation is missing; reconcile the evidence manually");
+        // Older versions permitted settling goal and provider liabilities independently.
+        // A verified zero delta can settle the remaining provider hold without changing the goal.
+        if (inputDelta == 0 && outputDelta == 0 && reservation.State == Released) return reservation;
+        if (reservation.State != Held || state.BudgetReservations.Any(r =>
+            r.JobId == job.Id && r.ExecutionGeneration > reservation.ExecutionGeneration))
+            throw new InvalidOperationException("Late usage can only adjust the latest held goal reservation");
+        if (job.GoalId != reservation.GoalId ||
+            checked(job.TokensIn + job.TokensOut - reservation.BaseUsage) != reservation.Consumed)
+            throw new InvalidOperationException("Goal and job accounting disagree; inspect evidence before reconciliation");
+
+        var consumed = checked(reservation.Consumed + inputDelta + outputDelta);
+        RequireVerifiedOverrun(reservation.Reserved, consumed, confirmOverrun);
+        job.TokensIn = checked(job.TokensIn + inputDelta);
+        job.TokensOut = checked(job.TokensOut + outputDelta);
+        reservation.Consumed = consumed;
+        reservation.UpdatedAt = DateTimeOffset.UtcNow;
+        return reservation;
+    }
+
+    internal static void RequireVerifiedOverrun(long reserved, long consumed, bool confirmed)
+    {
+        if (consumed > reserved && !confirmed)
+            throw new InvalidOperationException("Claimed usage exceeds the reserved budget; explicitly confirm the verified overrun");
+    }
+
     /// <summary>
     /// Explicit audited settlement. Uncertain worker usage is never silently forgiven.
     /// </summary>
     public static GoalBudgetReservation Reconcile(StateStore store, Guid goalId, Guid reservationId,
-        long finalTokensIn, long finalTokensOut, bool reviewed, string reason)
+        long finalTokensIn, long finalTokensOut, bool reviewed, string reason, bool confirmOverrun = false)
     {
         if (!reviewed || string.IsNullOrWhiteSpace(reason) || reason.Trim().Length < 10)
             throw new InvalidOperationException("Independent usage reconciliation requires review and justification");
@@ -306,10 +346,21 @@ public static class GoalBudgetLedger
                 throw new InvalidOperationException("Cannot reconcile a running job");
             if (finalTokensIn < job.TokensIn || finalTokensOut < job.TokensOut)
                 throw new InvalidOperationException("Final token usage cannot be below observed usage");
+            var linkedTurns = state.ProviderUsages.Where(u => u.JobId == job.Id && u.GoalId == goalId &&
+                u.ExecutionGeneration == reservation.ExecutionGeneration)
+                .Join(state.ProviderBudgetReservations, u => u.Id, r => r.UsageId, (u, r) => (Usage: u, Hold: r))
+                .ToArray();
+            if (linkedTurns.Any(turn => !turn.Usage.FinalUsageReported || turn.Hold.State != Released))
+                throw new InvalidOperationException("Reconcile outstanding provider turns before settling their goal reservation");
+            if (linkedTurns.Length > 0 && (finalTokensIn != job.TokensIn || finalTokensOut != job.TokensOut))
+                throw new InvalidOperationException("Record additional usage on its provider turn before settling the linked goal reservation");
+            if (state.BudgetReservations.Any(r => r.JobId == job.Id && r.ExecutionGeneration > reservation.ExecutionGeneration))
+                throw new InvalidOperationException("A newer goal reservation exists for this job");
             var usage = checked(finalTokensIn + finalTokensOut);
             var consumed = checked(usage - reservation.BaseUsage);
-            if (consumed < 0 || consumed > reservation.Reserved)
-                throw new InvalidOperationException("Claimed usage exceeds the reserved budget; manual escalation required");
+            if (consumed < reservation.Consumed)
+                throw new InvalidOperationException("Goal reservation usage cannot regress");
+            RequireVerifiedOverrun(reservation.Reserved, consumed, confirmOverrun);
             job.TokensIn = finalTokensIn;
             job.TokensOut = finalTokensOut;
             job.UsageComplete = true;
@@ -317,7 +368,7 @@ public static class GoalBudgetLedger
             reservation.State = Released;
             reservation.UpdatedAt = DateTimeOffset.UtcNow;
             state.Events.Add(new FactoryEvent { JobId = job.Id, Type = "budget_reconciled",
-                Message = $"Reservation {reservation.Id}; consumed {consumed}; {reason.Trim()[..Math.Min(1000, reason.Trim().Length)]}" });
+                Message = $"Reservation {reservation.Id}; consumed {consumed}; verified overrun {Math.Max(0, consumed - reservation.Reserved)}; {reason.Trim()[..Math.Min(1000, reason.Trim().Length)]}" });
             return reservation;
         });
     }

@@ -201,6 +201,7 @@ public static class ProviderBudgetLedger
             b.ProjectId == job.ProjectId && b.ProviderId == profile.Id)?.TokenLimit ?? 0;
         var globalCap = profile.TokenLimit;
         var isPlanning = job.Id == Guid.Empty && job.GoalId.HasValue;
+        long allowed = 0;
         if (globalCap > 0 || projectCap > 0 || isPlanning)
         {
             long Used(Func<ProviderUsageEntry, bool> filter) =>
@@ -208,7 +209,7 @@ public static class ProviderBudgetLedger
             long Pending(Func<ProviderBudgetReservation, bool> filter) =>
                 state.ProviderBudgetReservations.Where(x => x.State != "released" && filter(x))
                     .Sum(x => Math.Max(0, checked(x.Reserved - x.Consumed)));
-            var allowed = (long)reservationTokens;
+            allowed = reservationTokens;
             if (isPlanning)
                 allowed = Math.Min(allowed, GoalBudgetLedger.Available(state, job.GoalId!.Value));
             if (globalCap > 0) allowed = Math.Min(allowed,
@@ -219,6 +220,11 @@ public static class ProviderBudgetLedger
                 Pending(x => x.ProviderId == profile.Id && x.ProjectId == job.ProjectId));
             if (allowed < BudgetedAgentRuntime.MinimumTurnAllowance)
                 throw new TokenBudgetExceededException("Provider budget does not allow another reserved turn");
+        }
+        // A goal-funded turn needs an auditable recovery record even when the provider
+        // has no local ceiling. A zero reservation never limits provider execution.
+        if (allowed > 0 || job.GoalId.HasValue)
+        {
             using var owner = Process.GetCurrentProcess();
             state.ProviderBudgetReservations.Add(new ProviderBudgetReservation
             {
@@ -236,11 +242,20 @@ public static class ProviderBudgetLedger
         foreach (var reservation in state.ProviderBudgetReservations.Where(r => r.State == "active"))
         {
             if (!OwnerStopped(reservation)) continue;
-            reservation.State = "held";
-            var usage = state.ProviderUsages.Single(u => u.Id == reservation.UsageId);
-            state.Events.Add(new FactoryEvent { JobId = usage.JobId, Type = "provider_budget_held",
-                Message = "Provider reservation " + reservation.Id + " requires verification after its owner stopped" });
+            Hold(state, reservation, "Owner process stopped");
         }
+    }
+
+    internal static bool HasForeignOwner(ProviderBudgetReservation reservation) =>
+        !string.IsNullOrWhiteSpace(reservation.OwnerMachine) &&
+        !string.Equals(reservation.OwnerMachine, Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+
+    internal static void Hold(FactoryState state, ProviderBudgetReservation reservation, string reason)
+    {
+        reservation.State = "held";
+        var usage = state.ProviderUsages.Single(u => u.Id == reservation.UsageId);
+        state.Events.Add(new FactoryEvent { JobId = usage.JobId, Type = "provider_budget_held",
+            Message = "Provider reservation " + reservation.Id + " requires verification. " + reason });
     }
 
     private static bool OwnerStopped(ProviderBudgetReservation reservation)
@@ -262,23 +277,26 @@ public static class ProviderBudgetLedger
     public static long Record(FactoryState state, Guid usageId, AgentTokenUsage total)
     {
         var entry = state.ProviderUsages.Single(x => x.Id == usageId);
+        var reservation = state.ProviderBudgetReservations.FirstOrDefault(x => x.UsageId == usageId);
+        if (reservation is not null && reservation.State != "active")
+            throw new LostExecutionLeaseException("Provider reservation is no longer active");
         if (total.InputTokens < entry.InputTokens || total.OutputTokens < entry.OutputTokens)
             return long.MaxValue;
         entry.InputTokens = total.InputTokens;
         entry.OutputTokens = total.OutputTokens;
-        var reservation = state.ProviderBudgetReservations.FirstOrDefault(x => x.UsageId == usageId);
-        if (reservation == null) return long.MaxValue;
+        if (reservation is null) return long.MaxValue;
         reservation.Consumed = checked(total.InputTokens + total.OutputTokens);
-        return reservation.Reserved - reservation.Consumed;
+        return reservation.Reserved > 0 ? reservation.Reserved - reservation.Consumed : long.MaxValue;
     }
 
     public static void Finish(FactoryState state, Guid usageId, bool finalReported, long? reportedCostMicros = null)
     {
         var entry = state.ProviderUsages.Single(x => x.Id == usageId);
+        var reservation = state.ProviderBudgetReservations.FirstOrDefault(x => x.UsageId == usageId);
+        if (reservation is not null && reservation.State != "active") return;
         entry.FinalUsageReported = finalReported;
         if (reportedCostMicros is >= 0) entry.ReportedCostMicros = reportedCostMicros;
-        var reservation = state.ProviderBudgetReservations.FirstOrDefault(x => x.UsageId == usageId);
-        if (reservation != null) reservation.State = finalReported ? "released" : "held";
+        if (reservation is not null) reservation.State = finalReported ? "released" : "held";
     }
 
     private static decimal? ReportedCostUsd(IEnumerable<ProviderUsageEntry> usage)
@@ -393,18 +411,51 @@ public sealed class ProviderBudgetReconciliationInput
 {
     public long FinalInputTokens { get; set; }
     public long FinalOutputTokens { get; set; }
+    public bool ConfirmOverrun { get; set; }
     public bool Reviewed { get; set; }
     public string Reason { get; set; } = "";
 }
 
 public static class ProviderBudgetReconciliation
 {
+    public static object HoldAfterHostRecovery(StateStore store, Guid reservationId, bool reviewed, string reason)
+    {
+        var evidence = EvidenceReason(reviewed, reason);
+        return store.Change(state =>
+        {
+            var reservation = state.ProviderBudgetReservations.Single(x => x.Id == reservationId);
+            if (reservation.State != "active" || !ProviderBudgetLedger.HasForeignOwner(reservation))
+                throw new InvalidOperationException("Only active reservations owned by another host can use this recovery action");
+            var usage = state.ProviderUsages.Single(x => x.Id == reservation.UsageId);
+            RequireStoppedJob(state, usage);
+            ProviderBudgetLedger.Hold(state, reservation, "Operator verified source host " +
+                reservation.OwnerMachine + " stopped: " + evidence);
+            return new { reservation.Id, reservation.State };
+        });
+    }
+
+    private static string EvidenceReason(bool reviewed, string reason)
+    {
+        if (!reviewed || string.IsNullOrWhiteSpace(reason) || reason.Trim().Length is < 10 or > 1000)
+            throw new InvalidOperationException("Verified evidence and a reason of 10 to 1000 characters are required");
+        return reason.Trim();
+    }
+
+    private static FactoryJob? RequireStoppedJob(FactoryState state, ProviderUsageEntry usage)
+    {
+        if (usage.JobId is not { } id) return null;
+        var job = state.Jobs.Single(j => j.Id == id);
+        if (!string.IsNullOrEmpty(job.LeaseOwner) || JobStates.Active.Contains(job.State))
+            throw new InvalidOperationException("Recover or stop the associated job before reconciling provider usage");
+        return job;
+    }
+
     public static object Reconcile(StateStore store, Guid reservationId, ProviderBudgetReconciliationInput input)
     {
-        if (!input.Reviewed || input.Reason.Trim().Length < 10 ||
-            input.FinalInputTokens < 0 || input.FinalOutputTokens < 0)
-            throw new InvalidOperationException("Verified nonnegative totals and an evidence reason are required");
-        _ = checked(input.FinalInputTokens + input.FinalOutputTokens);
+        var evidence = EvidenceReason(input.Reviewed, input.Reason);
+        if (input.FinalInputTokens < 0 || input.FinalOutputTokens < 0)
+            throw new InvalidOperationException("Verified token totals must be nonnegative");
+        var consumed = checked(input.FinalInputTokens + input.FinalOutputTokens);
         return store.Change(state =>
         {
             var reservation = state.ProviderBudgetReservations.Single(x => x.Id == reservationId);
@@ -413,16 +464,24 @@ public static class ProviderBudgetReconciliation
             var usage = state.ProviderUsages.Single(x => x.Id == reservation.UsageId);
             if (input.FinalInputTokens < usage.InputTokens || input.FinalOutputTokens < usage.OutputTokens)
                 throw new InvalidOperationException("Verified usage cannot be lower than already reported usage");
+            var job = RequireStoppedJob(state, usage);
+            if (reservation.Reserved > 0)
+                GoalBudgetLedger.RequireVerifiedOverrun(reservation.Reserved, consumed, input.ConfirmOverrun);
+            var goalReservation = job is null ? null : GoalBudgetLedger.ApplyProviderReconciliation(state, job, usage,
+                input.FinalInputTokens - usage.InputTokens, input.FinalOutputTokens - usage.OutputTokens, input.ConfirmOverrun);
             usage.InputTokens = input.FinalInputTokens;
             usage.OutputTokens = input.FinalOutputTokens;
             usage.FinalUsageReported = true;
-            reservation.Consumed = checked(input.FinalInputTokens + input.FinalOutputTokens);
+            reservation.Consumed = consumed;
             reservation.State = "released";
             state.Events.Add(new FactoryEvent { JobId = usage.JobId,
                 Type = "provider_budget_reconciled",
-                Message = "Provider " + usage.ProviderId + " usage " + usage.Id + ": " + input.Reason.Trim() });
+                Message = "Provider " + usage.ProviderId + " usage " + usage.Id +
+                    (goalReservation is null ? "" : " linked goal reservation " + goalReservation.Id) +
+                    (reservation.Reserved > 0 && consumed > reservation.Reserved
+                        ? "; verified provider overrun " + (consumed - reservation.Reserved) : "") + ": " + evidence });
             return new { reservation.Id, reservation.State, usage.ProviderId,
-                usage.InputTokens, usage.OutputTokens };
+                usage.InputTokens, usage.OutputTokens, goalReservationId = goalReservation?.Id };
         });
     }
 }

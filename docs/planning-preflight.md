@@ -40,4 +40,6 @@ GitHub PR and issue inventories are optional for local-first or non-GitHub repos
 
 The controller checks each required context at the verified PR head. For classic branch protection and active rulesets that pin a required check to an app, a successful check run must expose the same app ID. A same-name result from another app or a commit status without verifiable app identity cannot satisfy that pin. Required workflow rules remain blocked because a check context alone cannot establish the workflow's identity.
 
+The controller reads every page of active rules. When GitHub exposes classic required contexts but hides their source configuration, verification stops. Use a controller credential that can read the classic branch protection details for that repository.
+
 The proposed policy for `master` requires a pull request, the `build-and-test` check from GitHub Actions, and an independent approval. Stale approvals should be dismissed on new commits. Test this policy in a disposable or explicitly authorized repository first. Verify that a missing result, an untrusted same-name result, an unapproved push and a changed PR head fail, and that the approved PR with the trusted check can merge. Record any emergency override against the exact head and the operator who authorized it. Applying repository settings requires a separate operator decision.

@@ -25,7 +25,12 @@ public sealed class CheckReport
 public sealed class QualityEngine
 {
     private readonly IAgentRuntime _agent;
-    public QualityEngine(IAgentRuntime agent) => _agent = agent;
+    private readonly Func<string, IAgentRuntime>? _reviewRuntime;
+    public QualityEngine(IAgentRuntime agent, Func<string, IAgentRuntime>? reviewRuntime = null)
+    {
+        _agent = agent;
+        _reviewRuntime = reviewRuntime;
+    }
     public async Task<QualityResult> GateAsync(ProjectInfo project, FactoryJob job, CancellationToken ct)
     {
         var quality = new QualityResult { HeadSha = GitOperations.Head(job.Worktree) };
@@ -114,7 +119,8 @@ public sealed class QualityEngine
                 "Second line onward provide evidence with file paths. Task: " + job.Description + "\nDiff summary:\n" + diff.Output;
            try
             {
-                var result = await _agent.RunAsync(job.Worktree, instruction, "", ct, readOnly: true);
+                var result = await (_reviewRuntime?.Invoke(role) ?? _agent)
+                    .RunAsync(job.Worktree, instruction, "", ct, readOnly: true);
                var verdict = result.Success && result.FinalText.TrimStart().StartsWith("VERDICT: PASS", StringComparison.Ordinal)
                     ? "PASS" : "CHANGES";
                return (role, verdict, result.FinalText[..Math.Min(3000, result.FinalText.Length)]);

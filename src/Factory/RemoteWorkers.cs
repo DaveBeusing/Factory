@@ -73,7 +73,13 @@ public static class WorkerProtocol
                 job =>
                 {
                     var project = s.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
+                    // Current remote worker claims do not transmit provider assignments or
+                    // attributed provider-budget evidence. Never let a remote claim bypass
+                    // explicitly configured provider policy or a local token ceiling.
                     return project is not null && !string.IsNullOrWhiteSpace(project.Origin) &&
+                        !s.ProviderAssignments.Any(a => a.ProjectId == project.Id) &&
+                        !s.ProviderBudgetLimits.Any(b => b.ProjectId == project.Id) &&
+                        !settings.Providers.Any(p => p.TokenLimit > 0) &&
                         WorkerAuthorization.CanExecute(s, registered, project, job, settings);
                 },
                 reservationTokens: settings.GoalReservationTokens);

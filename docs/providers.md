@@ -4,8 +4,8 @@ Factory has a provider-independent routing boundary with two currently implement
 
 | Adapter | Execution | Read-only tasks | Token reporting | Account allowance |
 | --- | --- | --- | --- | --- |
-| Codex `exec` / `app-server` | Workspace write | Planning and reviews | Agent-reported | Account windows if supplied by Codex CLI |
-| Ollama local API | **Not supported** | Text-only planning and reviews | Final `prompt_eval_count` and `eval_count`, if supplied | Unavailable |
+| Codex `exec` / `app-server` | Workspace write | Analysis, planning and reviews | Agent-reported | Account windows if supplied by Codex CLI |
+| Ollama local API | **Not supported** | Text-only analysis, planning and reviews | Final `prompt_eval_count` and `eval_count`, if supplied | Unavailable |
 
 The Ollama adapter uses the native .NET HTTP client, does not invoke repository commands, and accepts only an unauthenticated HTTP loopback endpoint. It receives the bounded context embedded in the prompt; it cannot browse the repository independently. A route that does not satisfy the role's capabilities fails closed, particularly for builder assignments.
 
@@ -26,7 +26,7 @@ Modify the existing `~/.factory/settings.json` **without replacing controller cr
 
 The values above are illustrative; do not assume a model exists locally. Model selection and compatibility depend on the actual external provider installation. Factory does not install models or authenticate on behalf of the operator. Existing settings continue to default to Codex.
 
-In Mission Control select **Projects → Inspect → Configure AI providers**. Choose profiles for Planning, Builder, Review and optionally individual Code, Architecture, Security and UX reviews. A role without a project-specific assignment uses Codex by default, except individual reviews may inherit the project's general Review assignment. Running project jobs must complete before routes/budgets can be changed. The `/api/projects/{id}/providers` endpoint accepts route and budget dictionaries for the entire project; omitted values remove an override.
+In Mission Control select **Projects → Inspect → Configure AI providers**. Choose profiles for Planning, Builder, Review and optionally individual Code, Architecture, Security and UX reviews. An unassigned analysis role uses deterministic inspection only; other roles without a project-specific assignment use Codex by default, except individual reviews may inherit the project's general Review assignment. Running project jobs must complete before routes/budgets can be changed. The `/api/projects/{id}/providers` endpoint accepts route and budget dictionaries for the entire project; omitted values remove an override.
 
 ## Budget semantics
 

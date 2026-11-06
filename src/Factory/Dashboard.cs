@@ -148,7 +148,9 @@ public static class DashboardHost
                 store.Event(null, "plan_generating", goalId.ToString());
                 try
                 {
-                    await Planning.ProposeAsync(store, project, goal, AgentRuntimeFactory.Create(settings), CancellationToken.None);
+                    await Planning.ProposeAsync(store, project, goal,
+                        ProviderRouter.Select(settings, store.Read(), project.Id, "planner", "medium").Runtime,
+                        CancellationToken.None);
                     store.Event(null, "plan_generated", goalId.ToString());
                 }
                 catch (Exception ex) { store.Event(null, "plan_error", goalId + ": " + ex.Message); }

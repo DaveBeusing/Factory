@@ -49,7 +49,7 @@ public static class Program
             Console.WriteLine("""
 Factory | C# / .NET 10
   version | doctor | init <repo> --name NAME [--base master] [--checks-json PATH]
-  enqueue --project NAME --title TITLE --description TEXT [--mode local|remote] [--paths file1,file2]
+  enqueue --project NAME --title TITLE --description TEXT [--mode local|remote] [--paths file1,file2] --reviewed-existing-work
   run | recover | reconcile <job-guid> --reviewed --reason TEXT | status | pause | resume | verify <job-guid>
   goal add --project NAME --objective TEXT [--criteria TEXT] [--budget TOKENS]
   plan --goal GUID | adopt --goal GUID [--mode local|remote] [--reviewed-existing-work]
@@ -132,15 +132,28 @@ Environment: FACTORY_HOME overrides the local state directory.
                 var p = store.Project(Required(args, "project"));
                 var mode = Option(args, "mode", "local");
                 if (mode is not ("local" or "remote")) throw new ArgumentException("Invalid mode");
+                var title = Required(args, "title");
+                var description = Required(args, "description");
+                WorkPackagePreflight.RequireMaster(p);
+                var preflight = WorkPackagePreflight.InspectDirectJob(store.Read(), p, title, description);
+                if (preflight is not null && !Flag(args, "reviewed-existing-work"))
+                    throw new InvalidOperationException(
+                        "Inspect master code and open work first; explicitly pass --reviewed-existing-work");
                 var job = store.AddJob(new FactoryJob
                 {
-                    ProjectId = p.Id, Title = Required(args, "title"), Description = Required(args, "description"),
+                    ProjectId = p.Id, Title = title, Description = description,
                     Mode = mode, Priority = int.Parse(Option(args, "priority", "50")),
                     Risk = Option(args, "risk", "medium"), MaxRounds = settings.MaxReviewRounds,
                     ExpectedPaths = Option(args, "paths").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList(),
                     DependsOn = Option(args, "depends").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                         .Select(GuidArg).ToList()
                 });
+                if (preflight is not null)
+                    store.Event(job.Id, "job_preflight", "master " + preflight.BaseCommit +
+                        "; source candidates " + preflight.ExistingCode.Count +
+                        "; existing work " + preflight.ExistingJobs.Count +
+                        "; matching PRs " + preflight.OpenPullRequests.Count +
+                        "; PR inventory checked " + preflight.PullRequestsChecked);
                 Print(job); return 0;
             }
             case "run": await engine.RunQueueAsync(CancellationToken.None); return 0;

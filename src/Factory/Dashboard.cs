@@ -80,6 +80,10 @@ public static class DashboardHost
                 }),
                 assignments = snapshot.ProviderAssignments,
                 budgets = snapshot.ProviderBudgetLimits,
+                heldReservations = snapshot.ProviderBudgetReservations.Where(x => x.State == "held")
+                    .Select(x => new { x.Id, x.ProviderId, x.ProjectId, x.Reserved, x.Consumed,
+                        usage = snapshot.ProviderUsages.Where(u => u.Id == x.UsageId)
+                            .Select(u => new { u.Id, u.JobId, u.InputTokens, u.OutputTokens }).SingleOrDefault() }),
                 usage = ProviderBudgetLedger.Summary(snapshot, settings),
                 // The separate /api/usage endpoint provides observed Codex account windows.
                 accountAllowances = "Unknown except where explicitly reported by /api/usage"
@@ -87,6 +91,9 @@ public static class DashboardHost
         });
         app.MapPut("/api/projects/{id:guid}/providers", (Guid id, ProjectProvidersInput input) =>
             Results.Ok(ProjectProviderManager.Configure(store, settings, id, input)));
+        app.MapPost("/api/providers/budget-reservations/{id:guid}/reconcile",
+            (Guid id, ProviderBudgetReconciliationInput input) =>
+                Results.Ok(ProviderBudgetReconciliation.Reconcile(store, id, input)));
         app.MapGet("/api/projects/{id:guid}/analysis", (Guid id) =>
             ProjectReviewer.Read(store, id) is { } review
                 ? (IResult)Results.Ok(review) : Results.NotFound(new { error = "No review exists yet" }));

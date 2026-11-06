@@ -9,7 +9,7 @@ Work packages **must be based on current `master`**, never on another open PR or
 3. When a GitHub origin and authenticated `gh` are available, inspect open PR titles targeting `master`. Missing access remains **unverified**, not “zero PRs”.
 4. Determine which parts are complete, partial, defective or missing. Keyword matches alone cannot establish completeness.
 5. Plan the smallest remaining work; avoid duplicate implementations of open PRs. Use separate branches/worktrees all originating from master, with explicit dependency/integration requirements.
-6. Review the preflight and acknowledge existing work before adopting the plan. If master advances or a previously verified matching PR inventory changes, refresh the plan.
+6. Review the preflight and acknowledge existing work before adopting **every** plan, even when keyword matches are absent or the PR inventory is unavailable. If master advances or a previously verified matching PR inventory changes, refresh the plan.
 7. Validate changes, open a PR against master, obtain required reviews and verify integration. Never rewrite existing worktrees or auto-merge.
 
 ## Runtime behavior

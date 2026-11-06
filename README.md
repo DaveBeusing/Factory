@@ -323,8 +323,10 @@ Before adoption, Factory checks for dependency cycles and rejects a plan when it
 
 ### Directly queue a task
 
+Direct jobs also run a master-source and existing-work preflight. Review matching source, known work packages and relevant PRs first, then explicitly acknowledge that review with `--reviewed-existing-work`.
+
 ```powershell
-.\dist\Factory.exe enqueue --project '<project-key>' --title '<title>' --description '<requirements>' --mode local --paths '<relative-file-or-directory>'
+.\dist\Factory.exe enqueue --project '<project-key>' --title '<title>' --description '<requirements>' --mode local --paths '<relative-file-or-directory>' --reviewed-existing-work
 .\dist\Factory.exe run
 ```
 

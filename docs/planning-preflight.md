@@ -18,6 +18,8 @@ Work packages **must be based on current `master`**, never on another open PR or
 
 The Mission Control Plan inspector displays existing source candidates, related Factory jobs and matching PRs. These observations are **candidates for investigation**, not a source-code audit or claim of feature completion.
 
+Direct user-created jobs must also pass this preflight. The UI asks for an existing-work review acknowledgement; the CLI requires `enqueue ... --reviewed-existing-work`. In both cases Factory records the master SHA and the preflight candidate counts in the operational event history.
+
 A plan can be adopted using:
 
 ```powershell

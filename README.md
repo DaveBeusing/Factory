@@ -210,39 +210,13 @@ Mission Control listens at **http://127.0.0.1:8787** by default. Administrator A
 
 ### Mission Control: operations workspace
 
-Mission Control is a responsive, dark-first control center with a global command palette (`Ctrl+K`), per-object inspector, forms with input validation, activity feed, and animated connection and worker heartbeats. An authenticated, native HTTP server-sent event stream carries server heartbeat updates every three seconds; no npm package or external frontend framework is needed. The UI resources are embedded in the .NET assembly.
-
-| Workspace | Available operations |
-| --- | --- |
-| **Overview** | Health, operational KPIs, pipeline, goals, workers and recent events |
-| **Projects** | Register, edit paths, checks and protected paths, activate, pause, disable or archive repositories |
-| **Goals** | Create and edit objectives, acceptance criteria and token budgets; activate, pause, stop, complete and archive |
-| **Goal planner** | Filter by project, check master and open work, edit named dependencies, review budget and adopt a plan |
-| **Project review** | Inspect master and project health, then turn a reviewed finding into an editable draft goal |
-| **Jobs** | Create/edit, prioritize, directly start eligible local jobs, inspect stages and evidence, request local pause/stop, acknowledge review and requeue, verify integration |
-| **Queue** | Start, pause new scheduling, resume, or request cancellation of locally active jobs |
-| **Workers** | Register/configure, start/stop locally managed worker processes, view real heartbeats and platform, enable, drain or disable new remote-job claims |
-| **Activity** | Inspect persisted lifecycle and audit events |
-| **Capacity** | Inspect provider, model and role usage, local allocations, held reservations, provider-reported costs and Codex account windows |
-| **Settings** | Adjust concurrency, review rounds, worker lease and other supported runtime controls |
-
-Use the icon-only **+** left of Search for creation shortcuts. The sidebar **F** opens connection settings and shows heartbeat status. See the [Mission Control guide](docs/mission-control.md).
+The [Mission Control operator guide](docs/mission-control.md) covers workspace navigation, creation shortcuts, connection health and browser validation. To turn a repository finding into a reviewed plan, follow [Project review and goal planning](docs/project-reviews.md).
 
 **Enforced work-package boundaries:** Every job must declare nonempty `ExpectedPaths` (1–100 relative file or directory paths). File entries permit that exact path; directory entries permit that path and descendants. Factory uses the same normalized scope rules for scheduling conflicts and execution. After the agent runs, before any commit, and again at quality/release gates, Factory checks the complete Git change set: committed changes from the project base, staged and unstaged tracked changes, deletions, both paths of renames, and untracked non-ignored files. Out-of-scope changes, unsafe declarations, and incomplete Git path listings fail closed with `blocked` / `scope`. The worktree is preserved and no commit, push or PR is prepared for the offending attempt. Protected project paths remain prohibited even after an amendment.
 
 **Contract amendments:** A blocked scope violation must not be retried unchanged. An administrator must inspect the worktree, assess affected parallel work, and explicitly approve new `ExpectedPaths` with a reason of 10–1000 characters and `reviewed: true` via `POST /api/jobs/{id}/scope-amendment` (administrator authentication). Factory logs the prior and approved scope and prevents approvals that overlap currently active jobs or protected paths. The job stays blocked until a separate reviewed retry/resume request; ordinary job editing cannot silently expand scope after an attempt has started. This records the human approval but does not replace project-based identity/RBAC, which is a separate planned control. For remote PRs, the controller independently inspects GitHub's paginated PR changed-file list, including rename sources, before accepting `pr_ready`; incomplete listings fail closed.
 
-**Atomic goal budgets:** Independent work packages under the same goal can run concurrently when their file scopes do not conflict. Before each local or remote job claim, Factory atomically reserves up to `goalReservationTokens` (default 8,192, configurable from 256 to 65,536) from the remaining goal budget in SQLite. The goal's available balance equals its configured total minus recorded usage and outstanding reservations. All reservations and consumption records are persisted in the relational `goal_budget_reservations` ledger (database schema 4). A job's builder/reviewer turns share its reserved allowance; usage is debited transactionally and guarded by the claim's execution generation and token. Another turn cannot begin with fewer than 256 reserved tokens remaining. The provider may report token usage after consumption, so cancellation is requested on exhaustion but a delayed single-turn report may overrun; **no unobserved usage is treated as free**.
-
-**Budget settlement and reconciliation:** Only a completed job with a final provider usage report releases unused reservation capacity. A cancelled job, missing final usage, expired lease or interrupted remote worker leaves the unused amount held as a liability. For a held reservation, an administrator must inspect the provider's final usage, then explicitly reconcile it with `POST /api/goals/{goalId}/budget/reconcile` and body `{"reservationId":"...","finalTokensIn":123,"finalTokensOut":45,"reviewed":true,"reason":"Verified final provider usage"}`. The request refuses unknown or regressing counts and active jobs. Reconcile linked provider turns first. To record verified usage above the reserved amount, explicitly set `confirmOverrun: true`. The read-only ledger is available at `GET /api/goals/{goalId}/budget` with total, consumed, committed and available counters; lease credentials are not included. Schema-3 upgrades preserve jobs; any goal runner already active during upgrade is quarantined with its unreported goal remainder held for review. Remote workers receive only their controller-reserved allowance, and stale heartbeats cannot debit a newer generation.
-
-**Lease recovery and fencing:** Local and remote claims persist an incrementing execution generation and a unique per-claim lease token. Stage updates, local token usage, remote heartbeats and remote completion results are rejected when the lease identity no longer matches or expires. Durable job checkpoints track the last stage, source commit and worktree; SQLite schemas 2 and 3 are upgraded transactionally to schema 4 without deleting existing job data. An expired lease is **quarantined as `blocked/reconcile`** and the generation is advanced to fence stale owners. `run`, `recover`, and remote claims never automatically replay such jobs.
-
-**Explicit reconciliation:** Use `factory reconcile <job-guid> --reviewed --reason "Reviewed previous process and clean worktree"` or administrator-authenticated `POST /api/jobs/{id}/reconcile` with `{"reviewed":true,"reason":"..."}`. Factory checks the previous local host and process identity, refuses cross-host/live/unknown owners, verifies a safe pre-side-effect checkpoint, requires the same Git HEAD, and refuses dirty or inaccessible worktrees. Successful reconciliation writes an audit event and **queues** the job; it does not execute immediately. A subsequent runner claim receives a new fencing generation and token. Remote executions, checkpoints around commit/push/PR, unknown owner identity, and uncertain side effects stay blocked for manual investigation, not automatic requeue. Fencing protects Factory's state transitions; it cannot undo external Git effects or forcibly stop unowned processes.
-
-**Operational semantics:** Pausing the queue prevents *new* scheduling, not in-flight execution. A job-level pause/stop requests cancellation through the local worker's cancellation token. Worktree changes are not rolled back. After an interrupted execution, inspecting the worktree is mandatory before requeueing. Active remote jobs cannot be force-killed from the dashboard. Worker `drain` and `disable` change claim eligibility, not the remote operating system process. Start/stop is supported for **workers launched on the same machine by this Mission Control server instance**; stopping a locally managed worker is refused while it owns an active job. External workers are never killed by the dashboard. Project or goal pause/stop prevents new scheduling but does not silently terminate in-flight jobs. The dashboard does not bypass quality gates or GitHub branch protection.
-
-**Connection health:** The pulsing indicator reflects receipt of fresh server heartbeats, not merely HTTP availability. Worker presence is considered online only after a recent heartbeat; registration alone does not prove a connection. The indicator becomes degraded after delayed heartbeats and offline after timeouts. Account allowance data is never inferred from local token counts.
+See [Provider routing and token budgets](docs/providers.md#budget-semantics) for the goal ledger, local provider caps and account windows. Follow the [recovery guide](docs/recovery.md) for queue controls, expired leases and held usage.
 
 **Security:** API mutations require a bearer token. The UI uses a restrictive Content Security Policy, no inline JavaScript, HTML escaping for untrusted repository content, and explicit confirmation for sensitive changes. Never expose the dashboard publicly without TLS, authenticated access and a security review. The supplied HTTP listener is intended for local use.
 
@@ -339,14 +313,7 @@ When using `test-audit --enqueue`, the same rule applies: inspect the existing m
 
 ### Pausing and recovery
 
-```powershell
-.\dist\Factory.exe pause
-.\dist\Factory.exe status
-.\dist\Factory.exe recover
-.\dist\Factory.exe resume
-```
-
-Recovery does not blindly repeat an operation with uncertain remote side effects. Interrupted pushes or pull-request creation may require manual reconciliation.
+Use the [recovery guide](docs/recovery.md) to pause new claims, inspect interrupted work and review a job before returning it to the queue.
 
 ## 9. Verify integration
 
@@ -366,27 +333,14 @@ Integration evidence records the verified source, remote-base commit and incorpo
 
 ## 10. Monitor usage and activity
 
-Mission Control provides queue and worker status, goal progress, event history, check results and independent review outcomes. It also displays the agent provider's **weekly usage limit** when the authenticated CLI supplies that data.
+Mission Control shows queue and worker status, goal progress, event history, check results and review outcomes. Open **Capacity** for attributed provider usage and any reported account windows. See [Provider routing and token budgets](docs/providers.md#account-windows-and-reported-costs) for the difference between local capacity, Codex allowance and reported cost.
 
 ```powershell
+.\dist\Factory.exe providers
 .\dist\Factory.exe usage
 .\dist\Factory.exe analytics
 .\dist\Factory.exe status
 ```
-
-The usage panel may display:
-
-- Weekly limit: used and remaining percentage.
-- Shorter usage window when available.
-- Reported reset time and observation timestamp.
-- Whether the value is live, cached, stale or unavailable.
-
-Factory queries the authenticated agent CLI's local app-server rate-limit endpoint and caches successful results for a short period. The integration is dependent on the external CLI's protocol and may change across releases.
-
-> [!IMPORTANT]
-> Local token counts **do not** reliably determine remaining weekly capacity. If a provider does not supply a usage percentage, Factory reports **unavailable** rather than estimating a value. An older reading can be shown only when clearly marked as stale.
-
-The authenticated API exposes the usage state through `GET /api/usage`.
 
 ## 11. Architecture and capabilities
 
@@ -411,9 +365,7 @@ flowchart TD
 ### Planning, scheduling and goals
 
 - Persistent goals with acceptance criteria and token budgets.
-- Every local or remote claim atomically reserves a bounded job allowance from the shared SQLite goal ledger. Disjoint work packages belonging to one goal may run in parallel without committing the same reserved capacity twice.
-- Before every builder or reviewer turn, at least 256 tokens must remain in that job's reservation. Streaming usage is charged against the reservation; reviews are serialized within each job. A delayed provider report can exceed the allowance for one turn, so such overruns are recorded and blocked rather than silently forgiven.
-- Finished jobs release unused budget only with confirmed final usage. Expired leases, missing usage and aborted jobs hold the uncertain balance until explicit audited reconciliation. Provider-routed planning also uses the goal ledger. Project advisory review has its own provider attribution and local caps.
+- [Atomic goal reservations and provider accounting](docs/providers.md#goal-budget-and-job-reservations) for concurrent jobs.
 - Read-only repository inspection and proposed task decomposition.
 - Priorities, dependencies, risk classification, and predicted affected paths.
 - Cycle detection, file-path conflict handling, work grouping and per-project capacity limits.
@@ -519,7 +471,8 @@ The server must have valid HTTPS certificate configuration. A secure connection 
 | `init` | Register a Git repository and its checks |
 | `goal add`, `plan`, `adopt` | Create goals, propose plans and authorize work |
 | `enqueue`, `run`, `status` | Queue, execute and inspect tasks |
-| `pause`, `resume`, `recover` | Control execution and reconcile interrupted jobs |
+| `pause`, `resume` | Pause or resume new claims |
+| `recover`, `reconcile` | Quarantine expired leases and review eligible local jobs for requeueing |
 | `verify` | Confirm that a change was integrated in the base branch |
 | `graph`, `impact`, `knowledge` | Inspect code relationships and store project knowledge |
 | `test-audit` | Analyze testing gaps and optionally queue follow-up work |
@@ -540,6 +493,8 @@ Display the current command syntax with:
 ## 14. Validation and known limitations
 
 The solution includes source-level tests for relational SQLite persistence, schema constraints, ordered collection roundtrips, rollback, concurrent writes, legacy database rejection, scheduling, integration rules, process behavior, local job flows and usage-data interpretation. Execute `Build.ps1` on Windows to confirm compilation and run those tests with the installed .NET 10 SDK.
+
+GitHub Actions also runs the [Mission Control browser suite](tests/mission-control/README.md) in Chromium. The suite exercises the embedded UI against an isolated controller.
 
 The external agent CLI and GitHub must be validated with real authentication and a controlled test repository before production use. The agent app-server protocol used for weekly usage data is subject to upstream changes. Remote-worker isolation and plugin trust must be evaluated in the intended deployment environment.
 

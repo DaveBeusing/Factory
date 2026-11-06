@@ -1,15 +1,22 @@
 # Factory engineering documentation
 
-This index links to canonical documentation and avoids maintaining competing copies of operational instructions.
+Start with the [root README](../README.md) for installation, build and CLI commands.
 
-- [Root README](../README.md) — installation, build, CLI, supported operations and limitations
-- [Mission Control UI](mission-control.md) — connection status, navigation and operator controls
-- [Provider routing and budgets](providers.md) — adapters, role routing, usage accounting, capabilities, local token limits and reconciliation
-- [Master-first preflight](planning-preflight.md) — source, jobs, pull requests and issues before adoption
-- [Project review and goal creation](project-reviews.md) — deterministic inspection, reviewed findings and goal intake
-- [Versioning and release policy](versioning.md) — local SemVer source of truth and Git-derived builds
-- [Architecture decision ADR-0001](adr/0001-versioning.md) — build and version governance
-- [Proposed architecture decision ADR-0002](adr/0002-provider-routing.md) — provider routing and security tradeoffs
-- [Work packages](workpackages/) — historical bounded implementation contracts
+## Operator guides
 
-The repository source and executable tests establish current behavior. Proposed architecture decisions and work packages do not by themselves constitute deployed enforcement or verified release features.
+- [Mission Control](mission-control.md) covers dashboard navigation, connection health and operator controls.
+- [Project review and goal planning](project-reviews.md) follows a repository finding through goal creation and plan adoption.
+- [Master-first preflight](planning-preflight.md) explains how to review source, jobs, pull requests and issues before adoption.
+- [Provider routing and budgets](providers.md) covers adapter capabilities, role assignments, goal and provider limits, and usage reporting.
+- [Recovery](recovery.md) covers expired leases, same-host and cross-host recovery, and settlement of held provider and goal reservations.
+
+## Development and release
+
+- [Mission Control browser tests](../tests/mission-control/README.md) gives the local commands for the Chromium suite used in CI.
+- [Versioning and release policy](versioning.md) covers SemVer, Git-derived builds and provenance.
+
+## Design and implementation history
+
+- [ADR-0001](adr/0001-versioning.md) records the build and versioning decision.
+- [Proposed ADR-0002](adr/0002-provider-routing.md) records the provider-routing design and security trade-offs.
+- [Work packages](workpackages/) records historical implementation scope and handovers.

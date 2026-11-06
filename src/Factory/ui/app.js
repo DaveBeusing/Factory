@@ -109,13 +109,57 @@ function renderAnalysis(){
 }
 function renderUsage(){
  const projectId=capacityProjectId||state.projects[0]?.id;
- const title=header('Provider capacity & budgets','Controller allocations and observed consumption are separate from provider account allowances.');
- if(!projectId)return title+(usage?usageCards():'')+empty('folder','No projects yet','Register a project to configure budgets.','create-project','Add project');
- const picker='<div class="field"><label for="capacity-project">Project</label><select id="capacity-project">'+state.projects.map(p=>'<option value="'+esc(p.id)+'" '+(p.id===projectId?'selected':'')+'>'+esc(p.name)+'</option>').join('')+'</select></div>';
- const data=providerCapacityCache[projectId];
- const nf=n=>Number(n||0).toLocaleString();
- let body=!data?'<p class="subtext">Loading per-provider usage...</p>':!Array.isArray(data)?'<p role="alert" class="subtext">Capacity unavailable: '+esc(data.error||'Unknown error')+'</p>':data.map(p=>{
-  const modelRows=(p.breakdown||[]).map(m=>'<tr><td>'+esc(m.model)+'</td><td>'+esc(m.role)+'</td><td>'+nf(m.inputTokens)+'</td><td>'+nf(m.outputTokens)+'</td><td>'+(m.reportedCostMicros==null?'Not reported':'
+ const title=header('Provider capacity & budgets',
+  'Controller allocations and observed consumption are separate from provider account allowances.');
+ if(!projectId)return title+(usage?usageCards():'')+
+  empty('folder','No projects yet','Register a project to configure budgets.','create-project','Add project');
+ const options=state.projects.map(p=>'<option value="'+esc(p.id)+'" '+
+  (p.id===projectId?'selected':'')+'>'+esc(p.name)+'</option>').join('');
+ const picker='<div class="field"><label for="capacity-project">Project</label>'+
+  '<select id="capacity-project">'+options+'</select></div>';
+ const data=providerCapacityCache[projectId], nf=n=>Number(n||0).toLocaleString();
+ let body='';
+ if(!data)body='<p class="subtext">Loading per-provider usage...</p>';
+ else if(!Array.isArray(data))body='<p role="alert" class="subtext">Capacity unavailable: '+
+  esc(data.error||'Unknown error')+'</p>';
+ else body=data.map(p=>{
+  const rows=(p.breakdown||[]).map(m=>{
+   const cost=m.reportedCostMicros==null?'Not reported':
+    '$'+(Number(m.reportedCostMicros)/1000000).toFixed(4);
+   return '<tr><td>'+esc(m.model)+'</td><td>'+esc(m.role)+'</td><td>'+
+    nf(m.inputTokens)+'</td><td>'+nf(m.outputTokens)+'</td><td>'+esc(cost)+'</td></tr>';
+  }).join('');
+  const cap=p.tokenLimit==null?'Not configured':nf(p.tokenLimit);
+  const available=p.remainingTokens==null?'Unknown / uncapped':nf(p.remainingTokens);
+  const metrics='<div class="budget-breakdown"><div><small>Configured local limit</small><strong>'+
+   cap+'</strong></div><div><small>Observed consumption</small><strong>'+
+   nf(p.consumedTokens)+'</strong></div><div><small>Reserved / unsettled</small><strong>'+
+   nf(p.outstandingTokens)+'</strong></div><div><small>Local remaining</small><strong>'+
+   available+'</strong></div></div>';
+  const actions='<button class="button button-muted" data-act="provider-budget-edit" data-id="'+
+   esc(projectId)+'" data-index="'+esc(p.providerId)+'">Edit budget</button>';
+  const tableBody=rows?table(['Model','Role','Input','Output','Reported USD cost'],rows):
+   '<p class="subtext">No metered executions recorded.</p>';
+  const allowance=p.providerId==='codex'&&usage?
+   'Codex account allowance shown separately below':'Account allowance not available';
+  return '<section class="card" style="margin-top:14px"><div class="card-head"><div>'+
+   '<h2>'+esc(p.providerId)+'</h2><p>All models and roles in this project</p></div>'+
+   actions+'</div><div class="card-body">'+metrics+'<p class="subtext">'+
+   esc(allowance)+'. Local budgets do not establish account entitlements.</p>'+
+   tableBody+'</div></section>';
+ }).join('');
+ const controls='<div class="queue-controls">'+
+  '<button class="button button-muted" data-act="provider-config" data-id="'+
+  esc(projectId)+'">Configure provider roles</button>'+
+  '<button class="button button-muted" data-act="provider-refresh">Refresh usage</button>'+
+  '<button class="button button-muted" data-act="provider-held" data-id="'+
+  esc(projectId)+'">Reconcile held usage</button></div>';
+ const allowances=usage?'<div style="margin-top:18px"><h2>Codex account allowances</h2>'+
+  usageCards()+'</div>':
+  '<p class="subtext">No account allowance report is currently available. '+
+  'This does not mean zero remaining quota.</p>';
+ return title+picker+controls+body+allowances;
+}
 function renderSettings(){return header('Settings & policies','Review and configure execution limits and publication guardrails.')+`<div class="content-grid">${card('Runtime policy','Changes are stored in ~/.factory/settings.json',`<div class="job-info-grid">${[['Global concurrency',settings.maxParallel],['Agent sessions',settings.maxAgentSessions],['Review rounds',settings.maxReviewRounds],['Lease seconds',settings.leaseSeconds],['Push enabled',settings.allowPush?'Yes':'No'],['Auto-merge',settings.autoMerge?'Yes':'No']].map(([a,b])=>`<div class="kv"><small>${esc(a)}</small><strong>${esc(b)}</strong></div>`).join('')}</div><button class="button button-muted" style="margin-top:18px" data-act="edit-settings">${ico('edit')} Edit configuration</button>`)}${card('Operational safety','Safeguards for reliable execution',`<div class="list-stack">${[['shield','Human-controlled integration','Merging and publishing remain permission-gated'],['route','Dependency-aware execution','Jobs do not start before integrated dependencies'],['activity','Event history','Actions are recorded in persistent state'],['cpu','Worker isolation','Separate Git worktrees; not OS sandboxes']].map(([i,t,d])=>`<div class="list-item"><span class="list-icon">${ico(i)}</span><div class="list-text"><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div>`)}</div>`}
 
 function recoveryCandidates(){
@@ -486,345 +530,6 @@ function inspect(type,id){const entity=(type==='project'?state.projects:type==='
   if(type==='job')renderJobQuality(id);
 }
 async function act(action,id,index){switch(action){case'provider-config':await configureProviders(id);break;case'provider-budget-edit':await editProviderBudget(id,index);break;case'provider-refresh':await refreshProviderCapacity();break;case'provider-held':await editHeldProviderUsage(id);break;case'analysis-run':analysisProjectId=id;if(view!=='analysis')nav('analysis');await startProjectAnalysis(id);break;case'analysis-goal':proposeGoalFromAnalysis(id,index);break;case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
- case'queue-run':case'queue-pause':case'queue-resume':case'queue-stop':await runQueue(action.slice(6));break;
- case'verify':await verify(id);break;
- case'job-start':await mutate(`jobs/${id}/start`,'POST',{});break;
- case'plan-generate':await mutate(`plans/${id}/generate`,'POST',{});break;
- case'plan-edit':planEditor(id);break;
- case'plan-view':{const plan=plansCache.get(id);if(!plan)return;const groups=plan.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(p.description)} · Depends on ${p.dependsOn.join(', ')||'none'}</small></div></div>`).join('');inspectorPanel('Plan details',`<p class="subtext">${esc(gName(id))}</p><div class="plan-packages">${groups}</div>`);break;}
- case'plan-adopt':if(!confirm('Adopt the plan into executable work packages? This changes the goal from draft to active.'))return;await mutate(`plans/${id}/adopt`,'POST',{mode:'local'});break;
- case'plan-close':closeInspector();planDraft=null;break;
- case'package-add':packageForm(planDraft.packages.length);break;
- case'package-edit':packageForm(Number(index));break;
- case'package-remove':{const i=Number(index);if(planDraft.packages.some((p,n)=>n!==i&&p.dependsOn.includes(i))){notify('Remove dependent references first',true);return}planDraft.packages.splice(i,1);for(const p of planDraft.packages)p.dependsOn=p.dependsOn.map(n=>n>i?n-1:n);renderPlanEditor();break;}
- case'plan-save':if(!planDraft.packages.length){notify('Add at least one work package',true);return}await mutate(`plans/${planGoal}`,'PUT',planDraft);closeInspector();await loadPlans();break;
- }}
-function showPalette(){const commands=[['Overview','overview','overview'],['Projects','projects','folder'],['Project Review','analysis','shield'],['Goals','goals','target'],['Plans','plans','route'],['Jobs','jobs','layers'],['Queue','queue','queue'],['Recovery','recovery','shield'],['Workers','workers','cpu'],['Activity','events','activity'],['Settings','settings','settings']];const q=$('palette-input').value.toLowerCase();$('palette-results').innerHTML=commands.filter(([a])=>a.toLowerCase().includes(q)).map(([title,to,i])=>`<button class="palette-entry" data-view="${to}">${ico(i)}${title}<small>Navigate</small></button>`).join('')||`<div class="empty">No matching commands</div>`}
-document.addEventListener('click',async e=>{const btn=e.target.closest('[data-view],[data-act],[data-inspect],[data-edit],[data-control]');if(!btn)return;try{if(btn.dataset.view){nav(btn.dataset.view);if($('palette').open)$('palette').close();if(view==='plans')loadPlans();return}
- if(btn.dataset.inspect){const [type,id]=btn.dataset.inspect.split(':');inspect(type,decodeURIComponent(id));return}
- if(btn.dataset.edit){const [type,id]=btn.dataset.edit.split(':');if(type==='project')formProject(id);else if(type==='goal')formGoal(id);else if(type==='job')formJob(id);return}
- if(btn.dataset.control){const bits=btn.dataset.control.split(':');await confirmControl(bits[0],decodeURIComponent(bits[1]),bits[2]);return}
- if(btn.dataset.act)await act(btn.dataset.act,btn.dataset.id,btn.dataset.index)
- }catch(error){notify(error.message,true)}});
-$('modal-form').addEventListener('submit',async e=>{e.preventDefault();const btn=$('modal-submit');btn.disabled=true;try{if(modalHandler)await modalHandler(e.target);$('form-modal').close()}catch(error){notify(error.message,true)}finally{btn.disabled=false}});
-$('modal-close').addEventListener('click',()=>{$('form-modal').close()});$('modal-cancel').addEventListener('click',()=>$('form-modal').close());
-$('connection-form').addEventListener('submit',async e=>{e.preventDefault();await connect($('api-token').value.trim())});
-$('disconnect').addEventListener('click',()=>{$('connection-modal').close();connect('')});
-document.querySelectorAll('[data-close]').forEach(el=>el.addEventListener('click',()=>$(el.dataset.close).close()));
-$('open-connection').addEventListener('click',()=>{$('api-token').value=token;$('connection-modal').showModal()});
-$('inspector-close').addEventListener('click',closeInspector);$('inspector-backdrop').addEventListener('click',closeInspector);
-$('mobile-open').addEventListener('click',()=>{$('sidebar').classList.add('open');$('sidebar-backdrop').classList.add('open')});
-$('mobile-close').addEventListener('click',()=>{$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open')});
-$('sidebar-backdrop').addEventListener('click',()=>{$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open')});
-$('top-create').addEventListener('click',()=>{const actions=[['Project','create-project'],['Goal','create-goal'],['Job','create-job'],['Worker','create-worker']];openForm('Create new','Choose the object to add to your Factory workspace.',`<div class="list-stack">${actions.map(([name,action])=>`<button type="button" class="palette-entry" data-act="${action}">${ico('plus')} New ${name}</button>`).join('')}</div>`,async()=>{},'Done')});
-$('open-search').addEventListener('click',()=>{$('palette-input').value='';showPalette();$('palette').showModal();$('palette-input').focus()});
-$('palette-input').addEventListener('input',showPalette);
-document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('open-search').click()}if(e.key==='Escape'&&inspector)closeInspector()});
-setInterval(statusFromHealth,1100);
-setInterval(()=>{if(token&&Date.now()-lastStateUpdate>11000)refreshState()},10000);
-setInterval(refreshUsage,60000);
-setInterval(()=>{if(view==='plans'&&token)loadPlans();if(view==='workers'&&token)fetchManagedWorkers()},15000);
-render();statusFromHealth();if(token)connect();else setTimeout(()=>$('connection-modal').showModal(),350);
-+(m.reportedCostMicros/1000000).toFixed(4))+'</td></tr>').join('');
-  return '<section class="card" style="margin-top:14px"><div class="card-head"><div><h2>'+esc(p.providerId)+'</h2><p>All models and roles within this project</p></div><button class="button button-muted" data-act="provider-budget-edit" data-id="'+esc(projectId)+'" data-index="'+esc(p.providerId)+'">Edit budget</button></div><div class="card-body"><div class="budget-breakdown"><div><small>Configured local limit</small><strong>'+(p.tokenLimit==null?'Not configured':nf(p.tokenLimit))+'</strong></div><div><small>Observed consumption</small><strong>'+nf(p.consumedTokens)+'</strong></div><div><small>Reserved / unsettled</small><strong>'+nf(p.outstandingTokens)+'</strong></div><div><small>Local remaining</small><strong>'+(p.remainingTokens==null?'Unknown / unlimited':nf(p.remainingTokens))+'</strong></div></div><p class="subtext">Actual provider account quota: '+(p.providerId==='codex'&&usage?'See provider-reported windows below':'Not available')+'. Local budgets do not establish account entitlements.</p>'+(modelRows?table(['Model','Role','Input','Output','Reported USD cost'],modelRows):'<p class="subtext">No metered executions recorded.</p>')+'</div></section>';
- }).join('');
- return title+picker+'<div class="queue-controls"><button class="button button-muted" data-act="provider-config" data-id="'+esc(projectId)+'">Configure provider roles</button><button class="button button-muted" data-act="provider-refresh">Refresh usage</button><button class="button button-muted" data-act="provider-held" data-id="'+esc(projectId)+'">Reconcile held usage</button></div>'+body+(usage?'<div style="margin-top:18px"><h2>Codex account allowances</h2>'+usageCards()+'</div>':'<p class="subtext">No account allowance report is currently available. This is not zero remaining quota.</p>');
-}
-function renderSettings(){return header('Settings & policies','Review and configure execution limits and publication guardrails.')+`<div class="content-grid">${card('Runtime policy','Changes are stored in ~/.factory/settings.json',`<div class="job-info-grid">${[['Global concurrency',settings.maxParallel],['Agent sessions',settings.maxAgentSessions],['Review rounds',settings.maxReviewRounds],['Lease seconds',settings.leaseSeconds],['Push enabled',settings.allowPush?'Yes':'No'],['Auto-merge',settings.autoMerge?'Yes':'No']].map(([a,b])=>`<div class="kv"><small>${esc(a)}</small><strong>${esc(b)}</strong></div>`).join('')}</div><button class="button button-muted" style="margin-top:18px" data-act="edit-settings">${ico('edit')} Edit configuration</button>`)}${card('Operational safety','Safeguards for reliable execution',`<div class="list-stack">${[['shield','Human-controlled integration','Merging and publishing remain permission-gated'],['route','Dependency-aware execution','Jobs do not start before integrated dependencies'],['activity','Event history','Actions are recorded in persistent state'],['cpu','Worker isolation','Separate Git worktrees; not OS sandboxes']].map(([i,t,d])=>`<div class="list-item"><span class="list-icon">${ico(i)}</span><div class="list-text"><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div>`)}</div>`}
-
-function recoveryCandidates(){
- const held=new Set((state.budgetReservations||[]).filter(r=>r.state==='held').map(r=>r.jobId));
- return state.jobs.filter(j=>['blocked','failed','paused','stopped'].includes(j.state)||held.has(j.id));
-}
-function recoveryExplanation(j){
- const hold=(state.budgetReservations||[]).some(r=>r.jobId===j.id&&r.state==='held');
- const git=['commit','push','pr','interrupted_git'].includes(j.stage);
- const lease=!!j.leaseOwner&&j.leaseUntil&&new Date(j.leaseUntil).getTime()>Date.now();
- const note=j.error||((j.state==='paused'||j.state==='stopped')?'Inspect the worktree and prior execution before resuming':'No failure detail reported');
- return {hold,git,lease,note};
-}
-function renderRecovery(){
- const jobs=recoveryCandidates();
- const held=(state.budgetReservations||[]).filter(r=>r.state==='held');
- const interrupted=jobs.filter(j=>recoveryExplanation(j).git);
- let result=header('Recovery center','Investigate blocked and uncertain work before taking an explicit action.');
- result+=`<div class="grid metrics-grid">${metric('Needs review',jobs.length,'Failed, blocked or interrupted','shield')}${metric('Unsettled budgets',held.length,'Held reservations require reconciliation','gauge')}${metric('Git side-effect risk',interrupted.length,'Inspect external history before retry','route')}${metric('Expired active leases',state.jobs.filter(j=>j.leaseOwner&&j.leaseUntil&&new Date(j.leaseUntil).getTime()<=Date.now()).length,'Potentially uncertain execution','clock')}</div>`;
- const rows=jobs.map(j=>{
-  const r=recoveryExplanation(j);
-  return `<tr><td><strong>${esc(shorten(j.title,52))}</strong><small>${esc(j.id.slice(0,8))}</small></td><td>${badge(j.state)}<small>${esc(j.stage||'Unknown stage')}</small></td><td><span class="recovery-copy">${esc(shorten(r.note,160))}</span></td><td>${r.hold?badge('unsettled'):badge('no held reservation')}</td><td>${r.git?'Reconcile Git side effects':r.lease?'Execution may still be active':'Inspect checkpoint and process'}</td><td><button class="tiny-button" data-inspect="job:${j.id}">Investigate</button></td></tr>`;
- }).join('');
- result+=card('Recovery queue','No automatic replay of uncertain work',jobs.length?table(['Work package','State / stage','Observed reason','Budget','Safety check',''],rows):empty('check','No recovery cases','No blocked, failed, paused, stopped or unsettled jobs are currently reported.'));
- return result;
-}
-function renderOperationalPulse(){
- const queued=state.jobs.filter(j=>j.state==='queued');
- const waiting=queued.filter(j=>j.dependsOn.some(id=>!state.jobs.some(other=>other.id===id&&other.integrated)));
- const ages=queued.map(j=>Date.now()-new Date(j.createdAt).getTime()).filter(ms=>Number.isFinite(ms)&&ms>=0);
- const oldest=ages.length?Math.round(Math.max(...ages)/60000)+' min':'Unavailable';
- const reviews=state.jobs.filter(j=>j.state==='reviewing').length;
- const integration=state.jobs.filter(j=>['awaiting_approval','pr_ready','completed_local'].includes(j.state)).length;
- const constrained=state.jobs.filter(j=>j.stage==='budget'&&(j.state==='blocked'||JobStatesActiveUi.includes(j.state))).length;
- const active=state.jobs.filter(j=>JobStatesActiveUi.includes(j.state)).length;
- const enabledWorkers=state.workers.filter(w=>w.enabled);
- const connectedWorkers=enabledWorkers.filter(workerActive).length;
- const retries=state.jobs.filter(j=>Number(j.attempt)>1).length;
- return `<div class="operational-pulse">
- <div class="pulse-stat"><small>Active / pending jobs</small><strong>${active} / ${queued.length}</strong><span>Observed lifecycle states</span></div>
- <div class="pulse-stat"><small>Oldest queue wait</small><strong>${esc(oldest)}</strong><span>Elapsed since creation, not measured scheduling latency</span></div>
- <div class="pulse-stat"><small>Dependency bottlenecks</small><strong>${waiting.length}</strong><span>Unintegrated predecessors</span></div>
- <div class="pulse-stat"><small>Awaiting review / integration</small><strong>${reviews} / ${integration}</strong><span>Observed lifecycle states</span></div>
- <div class="pulse-stat"><small>Budget-blocked</small><strong>${constrained}</strong><span>Explicit budget stage</span></div>
- <div class="pulse-stat"><small>Registered worker connectivity</small><strong>${enabledWorkers.length?connectedWorkers+' / '+enabledWorkers.length:'Unavailable'}</strong><span>Heartbeat health; not total compute capacity</span></div>
- <div class="pulse-stat"><small>Jobs with retry activity</small><strong>${retries}</strong><span>More than one execution attempt</span></div></div>`;
-}
-const JobStatesActiveUi=['preparing','building','gating','reviewing','reworking','awaiting_approval'];
-
-function render(){if(!token){$('main').innerHTML=`<div class="loading-screen"><div style="text-align:center">${ico('shield')}<h2>Connect to Mission Control</h2><p class="muted">Enter the API token to manage your Factory workspace.</p><button class="button button-primary" data-act="open-connection">Connect</button></div></div>`;return}
-const renders={overview:renderOverview,projects:renderProjects,analysis:renderAnalysis,goals:renderGoals,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings};$('main').innerHTML=(renders[view]||renderOverview)();
- for(const name of ['projects','goals','jobs','workers'])document.querySelectorAll(`[data-count="${name}"]`).forEach(el=>el.textContent=(state[name]||[]).length||'');
-  document.querySelectorAll('[data-count="recovery"]').forEach(el=>el.textContent=recoveryCandidates().length||'');
- const s=$('table-search');if(s){s.addEventListener('input',e=>{const pos=e.target.selectionStart;search=e.target.value;render();$('table-search').focus();$('table-search').setSelectionRange(pos,pos)});$('table-filter').addEventListener('change',e=>{filter=e.target.value;render()})}}
-// Dialogs, forms and commands ------------------------------------------------
-const field=(key,label,value='',type='text',options=[],hint='')=>{let control='';if(type==='select')control=`<select name="${key}" id="field-${key}">${options.map(([v,l])=>`<option value="${esc(v)}" ${String(value)===String(v)?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
-else if(type==='textarea'||type==='code')control=`<textarea name="${key}" id="field-${key}" class="${type==='code'?'code-field':''}" rows="${type==='code'?7:4}">${esc(value)}</textarea>`;
-else if(type==='checkbox')control=`<label class="checkbox-line"><input name="${key}" type="checkbox" ${value?'checked':''}> ${esc(label)}</label>`;
-else control=`<input name="${key}" id="field-${key}" type="${type}" value="${esc(value)}" ${type==='number'?'min="0"':''}>`;
-return type==='checkbox'?control:`<div class="field"><label for="field-${key}">${esc(label)}</label>${control}${hint?`<small>${esc(hint)}</small>`:''}</div>`};
-const projectOptions=()=>state.projects.filter(p=>p.status!=='archived').map(p=>[p.id,p.name]);
-const goalOptions=()=>[['','No linked goal'],...state.goals.filter(g=>g.state==='active').map(g=>[g.id,shorten(g.objective,70)])];
-function openForm(title,subtitle,html,handler,submit='Save changes'){$('modal-title').textContent=title;$('modal-subtitle').textContent=subtitle;$('modal-fields').innerHTML=html;$('modal-submit').textContent=submit;modalHandler=handler;if(!$('form-modal').open)$('form-modal').showModal();}
-function values(form){return Object.fromEntries([...new FormData(form).entries()].map(([k,v])=>[k,v.toString()]))}
-const lines=s=>String(s||'').split(/\r?\n|;/).map(x=>x.trim()).filter(Boolean);
-const checksJson=x=>JSON.stringify(x||[],null,2);
-function formProject(id){const p=state.projects.find(p=>p.id===id),v=p||{name:'',path:'',baseBranch:'master',maxParallel:2,checks:[],protectedPaths:['.github/workflows/','.factory/','.agents/','factory/']};
- const html=field('name','Project name',v.name)+field('path','Git repository root',v.path)+field('baseBranch','Base branch',v.baseBranch)+field('maxParallel','Maximum parallel jobs',v.maxParallel,'number')+field('checks','Quality checks (JSON array)',checksJson(v.checks),'code',[],'Each check needs name, executable, arguments and timeoutSeconds.')+field('protectedPaths','Protected paths, one per line',v.protectedPaths.join('\n'),'textarea');
- openForm(p?'Configure project':'Register project','Quality gates are required before jobs can execute.',html,async f=>{const x=values(f);let checks;try{checks=JSON.parse(x.checks)}catch{throw Error('Invalid checks JSON')};if(!Array.isArray(checks))throw Error('Checks must be a JSON array');await mutate(p?`projects/${p.id}`:'projects',p?'PUT':'POST',{name:x.name,path:x.path,baseBranch:x.baseBranch,maxParallel:Number(x.maxParallel),checks,protectedPaths:lines(x.protectedPaths)})},p?'Update project':'Register project')}
-function formGoal(id){const g=state.goals.find(g=>g.id===id);if(!g&&!state.projects.length){notify('Register a project first',true);return}let v=g||{projectId:state.projects[0].id,objective:'',acceptanceCriteria:[],tokenBudget:100000};const html=field('projectId','Project',v.projectId,'select',projectOptions())+field('objective','Outcome / objective',v.objective,'textarea')+field('acceptanceCriteria','Acceptance criteria (one per line)',v.acceptanceCriteria.join('\n'),'textarea')+field('tokenBudget','Token budget',v.tokenBudget,'number');openForm(g?'Edit goal':'Create goal','Describe a measurable outcome and its success criteria.',html,async f=>{let x=values(f);await mutate(g?`goals/${g.id}`:'goals',g?'PUT':'POST',{projectId:x.projectId,objective:x.objective,acceptanceCriteria:lines(x.acceptanceCriteria),tokenBudget:Number(x.tokenBudget)})},g?'Update goal':'Create goal')}
-function formJob(id){const j=state.jobs.find(j=>j.id===id);if(!j&&!state.projects.length){notify('Register a project first',true);return}const v=j||{projectId:state.projects[0].id,goalId:'',title:'',description:'',mode:'local',risk:'medium',priority:50,dependsOn:[],expectedPaths:[]};let html=field('projectId','Project',v.projectId,'select',projectOptions())+field('goalId','Linked goal (optional)',v.goalId||'','select',goalOptions())+field('title','Title',v.title)+field('description','Work package description',v.description,'textarea')+`<div class="field-row">${field('mode','Execution',v.mode,'select',[['local','Local'],['remote','Remote']])}${field('risk','Risk',v.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}</div>`+field('priority','Priority (0-100)',v.priority,'number')+field('expectedPaths','Expected paths (one per line)',v.expectedPaths.join('\n'),'textarea')+field('dependsOn','Dependencies (job IDs, one per line)',v.dependsOn.join('\n'),'textarea');
- openForm(j?'Edit job':'Create job','Execution starts only when dependencies and policies allow it.',html,async f=>{const x=values(f);await mutate(j?`jobs/${j.id}`:'jobs',j?'PUT':'POST',{projectId:x.projectId,goalId:x.goalId||null,title:x.title,description:x.description,mode:x.mode,risk:x.risk,priority:Number(x.priority),expectedPaths:lines(x.expectedPaths),dependsOn:lines(x.dependsOn)})},j?'Save job':'Queue job')}
-function formWorker(id){const w=state.workers.find(w=>w.id===id);openForm(w?'Configure worker':'Register worker','Remote workers authenticate with the Factory token. Local workers may be launched directly from this dashboard.',field('id','Unique worker ID',w?.id||'')+field('platform','Platform / capabilities',w?.platform||'remote'),async f=>{const x=values(f);if(w&&x.id!==w.id)throw Error('Worker ID cannot be changed');await mutate('workers/register','POST',x)},w?'Save worker':'Register worker')}
-function formSettings(){
- const supportsExtensions=Number.isFinite(settings.goalExtensionIncrementTokens)&&
-   Number.isFinite(settings.maxJobReservationTokens);
- let html=`<div class="field-row">${field('maxParallel','Global concurrency',settings.maxParallel||3,'number')}
- ${field('maxAgentSessions','Agent sessions',settings.maxAgentSessions||6,'number')}
- ${field('maxReviewRounds','Review rounds',settings.maxReviewRounds||3,'number')}
- ${field('leaseSeconds','Lease duration (s)',settings.leaseSeconds||120,'number')}
- ${field('pollSeconds','Polling interval (s)',settings.pollSeconds||3,'number')}</div>`;
- if(Number.isFinite(settings.goalReservationTokens))
-  html+=field('goalReservationTokens','Initial goal reservation (tokens)',
-   settings.goalReservationTokens,'number',[],'Initial tokens committed when a goal-funded job is claimed.');
- if(supportsExtensions)
-  html+=`<h3>Dynamic goal allocations</h3><div class="field-row">
-   ${field('goalExtensionIncrementTokens','Extension increment (tokens)',settings.goalExtensionIncrementTokens,'number')}
-   ${field('goalExtensionThresholdTokens','Low-water threshold (tokens)',settings.goalExtensionThresholdTokens,'number')}
-   ${field('maxJobReservationTokens','Maximum per-job allocation (tokens)',settings.maxJobReservationTokens,'number')}
-   </div><p class="subtext">Controller-approved goal reservations, not provider account allowances.</p>`;
- html+=field('allowPush','Allow remote pushes',settings.allowPush,'checkbox')+
-  field('autoMerge','Allow automatic merging',settings.autoMerge,'checkbox');
- openForm('Execution settings','Changes affect future scheduling. Push and merge remain sensitive actions.',
-  html,async f=>{
-   const x=values(f);
-   const body={maxParallel:Number(x.maxParallel),maxAgentSessions:Number(x.maxAgentSessions),
-    maxReviewRounds:Number(x.maxReviewRounds),leaseSeconds:Number(x.leaseSeconds),
-    pollSeconds:Number(x.pollSeconds),allowPush:f.elements.allowPush.checked,
-    autoMerge:f.elements.autoMerge.checked};
-   for(const key of ['goalReservationTokens','goalExtensionIncrementTokens',
-    'goalExtensionThresholdTokens','maxJobReservationTokens'])
-    if(Object.hasOwn(x,key)){
-     const value=Number(x[key]);
-     if(!Number.isSafeInteger(value)||value<0)throw Error('Budget allocations require nonnegative integers');
-     body[key]=value;
-    }
-   if(body.maxJobReservationTokens!==undefined && body.goalReservationTokens!==undefined &&
-      body.maxJobReservationTokens<body.goalReservationTokens)
-    throw Error('Per-job allocation limit must be at least the initial reservation');
-   if((body.allowPush&&!settings.allowPush)||(body.autoMerge&&!settings.autoMerge)){
-    if(!confirm('Enable publishing or automatic merging? Ensure repository policies and approvals are configured.'))return;
-   }
-   await mutate('settings','PUT',body);
-   await fetchSettings();
-  },'Apply settings');
-}
-async function confirmControl(type,id,action){const label={activate:'Activate',pause:'Pause',disable:'Disable',archive:'Archive',stop:'Stop',resume:'Resume',retry:'Retry',complete:'Complete',drain:'Drain',enable:'Enable'}[action]||action;
- let html=`<p class="subtext">${esc(label)} ${esc(type)}? The action will be recorded in the audit trail.</p>`+field('reason','Reason (optional)','','textarea');if(type==='worker'&&action==='stop')html+='<p class="subtext">Stops only a locally managed, idle worker process. Drain first if work is active.</p>';if(type==='job'&&['resume','retry'].includes(action)){const j=state.jobs.find(j=>j.id===id);if(j?.startedAt)html+=field('reviewed','I inspected the existing worktree and side effects',false,'checkbox')}
- openForm(`${label} ${type}`,action==='pause'&&type==='queue'?'Active jobs continue; new scheduling pauses.':'Confirm this operational action.',html,async f=>{const x=values(f);const body={action,reason:x.reason||'',reviewed:!!f.elements.reviewed?.checked};if(type==='job'&&['resume','retry'].includes(action)&&state.jobs.find(j=>j.id===id)?.startedAt&&!body.reviewed)throw Error('Worktree review acknowledgement required');await mutate(`${type}s/${encodeURIComponent(id)}/action`,'POST',body);if(type==='worker')await fetchManagedWorkers()},label)}
-async function runQueue(action){if(action==='stop'){if(!confirm('Stop local active jobs at their next cancellation point and pause the queue? Remote work is not force-killed.'))return}await mutate('queue/'+action,'POST',{})}
-async function verify(id){if(!confirm('Verify this job is integrated into its base branch?'))return;await mutate(`jobs/${id}/verify`,'POST',{})}
-const plansCache=new Map(); let managedWorkers=[];async function loadPlans(){if(!token)return;try{const plans=await api('plans');plansCache.clear();for(const p of plans)if(p.plan)plansCache.set(p.id,p.plan);if(view==='plans')render()}catch{}}
-function planEditor(goalId){const g=state.goals.find(g=>g.id===goalId);if(!g)return;const existing=plansCache.get(goalId);planGoal=goalId;planDraft=structuredClone(existing||{goalId,projectId:g.projectId,baseCommit:'',packages:[]});renderPlanEditor()}
-function renderPlanEditor(){if(!planDraft)return;const html=`<div class="card" style="margin-top:17px"><div class="card-head"><div><h2>Work packages</h2><p>Dependencies use zero-based package indexes; cycles are rejected by the server.</p></div><button class="button button-muted" data-act="package-add">${ico('plus')} Add package</button></div><div class="card-body"><div class="plan-packages">${planDraft.packages.length?planDraft.packages.map((p,i)=>`<div class="package-row"><span class="package-num">${i}</span><div><strong>${esc(p.title)}</strong><small>${esc(shorten(p.description,100))} · Priority ${p.priority} · ${esc(p.risk)} · Depends on ${esc(p.dependsOn.join(', ')||'none')}</small></div><div class="tiny-actions"><button class="tiny-button" data-act="package-edit" data-index="${i}">Edit</button><button class="tiny-button" data-act="package-remove" data-index="${i}">Remove</button></div></div>`).join(''):empty('route','No packages yet','Add work packages and dependencies before saving.')}</div><div class="head-actions" style="margin-top:20px;justify-content:flex-end"><button class="button button-muted" data-act="plan-close">Cancel</button><button class="button button-primary" data-act="plan-save">${ico('check')} Save plan</button></div></div></div>`;$('inspector-title').textContent='Plan Designer';$('inspector-body').innerHTML=`<p class="muted">${esc(gName(planGoal))}</p>${html}`;showInspector()}
-const gName=id=>state.goals.find(g=>g.id===id)?.objective||'';
-function packageForm(i){const p=planDraft.packages[i]||{title:'',description:'',risk:'medium',priority:50,files:[],dependsOn:[]};let html=field('title','Package title',p.title)+field('description','Description / acceptance criteria',p.description,'textarea')+`<div class="field-row">${field('risk','Risk',p.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}${field('priority','Priority',p.priority,'number')}</div>`+field('files','Expected file paths, one per line',p.files.join('\n'),'textarea')+field('dependsOn','Dependency indexes, comma-separated',p.dependsOn.join(','));openForm(i===planDraft.packages.length?'Add work package':'Edit work package','Keep packages independently executable where possible.',html,async f=>{const x=values(f);const item={title:x.title,description:x.description,risk:x.risk,priority:Number(x.priority),files:lines(x.files),dependsOn:x.dependsOn.split(',').map(x=>x.trim()).filter(Boolean).map(Number)};if(item.dependsOn.some(n=>!Number.isInteger(n)||n<0||n===i||n>=planDraft.packages.length))throw Error('Invalid dependency indexes');planDraft.packages[i]=item;renderPlanEditor()})}
-
-let inspectorKey=null;
-function jobInspectorDetails(j,kv){
- const owner=j.leaseOwner||'Unassigned';
- const workerId=owner.startsWith('remote:')?owner.slice(7):owner;
- const worker=state.workers.find(w=>w.id===workerId);
- const heartbeat=worker?(workerActive(worker)?'Connected, ':'Stale or offline, ')+relative(worker.heartbeat):'No registered heartbeat';
- const dependencies=(j.dependsOn||[]).map(id=>{const p=state.jobs.find(x=>x.id===id);return p?`${shorten(p.title,55)}: ${p.integrated?'integrated':p.state}`:'Unresolved '+id}).join('; ')||'None';
- const reservations=(state.budgetReservations||[]).filter(r=>r.jobId===j.id);
- const current=reservations.find(r=>r.executionGeneration===j.executionGeneration&&r.state==='active');
- const held=reservations.filter(r=>r.state==='held');
- const risk=recoveryExplanation(j);
- const active=JobStatesActiveUi.includes(j.state);
- const leaseLive=active&&j.leaseUntil&&new Date(j.leaseUntil).getTime()>Date.now();
- const next=risk.git?'Reconcile external Git effects before retry':risk.lease?'Current execution may still be active':held.length?'Reconcile held usage before a new claim':j.state==='queued'?'Wait for scheduling and integrated dependencies':active?'Monitor current execution':'Inspect the checkpoint and process before requeue';
- return `<hr class="panel-divider"><h3>Execution identity and health</h3><div class="job-info-grid">
- ${kv('Worker / owner',owner)}${kv('Worker heartbeat',heartbeat)}
- ${kv('Execution generation',j.executionGeneration??'Unavailable')}
- ${kv('Lease',j.leaseUntil?(leaseLive?'Live until ':'Inactive or expired at ')+dateTime(j.leaseUntil):'No active lease')}
- ${kv('Started',dateTime(j.startedAt))}${kv('Updated',dateTime(j.updatedAt))}${kv('Finished',dateTime(j.finishedAt))}
- </div><h3>Work package scope</h3><p class="subtext">${esc((j.expectedPaths||[]).join(', ')||'No declared paths')}</p>
- <div class="job-info-grid">${kv('Dependencies',dependencies)}${kv('Requested state',j.requestedState||'None')}</div>
- <h3>Budget and quality evidence</h3><div class="job-info-grid">
- ${kv('Observed token use',(Number(j.tokensIn||0)+Number(j.tokensOut||0)).toLocaleString())}
- ${kv('Active reservation',current?Number(current.reserved).toLocaleString()+' tokens':'None')}
- ${kv('Held reservations',held.length)}${kv('Final provider usage',j.usageComplete?'Reported':'Not confirmed')}
- ${kv('Evidence artifact',j.evidenceFile?'Path recorded':'Unavailable')}
- </div>
- <h3>Build checks and independent reviews</h3>
- <div id="inspector-job-quality" aria-live="polite"><p class="subtext">Loading commit-bound quality evidence...</p></div>
- <h3>Recovery assessment</h3><div class="recovery-assessment">
- <strong>Next safe step</strong><p>${esc(next)}</p>
- <p>Last durable checkpoint: ${esc(j.checkpointStage||'Unavailable')} · ${esc(j.checkpointCommit||'No commit recorded')} · ${esc(dateTime(j.checkpointAt))}</p>
- <p>Git side effects: ${risk.git?'Possibly occurred; reconcile externally':'No uncertain Git stage reported; absence is not proof'}</p>
- <p>Unsettled usage: ${risk.hold?'Held; controller reconciliation required':'No held reservation reported'}</p>
- </div>`;
-}
-
-
-async function renderJobQuality(jobId){
- const target=$('inspector-job-quality');
- if(!target||inspectorKey!=='job:'+jobId)return;
- try{
-  const evidence=await api('jobs/'+jobId+'/quality');
-  if(inspectorKey!=='job:'+jobId||!$('inspector-job-quality'))return;
-  const checks=(evidence.checks||[]).map(c=>`<tr><td>${esc(c.name)}</td>
-   <td>${esc(c.exitCode)}</td><td>${badge(c.passed?'passed':'failed')}</td></tr>`).join('');
-  const reviews=(evidence.reviews||[]).map(r=>`<tr><td>${esc(r.role)}</td>
-   <td>${badge(r.verdict==='PASS'?'passed':'changes required')}</td></tr>`).join('');
-  const findings=(evidence.findings||[]).map(f=>`<li>${esc(f)}</li>`).join('');
-  const current=evidence.current===true;
-  const overall=current?evidence.status:'stale';
-  $('inspector-job-quality').innerHTML=`
-   <p class="subtext">Evidence commit: ${esc(evidence.commit||'Unknown')}
-   · ${current?'Matches current recorded job head':'Not verified for current job head'}</p>
-   <p>${badge(overall)} ${evidence.verifiedAt?' · Captured '+esc(dateTime(evidence.verifiedAt)):''}</p>
-   ${checks?table(['Check','Exit code','Result'],checks):'<p class="subtext">No check reports available.</p>'}
-   ${reviews?table(['Review role','Verdict'],reviews):'<p class="subtext">No review verdicts available.</p>'}
-   ${findings?`<h4>Findings</h4><ul>${findings}</ul>`:''}
-   <p class="subtext">This view summarizes persisted evidence only. A textual reviewer verdict is not an independent security certification.</p>`;
- }catch(error){
-  if(inspectorKey==='job:'+jobId&&$('inspector-job-quality'))
-   $('inspector-job-quality').innerHTML=`<p class="subtext" role="status">Quality evidence unavailable: ${esc(error.message)}</p>
-    <button class="button button-muted" data-act="quality-refresh" data-id="${jobId}">Retry</button>`;
- }
-}
-
-async function renderGoalBudget(goalId){
- const target=$('inspector-goal-budget');
- if(!target||inspectorKey!=='goal:'+goalId)return;
- try{
-  const budget=await api('goals/'+goalId+'/budget');
-  if(inspectorKey!=='goal:'+goalId||!$('inspector-goal-budget'))return;
-  const nf=x=>Number(x||0).toLocaleString();
-  const rows=budget.reservations||[];
-  const active=rows.filter(r=>r.state==='active').reduce((a,r)=>a+Number(r.outstanding||0),0);
-  const held=rows.filter(r=>r.state==='held').reduce((a,r)=>a+Number(r.outstanding||0),0);
-  const total=Number(budget.total||0),used=Number(budget.consumed||0),committed=Number(budget.committed||0);
-  const percent=total>0?Math.min(100,Math.max(0,100*(used+committed)/total)):0;
-  const records=rows.map(r=>{const j=state.jobs.find(j=>j.id===r.jobId);
-   return `<tr><td>${esc(j?shorten(j.title,38):r.jobId.slice(0,8))}<small>Generation ${esc(r.executionGeneration)}</small></td><td>${badge(r.state)}</td><td>${nf(r.reserved)}</td><td>${nf(r.consumed)}</td><td>${nf(r.outstanding)}</td></tr>`;
-  }).join('');
-  const jobs=new Set(state.jobs.filter(j=>j.goalId===goalId).map(j=>j.id));
-  const events=state.events.filter(e=>jobs.has(e.jobId)&&['budget_reserved','budget_extended','budget_held','budget_released','budget_reconciled','budget_overrun'].includes(e.type));
-  const durableExtensions=Array.isArray(budget.extensions)?budget.extensions:null;
-  const grantRows=(durableExtensions||[]).map(e=>{
-   const job=state.jobs.find(j=>j.id===e.jobId);
-   const owner=e.workerId||'Controller';
-   return `<tr><td><strong>${esc(shorten(job?.title||e.jobId||'Unknown',40))}</strong>
-    <small>Generation ${esc(e.executionGeneration)}</small></td>
-    <td>${esc(dateTime(e.at))}</td><td>${esc(owner)}</td>
-    <td>${nf(e.granted)}</td><td>${nf(e.authorizedTotal)}</td></tr>`;
-  }).join('');
-  // Extended job accounting is optional until the budget API change is integrated.
-  const accountedJobs=Array.isArray(budget.jobs)?budget.jobs:state.jobs.filter(j=>j.goalId===goalId).map(j=>({
-   id:j.id,state:j.state,stage:j.stage,worker:j.leaseOwner||null,
-   tokensIn:j.tokensIn,tokensOut:j.tokensOut,usageComplete:j.usageComplete
-  }));
-  const usageRows=accountedJobs.map(entry=>{
-   const job=state.jobs.find(j=>j.id===entry.id);
-   const total=Number(entry.tokensIn||0)+Number(entry.tokensOut||0);
-   return `<tr><td><strong>${esc(shorten(job?.title||entry.id,45))}</strong><small>${esc((entry.state||'unknown')+' / '+(entry.stage||'unknown'))}</small></td>
-    <td>${esc(entry.worker||'No active owner')}</td><td>${nf(entry.tokensIn)}</td><td>${nf(entry.tokensOut)}</td>
-    <td>${nf(total)}</td><td>${entry.usageComplete?badge('reported'):badge('unconfirmed')}</td></tr>`;
-  }).join('');
-  $('inspector-goal-budget').innerHTML=`<div class="budget-breakdown">
-    <div><small>Total budget</small><strong>${nf(total)}</strong></div><div><small>Observed consumption</small><strong>${nf(used)}</strong></div>
-    <div><small>Active liabilities</small><strong>${nf(active)}</strong></div><div><small>Held liabilities</small><strong>${nf(held)}</strong></div>
-    <div><small>Unreserved capacity</small><strong>${nf(budget.available)}</strong></div>
-   </div><div class="progress-track" role="meter" aria-label="Consumed and reserved goal capacity" aria-valuenow="${percent.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${percent.toFixed(1)}%"></div></div>
-   <p class="subtext">Goal-budget accounting is separate from provider account allowances. Final usage that is unknown must remain unsettled.</p>
-   <h3>Reservations</h3>${rows.length?table(['Job','Status','Reserved','Consumed','Outstanding'],records):'<p class="subtext">No reservations reported.</p>'}
-   ${held>0?`<button class="button button-muted" data-act="budget-reconcile" data-id="${goalId}">Review held usage</button>`:''}
-   <h3>Per-job reported usage</h3>
-   ${usageRows?table(['Job','Current owner','Input','Output','Total','Final usage'],usageRows):'<p class="subtext">No linked job usage reported.</p>'}
-   <p class="subtext">Owner is the current lease assignment, not a complete historical worker attribution. Unconfirmed final usage is not a provider-account allowance.</p>
-   <h3>Controller-authorized extension history</h3>
-   ${durableExtensions===null?'<p class="subtext">Dedicated extension history is unavailable on this controller version.</p>':
-    grantRows?table(['Job','Granted at','Controller identity','Additional tokens','New reservation'],grantRows):
-    '<p class="subtext">No extension requests have been recorded in the durable ledger.</p>'}
-   <h3>Budget activity</h3>${eventItems(events,20)}
-   <p class="subtext">Operational events are subject to controller retention limits. The durable extension ledger, when supported, begins at its migration date; older events cannot be reconstructed automatically.</p>`;
- }catch(error){
-  if(inspectorKey==='goal:'+goalId&&$('inspector-goal-budget'))
-   $('inspector-goal-budget').innerHTML=`<p class="subtext" role="alert">Budget details unavailable: ${esc(error.message)}</p><button class="button button-muted" data-act="budget-refresh" data-id="${goalId}">Retry</button>`;
- }
-}
-async function reconcileGoalBudget(goalId){
- const budget=await api('goals/'+goalId+'/budget');
- const held=(budget.reservations||[]).filter(r=>r.state==='held');
- if(!held.length){notify('No held reservations to reconcile');return}
- const options=held.map(r=>[r.id,(state.jobs.find(j=>j.id===r.jobId)?.title||r.jobId)+' · '+r.outstanding+' outstanding']);
- const first=held[0],job=state.jobs.find(j=>j.id===first.jobId);
- openForm('Reconcile held usage','Administrator action. Only independently verified final provider usage can release unknown liabilities.',
-  field('reservationId','Held reservation',first.id,'select',options)+
-  field('finalTokensIn','Final input tokens',job?.tokensIn||0,'number')+
-  field('finalTokensOut','Final output tokens',job?.tokensOut||0,'number')+
-  field('reason','Evidence and review justification','','textarea')+
-  field('reviewed','I independently verified the final usage',false,'checkbox'),
-  async form=>{
-   const x=values(form),input=Number(x.finalTokensIn),output=Number(x.finalTokensOut);
-   if(!form.elements.reviewed.checked||x.reason.trim().length<10||
-      !Number.isSafeInteger(input)||!Number.isSafeInteger(output)||input<0||output<0)
-    throw Error('Verified nonnegative integer totals and a justification of at least 10 characters are required');
-   if(!confirm('Release unused reserved capacity based on independently verified final usage? This action is recorded.'))return;
-   await mutate(`goals/${goalId}/budget/reconcile`,'POST',{
-     reservationId:x.reservationId,finalTokensIn:input,finalTokensOut:output,reviewed:true,reason:x.reason.trim()
-   });
-   await renderGoalBudget(goalId);
-  },'Confirm reconciliation');
-}
-
-function showInspector(){inspector=true;$('inspector').classList.add('open');$('inspector').setAttribute('aria-hidden','false');$('inspector-backdrop').classList.add('open')}
-function closeInspector(){inspectorKey=null;inspector=null;$('inspector').classList.remove('open');$('inspector').setAttribute('aria-hidden','true');$('inspector-backdrop').classList.remove('open')}
-function inspectorPanel(title,body){inspectorKey=null;$('inspector-title').textContent=title;$('inspector-body').innerHTML=body;showInspector()}
-function inspect(type,id){const entity=(type==='project'?state.projects:type==='goal'?state.goals:type==='worker'?state.workers:state.jobs).find(x=>(type==='worker'?x.id: x.id)===id);if(!entity)return;let body='';const kv=(label,v)=>`<div class="kv"><small>${esc(label)}</small><strong>${esc(v)}</strong></div>`;
- if(type==='job'){const j=entity;body=`${badge(j.state)}<div class="job-info-grid" style="margin-top:18px">${kv('Priority',j.priority)}${kv('Risk',j.risk)}${kv('Execution mode',j.mode)}${kv('Stage',j.stage)}${kv('Attempt',j.attempt)}${kv('Tokens',Number(j.tokensIn||0)+Number(j.tokensOut||0))}</div><h3>Description</h3><p class="subtext">${esc(j.description)}</p>${j.error?`<div class="badge danger">${esc(j.error)}</div>`:''}${kv('Branch',j.branch||'—')}${kv('Worktree',j.worktree||'—')}${kv('Head commit',j.headSha||'—')}${kv('Dependencies',j.dependsOn.join(', ')||'None')}${safeUrl(j.prUrl)?`<p><a href="${esc(safeUrl(j.prUrl))}" rel="noopener noreferrer" target="_blank">View pull request ↗</a></p>`:''}<hr class="panel-divider"><h3>Controls</h3><div class="queue-controls">${['queued'].includes(j.state)?`<button class="button button-primary" data-act="job-start" data-id="${j.id}" ${j.mode==='remote'?'disabled':''}>Run now</button><button class="button button-muted" data-control="job:${j.id}:pause">Pause</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop</button>`:''}${['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state)?`<button class="button button-muted" data-control="job:${j.id}:pause">Pause local</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop local</button>`:''}${['paused','stopped','blocked','failed'].includes(j.state)?`<button class="button button-primary" data-control="job:${j.id}:resume">Review & requeue</button>`:''}${['pr_ready','completed_local'].includes(j.state)?`<button class="button button-muted" data-act="verify" data-id="${j.id}">Verify integration</button>`:''}</div>`;
- body+=jobInspectorDetails(j,kv);
-  }else if(type==='project'){const p=entity;body=`${badge(p.status||'active')}<div class="job-info-grid" style="margin-top:18px">${kv('Base branch',p.baseBranch)}${kv('Concurrency',p.maxParallel)}</div>${kv('Path',p.path)}${kv('Origin',p.origin||'Local')}${kv('Checks',p.checks.length)}${kv('Protected paths',p.protectedPaths.join(', '))}<hr class="panel-divider"><div class="queue-controls"><button class="button button-muted" data-edit="project:${p.id}">Configure</button>${['paused','disabled'].includes(p.status)?`<button class="button button-primary" data-control="project:${p.id}:activate">Activate</button>`:`<button class="button button-muted" data-control="project:${p.id}:pause">Pause</button><button class="button button-muted" data-control="project:${p.id}:disable">Disable</button>`}<button class="button button-danger" data-control="project:${p.id}:archive">Archive</button></div>`;
- }else if(type==='goal'){const g=entity;body=`${badge(g.state)}${kv('Objective',g.objective)}${kv('Token budget',g.tokenBudget.toLocaleString())}<h3>Acceptance criteria</h3><ul>${g.acceptanceCriteria.map(c=>`<li>${esc(c)}</li>`).join('')}</ul><hr class="panel-divider"><div class="queue-controls"><button class="button button-muted" data-edit="goal:${g.id}">Edit</button>${g.state==='draft'?`<button class="button button-primary" data-control="goal:${g.id}:activate">Activate</button>`:''}${['active'].includes(g.state)?`<button class="button button-muted" data-control="goal:${g.id}:pause">Pause</button><button class="button button-muted" data-control="goal:${g.id}:stop">Stop</button><button class="button button-muted" data-control="goal:${g.id}:complete">Complete</button>`:''}${['paused','stopped'].includes(g.state)?`<button class="button button-primary" data-control="goal:${g.id}:activate">Resume</button>`:''}<button class="button button-muted" data-control="goal:${g.id}:archive">Archive</button></div>`;
- body+='<hr class="panel-divider"><h3>Goal budget ledger</h3><div id="inspector-goal-budget" aria-live="polite"><p class="subtext">Loading controller budget data...</p></div>';
-  }else{const w=entity;body=`${badge(!w.enabled?'disabled':w.draining?'draining':workerActive(w)?'online':'offline')}${kv('Platform',w.platform)}${kv('Last heartbeat',dateTime(w.heartbeat))}<p class="subtext">Draining prevents new claims; it does not terminate in-flight work.</p><div class="queue-controls"><button class="button button-muted" data-act="worker-edit" data-id="${encodeURIComponent(w.id)}">Configure</button><button class="button button-muted" data-control="worker:${encodeURIComponent(w.id)}:${managedWorkers.includes(w.id)?'stop':'start'}">${managedWorkers.includes(w.id)?'Stop local':'Start local'}</button><button class="button button-muted" data-control="worker:${encodeURIComponent(w.id)}:enable">Enable</button><button class="button button-muted" data-control="worker:${encodeURIComponent(w.id)}:drain">Drain</button><button class="button button-danger" data-control="worker:${encodeURIComponent(w.id)}:disable">Disable</button></div>`;}
- const events=state.events.filter(e=>e.jobId===id).slice(-15);if(events.length)body+=`<hr class="panel-divider"><h3>Job activity</h3>${eventItems(events,15)}`;
- inspectorPanel((type==='job'?entity.title:type==='goal'?shorten(entity.objective,40):type==='project'?entity.name:entity.id),body);
-  inspectorKey=type+':'+id;
-  if(type==='goal')renderGoalBudget(id);
-  if(type==='job')renderJobQuality(id);
-}
-async function act(action,id,index){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
  case'queue-run':case'queue-pause':case'queue-resume':case'queue-stop':await runQueue(action.slice(6));break;
  case'verify':await verify(id);break;
  case'job-start':await mutate(`jobs/${id}/start`,'POST',{});break;

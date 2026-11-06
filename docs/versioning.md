@@ -55,6 +55,34 @@ Run only one `bump` option per intended product version change. `bump` resets th
 
 Version `1.0.0` is a separate readiness and approval decision. A version bump does **not** constitute release authorization. Preview builds are for development, RC builds require completed release-scope tests, and stable builds require verified build, tests, security/compatibility review, supported upgrade/backup plan, licensing review, and explicit publication approval. The existing `Factory release --project ...` command prepares **target repository** source archives; it does not publish Factory binaries or select Factory's own version.
 
+## Windows preview package validation
+
+Run the same package check as the Windows CI job from the repository root.
+
+```powershell
+.\Build.ps1
+dotnet .\tests\Factory.Tests\bin\Release\net10.0\Factory.Tests.dll --verify-windows-package .\dist
+```
+
+The check archives and extracts the framework-dependent `win-x64` output into a temporary directory. It verifies the executable version and checksum against the build manifest, checks that the skills and agent definitions are packaged, then registers a synthetic Git repository with the extracted `Factory.exe` and an empty `FACTORY_HOME`.
+
+For upgrade and recovery, the test creates a schema 8 fixture with recorded provider usage and takes a SQLite backup. The extracted executable must migrate both the original database and a restored copy to schema 9. The check compares project identity, token counts, final usage, historical cost and settings, and verifies that the original backup stays at schema 8. Follow the [recovery guide](recovery.md#restore-or-upgrade-state) for operator backups.
+
+Record the package version, Windows and .NET versions, installation and migration outcomes, and any outstanding live checks in the preview decision. The authenticated Claude Code ledger check remains open in [issue #22](https://github.com/DaveBeusing/Factory/issues/22).
+
+### Package 07 local evidence
+
+Validated `0.3.0-preview.31+g70a1eb6f0210` on Windows x64 `10.0.26300.9711` with .NET SDK `10.0.403`. The Windows build passed all 100 .NET tests.
+
+| Check | Observed result |
+| --- | --- |
+| Portable installation | The extracted `Factory.exe` matched the manifest and checksum, contained the packaged assets, registered a repository and created a fresh schema 9 database. |
+| Schema 8 upgrade | The extracted executable migrated the test fixture to schema 9 and preserved the project, 8 input and 4 output tokens, final-usage status and settings. Historical cost remained unknown. |
+| Backup restore | The executable migrated a separately restored copy and preserved the same records. The original backup remained at schema 8. |
+| Historical package | A Windows build of `e69f2a7` created a schema 8 database through `init` and `goal add`. The preview executable upgraded both that database and a restored backup. Project and goal rows and the settings file matched the original. |
+
+The updated workflow uses Node.js 24 Actions while the Chromium suite still uses Node.js 22. Verification of the runner warning on GitHub awaits the first CI run on the updated workflow. The authenticated Claude Code check remains pending for the preview decision.
+
 ## Parallel development and provenance
 
 Agent work packages MUST NOT modify `Directory.Build.props` for ordinary implementation PRs. Versioning changes require a dedicated change owner and a PR. No agent edits `master` directly. The full first-parent commit count removes the shared-file race between parallel implementation agents. CI uses `fetch-depth: 0`, checks build/test outcomes, ensures executable and manifest versions agree, and verifies source SHA and binary hash. CI is validation only; it does not approve, merge, sign or distribute anything.

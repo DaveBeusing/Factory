@@ -1,6 +1,12 @@
 using System.Diagnostics;
 using Factory;
 
+if (args is ["--verify-windows-package", var windowsPackage])
+{
+    await WindowsPackageValidation.RunAsync(windowsPackage);
+    return 0;
+}
+
 if (args is ["--browser-recovery-fixture", var browserFixtureHome])
 {
     BrowserRecoveryFixture.Seed(browserFixtureHome);

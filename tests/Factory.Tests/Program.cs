@@ -30,6 +30,99 @@ void GrantRemoteWorker(StateStore store, string workerId, params Guid[] projectI
     });
 }
 
+Test("Provider routing is project-scoped and rejects unsupported builder capabilities", () =>
+{
+    var project = new ProjectInfo { Name = "multi-provider" };
+    var state = new FactoryState();
+    state.Projects.Add(project);
+    var settings = new FactorySettings
+    {
+        Providers =
+        [
+            new ProviderProfile { Id = "codex", Kind = "codex" },
+            new ProviderProfile { Id = "local-model", Kind = "ollama",
+                Model = "review-model", Endpoint = "http://127.0.0.1:11434" }
+        ]
+    };
+    state.ProviderAssignments.Add(new ProviderAssignment
+        { ProjectId = project.Id, Role = "review", ProviderId = "local-model" });
+    Assert(ProviderRouter.Select(settings, state, project.Id, "review:security", "high").Id == "local-model");
+    Assert(ProviderRouter.Select(settings, state, project.Id, "builder", "high").Id == "codex");
+    state.ProviderAssignments.Add(new ProviderAssignment
+        { ProjectId = project.Id, Role = "builder", ProviderId = "local-model" });
+    try
+    {
+        ProviderRouter.Select(settings, state, project.Id, "builder", "high");
+        throw new Exception("Text-only provider was allowed to modify source");
+    }
+    catch (InvalidOperationException) { }
+    try
+    {
+        ProviderRouter.Validate(new ProviderProfile
+            { Id = "remote", Kind = "ollama", Model = "unsafe", Endpoint = "http://example.com:11434" },
+            "planner");
+        throw new Exception("Non-loopback Ollama endpoint was allowed");
+    }
+    catch (InvalidOperationException) { }
+});
+
+Test("Provider budget reservations guard concurrent capacity and preserve unknown usage", () =>
+{
+    var p = new ProjectInfo { Name = "budgeted" };
+    var j = new FactoryJob { ProjectId = p.Id };
+    var state = new FactoryState();
+    state.Projects.Add(p);
+    state.Jobs.Add(j);
+    var provider = new ProviderProfile { Id = "limited", Kind = "codex", TokenLimit = 1000 };
+    state.ProviderBudgetLimits.Add(new ProviderBudgetLimit
+        { ProjectId = p.Id, ProviderId = provider.Id, TokenLimit = 800 });
+    var first = ProviderBudgetLedger.Begin(state, j, provider, "builder", "", 600);
+    Assert(state.ProviderBudgetReservations.Single().Reserved == 600);
+    try
+    {
+        ProviderBudgetLedger.Begin(state, j, provider, "review:code", "", 600);
+        throw new Exception("Reserved provider capacity was oversubscribed");
+    }
+    catch (TokenBudgetExceededException) { }
+    Assert(ProviderBudgetLedger.Record(state, first.Id, new AgentTokenUsage(150, 100)) == 350);
+    ProviderBudgetLedger.Finish(state, first.Id, false);
+    Assert(state.ProviderBudgetReservations.Single().State == "held");
+    var second = ProviderBudgetLedger.Begin(state, j, provider, "review:code", "", 300);
+    Assert(state.ProviderBudgetReservations.Last().Reserved == 200 + 0 + 0 + 0 + 0 + 0 + 0 - 0 + 0 + 0 + 0 + 0 - 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 - 0 + 0 + 0 + 0 + 0 + 0 + 0 - 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0);
+    ProviderBudgetLedger.Record(state, second.Id, new AgentTokenUsage(50, 25));
+    ProviderBudgetLedger.Finish(state, second.Id, true);
+    Assert(state.ProviderBudgetReservations.Last().State == "released");
+});
+
+Test("Provider usage, assignments and local budgets persist in SQLite", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-provider-schema-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var p = new ProjectInfo { Name = "persistence" };
+        var j = new FactoryJob { ProjectId = p.Id };
+        store.Change(s =>
+        {
+            s.Projects.Add(p); s.Jobs.Add(j);
+            s.ProviderAssignments.Add(new ProviderAssignment
+                { ProjectId = p.Id, Role = "planner", ProviderId = "codex" });
+            s.ProviderBudgetLimits.Add(new ProviderBudgetLimit
+                { ProjectId = p.Id, ProviderId = "codex", TokenLimit = 20000 });
+            var usage = ProviderBudgetLedger.Begin(s, j,
+                new ProviderProfile { Id = "codex", TokenLimit = 20000 }, "builder", "", 1024);
+            ProviderBudgetLedger.Record(s, usage.Id, new AgentTokenUsage(120, 30));
+            ProviderBudgetLedger.Finish(s, usage.Id, true);
+        });
+        var state = new StateStore(home).Read();
+        Assert(state.ProviderAssignments.Single().Role == "planner");
+        Assert(state.ProviderBudgetLimits.Single().TokenLimit == 20000);
+        Assert(state.ProviderUsages.Single().InputTokens == 120);
+        Assert(state.ProviderBudgetReservations.Single().State == "released");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Job quality inspector validates commit identity and file boundary", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-quality-view-" + Guid.NewGuid().ToString("N"));
@@ -1082,7 +1175,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 6, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 7, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -1587,7 +1680,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 6);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 7);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -2087,7 +2180,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 6);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 7);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

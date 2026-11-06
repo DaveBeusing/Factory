@@ -553,6 +553,8 @@ Dedicated release branches may use `dotnet run --project tools/Factory.Versionin
 See [the complete versioning and compatibility policy](docs/versioning.md) and [ADR-0001](docs/adr/0001-versioning.md). `dist/build-manifest.json` records the effective version, full source SHA and executable checksum. Database schema and wire contracts remain separately versioned; a product bump does not automatically migrate or validate them.
 
 
+Mission Control's topbar uses an icon-only **+** shortcut to the left of Search. The sidebar **F** symbol opens connection settings and shows live heartbeat status. See the [Mission Control navigation guide](docs/mission-control.md).
+
 ## 16. Project-scoped AI providers and budgets
 
 Factory routes agent operations through provider profiles and project-scoped role assignments. Codex remains the default and the only implemented workspace-writing adapter. The optional local Ollama integration supports read-only text tasks; it cannot edit a worktree. In Mission Control, open **Projects → Inspect → Configure AI providers** to select provider profiles for planning, building and review roles, and to set optional local per-project provider token ceilings.

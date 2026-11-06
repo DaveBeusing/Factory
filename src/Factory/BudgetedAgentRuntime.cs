@@ -14,13 +14,16 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
     Func<CancellationToken, Task>? controllerExtension = null, int controllerThresholdTokens = 1024) : IAgentRuntime
 {
     public const long MinimumTurnAllowance = 256;
-    private readonly SemaphoreSlim _turnLock = new(1, 1);
+    // A single job can invoke different providers for building and independent reviews.
+    // Its goal ledger must serialize turns across all of those adapters.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<Guid, SemaphoreSlim> TurnLocks = new();
+    private SemaphoreSlim TurnLock => TurnLocks.GetOrAdd(jobId, _ => new SemaphoreSlim(1, 1));
 
     public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
         CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
         Action<AgentTokenUsage>? onUsage = null)
     {
-        await _turnLock.WaitAsync(cancellation);
+        await TurnLock.WaitAsync(cancellation);
         try
         {
             // Remote workers may synchronize a larger local mirror only after receiving
@@ -141,6 +144,6 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
                 throw new TokenBudgetExceededException("Job reservation exhausted during execution");
             }
         }
-        finally { _turnLock.Release(); }
+        finally { TurnLock.Release(); }
     }
 }

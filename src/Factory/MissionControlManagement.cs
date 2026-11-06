@@ -95,8 +95,9 @@ public static class MissionControlManager
     {
         Require(!string.IsNullOrWhiteSpace(input.Name) && input.Name.Length <= 120, "Project name is required (max 120 characters)");
         Require(input.MaxParallel is >= 1 and <= 64, "Project parallel limit must be 1-64");
+        Require(input.BaseBranch == "master", "Factory work packages must target master");
         var path = GitOperations.RepositoryRoot(input.Path);
-        GitOperations.Git(path, "rev-parse", "--verify", input.BaseBranch);
+        GitOperations.Git(path, "rev-parse", "--verify", "refs/heads/master");
         ValidateChecks(input.Checks);
         ValidateExecutionCapabilities(input.RequiredExecutionCapabilities);
         var p = new ProjectInfo { Name = input.Name.Trim(), Path = path, BaseBranch = input.BaseBranch,
@@ -114,8 +115,9 @@ public static class MissionControlManager
     {
         Require(!string.IsNullOrWhiteSpace(input.Name) && input.Name.Length <= 120, "Invalid project name");
         Require(input.MaxParallel is >= 1 and <= 64, "Project parallel limit must be 1-64");
+        Require(input.BaseBranch == "master", "Factory work packages must target master");
         var path = GitOperations.RepositoryRoot(input.Path);
-        GitOperations.Git(path, "rev-parse", "--verify", input.BaseBranch);
+        GitOperations.Git(path, "rev-parse", "--verify", "refs/heads/master");
         ValidateChecks(input.Checks);
         ValidateExecutionCapabilities(input.RequiredExecutionCapabilities);
         return store.Change(s =>
@@ -426,7 +428,8 @@ public static class MissionControlManager
         var goal = s.Goals.Single(g => g.Id == plan.GoalId);
         Require(goal.State == "draft" && goal.ProjectId == plan.ProjectId, "Only draft goal plans are editable");
         var p = s.Projects.Single(p => p.Id == goal.ProjectId);
-        plan.BaseCommit = GitOperations.Head(p.Path);
+        plan.Preflight = WorkPackagePreflight.Inspect(s, p, goal);
+        plan.BaseCommit = plan.Preflight.BaseCommit;
         var path = Planning.PathFor(store, goal.Id);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path + ".tmp", Json.Stringify(plan));

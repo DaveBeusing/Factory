@@ -15,6 +15,13 @@ if (args is ["--verify-remote-provider-leases"])
     return 0;
 }
 
+if (args is ["--verify-remote-restore"])
+{
+    await RemoteRestoreTests.RunAsync();
+    Console.WriteLine("PASS separate controller and executor restore, replay fencing and credential rotation");
+    return 0;
+}
+
 if (args is ["--browser-recovery-fixture", var browserFixtureHome])
 {
     BrowserRecoveryFixture.Seed(browserFixtureHome);
@@ -1586,6 +1593,8 @@ await TestAsync("Remote provider leases fence route, model, budget and completio
     RemoteProviderLeaseTests.RunAsync);
 await TestAsync("Remote provider verification rejects a force-push during the commit tree lookup",
     RemoteProviderLeaseTests.VerifyMovingPullHeadAsync);
+await TestAsync("Remote restore preserves holds, fences replay and accepts only the rotated executor credential",
+    RemoteRestoreTests.RunAsync);
 
 Test("Remote claims never take local jobs", () =>
 {

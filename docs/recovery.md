@@ -48,6 +48,18 @@ Restore into isolated state directories with workers stopped and claim admission
 
 For credential rotation, pause claims and drain or stop remote work. Replace `FACTORY_REMOTE_EXECUTOR_TOKEN` on both the controller and executor through their service secret stores. Restart both services, verify that the new credential can retrieve a retained receipt and that the previous credential is rejected, then resume. Rotation does not require changing grant digests, receipts or dispatch markers.
 
+#### LT-03 restore rehearsal
+
+The local rehearsal on Windows started from `master` at `a21ec18`. It ran separate controller and executor processes with distinct `FACTORY_HOME` directories and a loopback provider fixture. The executor saved a real receipt while the controller retained the interrupted turn without recording the response. Both processes were stopped before copying their state to separate backups and restarting from fresh restore directories.
+
+| Check | Observed result |
+| --- | --- |
+| Credential rotation | The old token returned HTTP 401 on both executor routes. The rotated credential retrieved the retained receipt, and the restored controller used it for reconciliation. |
+| Replay fencing | Reposting the original grant after restart was rejected. Removing the receipt from the restored copy still left the dispatch fenced. The fixture counted one provider invocation. |
+| Hold and recovery | The expired lease was quarantined with both budget holds intact. A missing receipt left both holds and their balances unchanged. After restoring the receipt, two recovery requests recorded a single debit of 30 input and 10 output tokens. The provider reservation was released. The goal reservation stayed held and the job stayed blocked for separate review. |
+
+The rehearsal is part of the .NET suite. To run it alone after building the solution in Release mode, use `dotnet tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll --verify-remote-restore`. It exercises real Factory processes over loopback with a simulated provider. Package 05 remains skipped and the authenticated Claude Code test remains open in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+
 ### Downgrade an executor with held turns
 
 The previous executor reads receipt files only from `executor-dispatches`. A controller database rollback does not make files in `executor-receipts` visible to that executor.

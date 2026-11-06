@@ -362,6 +362,13 @@ internal static class RemoteProviderLeaseTests
         Check(await RemoteProviderExecutor.ReadReceiptAsync(restarted,
             new(builderGrant.TurnId, RemoteProviderExecutor.Digest(builderGrant with { Budget = builderGrant.Budget + 1 })), ct) is null,
             "A conflicting grant retrieved another turn's receipt");
+        var receiptDirectory = Path.Combine(store.Home, "executor-receipts");
+        var dispatchDirectory = Path.Combine(store.Home, "executor-dispatches");
+        var builderReceiptName = builderGrant.TurnId.ToString("N") + ".receipt.json";
+        File.Move(Path.Combine(receiptDirectory, builderReceiptName), Path.Combine(dispatchDirectory, builderReceiptName));
+        Check(await RemoteProviderExecutor.ReadReceiptAsync(restarted,
+            new(builderGrant.TurnId, RemoteProviderExecutor.Digest(builderGrant)), ct) is { FinalUsage: true },
+            "Upgraded executor could not read a legacy receipt");
         var patch = Path.Combine(scratch, "executor.patch");
         await File.WriteAllBytesAsync(patch, built.Patch, ct);
         await Git("apply", "--index", "--binary", patch);
@@ -402,6 +409,32 @@ internal static class RemoteProviderLeaseTests
         }
         catch (IOException) { }
 
+        var interrupted = reviewGrant with { TurnId = Guid.NewGuid() };
+        var interruptedName = interrupted.TurnId.ToString("N");
+        var occupiedReceipt = Path.Combine(receiptDirectory, interruptedName + ".receipt.json");
+        await File.WriteAllTextAsync(occupiedReceipt, "Simulated receipt publication failure", ct);
+        var interruptedAgent = new FixtureAgent(reviewer.Route.Model, expectReadOnly: true);
+        try
+        {
+            await RemoteProviderExecutor.RunAsync(store, settings, interrupted, ct, interruptedAgent);
+            throw new Exception("Executor unexpectedly replaced an existing receipt");
+        }
+        catch (IOException) { }
+        Check(interruptedAgent.Calls == 1 && File.Exists(Path.Combine(dispatchDirectory, interruptedName)) &&
+            !File.Exists(occupiedReceipt + ".tmp"), "Receipt publication failure lost the dispatch marker or left a partial receipt");
+        File.Delete(occupiedReceipt);
+        var afterFailure = new StateStore(store.Home);
+        Check(await RemoteProviderExecutor.ReadReceiptAsync(afterFailure,
+            new(interrupted.TurnId, RemoteProviderExecutor.Digest(interrupted)), ct) is null,
+            "Failed publication produced a retrievable receipt");
+        try
+        {
+            await RemoteProviderExecutor.RunAsync(afterFailure, settings, interrupted, ct, interruptedAgent);
+            throw new Exception("Executor retried a spent grant after a receipt storage failure");
+        }
+        catch (IOException) { }
+        Check(interruptedAgent.Calls == 1, "Retry invoked the provider after a receipt storage failure");
+
         await File.WriteAllBytesAsync(Path.Combine(repository, "compressible.bin"), new byte[65536], ct);
         await Git("add", "compressible.bin");
         await Commit("Highly compressible object");
@@ -417,10 +450,13 @@ internal static class RemoteProviderLeaseTests
 
     private sealed class FixtureAgent(string model, bool expectReadOnly) : IAgentRuntime
     {
+        public int Calls { get; private set; }
+
         public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
             CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
             Action<AgentTokenUsage>? onUsage = null)
         {
+            Calls++;
             Check(readOnly == expectReadOnly, "Executor did not enforce the role");
             if (readOnly) Check(prompt.Contains("+changed by executor"), "Review prompt omitted the independently read diff");
             else await File.WriteAllTextAsync(Path.Combine(directory, "fixture.txt"), "changed by executor\n", cancellation);

@@ -13,18 +13,30 @@ public static class RemoteProviderExecutor
     internal static string Digest(RemoteExecutorGrant grant) =>
         Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(grant, Json.Options)));
 
-    private static string ReceiptPath(StateStore store, Guid turnId) =>
-        Path.Combine(store.Home, "executor-dispatches", turnId.ToString("N") + ".receipt.json");
+    private static string DispatchDirectory(StateStore store) => Path.Combine(store.Home, "executor-dispatches");
+
+    private static string ReceiptDirectory(StateStore store) => Path.Combine(store.Home, "executor-receipts");
+
+    private static string ReceiptName(Guid turnId) => turnId.ToString("N") + ".receipt.json";
 
     internal static async Task<RemoteExecutorReceipt?> ReadReceiptAsync(StateStore store, ReceiptQuery query, CancellationToken ct)
     {
         if (query.TurnId == Guid.Empty || query.GrantDigest is not { Length: 64 })
             throw new ArgumentException("Invalid executor receipt lookup");
-        var path = ReceiptPath(store, query.TurnId);
-        if (!File.Exists(path)) return null;
-        using var stream = File.OpenRead(path);
+        var name = ReceiptName(query.TurnId);
+        // Older executors wrote receipts beside the markers. Preserve recovery after an upgrade.
+        using var stream = OpenReceipt(Path.Combine(ReceiptDirectory(store), name))
+            ?? OpenReceipt(Path.Combine(DispatchDirectory(store), name));
+        if (stream is null) return null;
         var saved = await JsonSerializer.DeserializeAsync<SavedReceipt>(stream, Json.Options, ct);
         return saved?.GrantDigest == query.GrantDigest ? saved.Receipt : null;
+    }
+
+    private static FileStream? OpenReceipt(string path)
+    {
+        try { return File.OpenRead(path); }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
     }
 
     internal static async Task<RemoteExecutorReceipt?> FetchReceiptAsync(string url, string token, ReceiptQuery query, CancellationToken ct)
@@ -78,8 +90,14 @@ public static class RemoteProviderExecutor
             throw new InvalidOperationException("Executor provider configuration does not match the grant");
 
         // A disconnected or restarted caller cannot start a spent grant again.
-        var dispatches = Directory.CreateDirectory(Path.Combine(store.Home, "executor-dispatches")).FullName;
-        using (File.Open(Path.Combine(dispatches, grant.TurnId.ToString("N")), FileMode.CreateNew)) { }
+        var dispatches = Directory.CreateDirectory(DispatchDirectory(store)).FullName;
+        var receipts = Directory.CreateDirectory(ReceiptDirectory(store)).FullName;
+        using (var marker = new FileStream(Path.Combine(dispatches, grant.TurnId.ToString("N")),
+            FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            marker.WriteByte(1);
+            marker.Flush(flushToDisk: true);
+        }
 
         var scratch = Directory.CreateTempSubdirectory("factory-executor-");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -167,7 +185,7 @@ public static class RemoteProviderExecutor
                 success ? result.FinalText : "", result.FinalTextIsFallback, tree, patch,
                 result.ProviderReportedCostMicros);
             // Write before replying so a lost HTTP response never loses a completed receipt.
-            var path = ReceiptPath(store, grant.TurnId);
+            var path = Path.Combine(receipts, ReceiptName(grant.TurnId));
             var temporary = path + ".tmp";
             try
             {

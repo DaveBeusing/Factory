@@ -38,6 +38,16 @@ For automation, send `POST /api/jobs/{id}/provider-turns/{turnId}/recover` with 
 
 If the executor has no matching receipt, keep the reservation held until you can verify final usage independently. Use the settlement workflow below for that evidence or for turns recorded before schema 11.
 
+### Back up and restore remote execution state
+
+Pause new claims and stop worker, controller and executor processes before taking a coordinated backup. Record the package versions, host roles and backup time. Preserve the controller's SQLite state and settings and the executor's state directory, including `executor-dispatches` and `executor-receipts`. Keep backups access-controlled because settings and receipts can contain credentials or private work output. Keep the executor credential separately in the service secret store.
+
+Dispatch markers in `executor-dispatches` are the executor's protection against repeating a turn. Preserve them even when a receipt is no longer needed. Receipts written by older executors may also be in that directory. Preserve all receipts associated with unresolved holds. A missing or inaccessible receipt after a provider call leaves usage uncertain, and the original dispatch must remain fenced.
+
+Restore into isolated state directories with workers stopped and claim admission paused. Use coordinated copies so the restored executor does not forget a dispatch recorded by the controller. If the backup may predate a provider call, keep the affected executor endpoint isolated and reconcile the uncertain turn before resuming claims. Quarantine expired leases and inspect Git side effects. Verify a retained receipt lookup and settle a held turn before resuming normal operation.
+
+For credential rotation, pause claims and drain or stop remote work. Replace `FACTORY_REMOTE_EXECUTOR_TOKEN` on both the controller and executor through their service secret stores. Restart both services, verify that the new credential can retrieve a retained receipt and that the previous credential is rejected, then resume. Rotation does not require changing grant digests, receipts or dispatch markers.
+
 ## Settle held usage
 
 1. In **Capacity → Held provider reservations**, select **Reconcile**. Enter verified final input and output totals for that **provider turn**, acknowledge the independent verification and record the evidence. Totals must be at least as high as the amounts already reported. A linked job must be inactive and have no lease owner.

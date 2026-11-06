@@ -130,6 +130,32 @@ Test("Provider usage, assignments and local budgets persist in SQLite", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Provider-scoped planning is charged to the goal and attributed model", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-provider-planning-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "planning" };
+        var goal = new FactoryGoal { ProjectId = project.Id, TokenBudget = 5000 };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
+        var profile = new ProviderProfile { Id = "planner-model", Kind = "codex", TokenLimit = 1000 };
+        var tracked = new ProjectScopedAgentRuntime(new FakeAgent(), store,
+            project.Id, goal.Id, profile, "planner", "planning-v1", 512);
+        var result = tracked.RunAsync(home, "Review this bounded context", "", CancellationToken.None,
+            readOnly: true).GetAwaiter().GetResult();
+        Assert(result.Success && result.UsageReported);
+        var state = store.Read();
+        var entry = state.ProviderUsages.Single();
+        Assert(entry.JobId is null && entry.Role == "planner" && entry.Model == "planning-v1");
+        Assert(entry.InputTokens == 8 && entry.OutputTokens == 4 && entry.FinalUsageReported);
+        Assert(state.ProviderBudgetReservations.Single().State == "released");
+        Assert(GoalBudgetLedger.Available(state, goal.Id) == 4988,
+            "Provider planning consumption was omitted from goal liability");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Project review yields commit-bound findings and draft goals", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-project-review-" + Guid.NewGuid().ToString("N"));

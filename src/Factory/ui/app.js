@@ -161,6 +161,14 @@ function renderUsage(){
  body+=`<div style="margin-top:17px">`+card('Project allocations','Local Factory ceilings are not provider-account entitlements.',
    projects?table(['Project','Provider','Consumed','Reserved','Configured limit','Local remaining'],projects):
    '<p class="subtext">No project allocation records.</p>')+`</div>`;
+ const holds=(providerData?.heldReservations||[]).map(h=>
+   `<tr><td>${esc(h.providerId)}</td><td>${esc(h.usage?.jobId||'Unknown')}</td>
+    <td>${Number(h.usage?.inputTokens||0).toLocaleString()} / ${Number(h.usage?.outputTokens||0).toLocaleString()}</td>
+    <td>${Number(h.reserved-h.consumed).toLocaleString()}</td>
+    <td><button class="tiny-button" data-act="provider-reconcile" data-id="${esc(h.id)}">Reconcile</button></td></tr>`).join('');
+ if(holds)body+=`<div style="margin-top:17px">`+
+  card('Held provider reservations','Unknown final usage must be independently verified before releasing unused capacity.',
+   table(['Provider','Job','Reported input / output','Held tokens',''],holds))+`</div>`;
  if(usage)body+=`<div style="margin-top:17px">${usageCards()}</div>`;
  body+='<p class="subtext">Unknown provider account allowances are never estimated from local token use. Provider budgets are total local token ceilings, not rolling provider quotas.</p>';
  return body;
@@ -236,6 +244,25 @@ const checksJson=x=>JSON.stringify(x||[],null,2);
 function formProject(id){const p=state.projects.find(p=>p.id===id),v=p||{name:'',path:'',baseBranch:'master',maxParallel:2,checks:[],protectedPaths:['.github/workflows/','.factory/','.agents/','factory/']};
  const html=field('name','Project name',v.name)+field('path','Git repository root',v.path)+field('baseBranch','Base branch',v.baseBranch)+field('maxParallel','Maximum parallel jobs',v.maxParallel,'number')+field('checks','Quality checks (JSON array)',checksJson(v.checks),'code',[],'Each check needs name, executable, arguments and timeoutSeconds.')+field('protectedPaths','Protected paths, one per line',v.protectedPaths.join('\n'),'textarea');
  openForm(p?'Configure project':'Register project','Quality gates are required before jobs can execute.',html,async f=>{const x=values(f);let checks;try{checks=JSON.parse(x.checks)}catch{throw Error('Invalid checks JSON')};if(!Array.isArray(checks))throw Error('Checks must be a JSON array');await mutate(p?`projects/${p.id}`:'projects',p?'PUT':'POST',{name:x.name,path:x.path,baseBranch:x.baseBranch,maxParallel:Number(x.maxParallel),checks,protectedPaths:lines(x.protectedPaths)})},p?'Update project':'Register project')}
+function formProviderReconciliation(id){
+ const reservation=(providerData?.heldReservations||[]).find(x=>x.id===id);
+ if(!reservation)return;
+ const html=field('input','Verified input tokens',reservation.usage?.inputTokens||0,'number')+
+  field('output','Verified output tokens',reservation.usage?.outputTokens||0,'number')+
+  field('reason','Independent evidence and justification','','textarea')+
+  field('reviewed','I verified the final usage outside this dashboard',false,'checkbox');
+ openForm('Reconcile provider usage','Only reconcile after confirming the provider reported final token totals.',
+  html,async f=>{
+    const x=values(f),input=Number(x.input),output=Number(x.output);
+    if(!f.elements.reviewed.checked||x.reason.trim().length<10||
+      !Number.isSafeInteger(input)||!Number.isSafeInteger(output)||input<0||output<0)
+      throw Error('Verified token totals and an evidence reason are required');
+    if(!confirm('Release the provider budget reservation after verified usage reconciliation?'))return;
+    await mutate('providers/budget-reservations/'+id+'/reconcile','POST',
+      {finalInputTokens:input,finalOutputTokens:output,reviewed:true,reason:x.reason.trim()});
+    await fetchProviders();
+  },'Reconcile usage');
+}
 function formProjectProviders(id){
  const profiles=(providerData?.profiles||[]).filter(p=>p.enabled);
  if(!profiles.length){notify('No provider profiles available; configure ~/.factory/settings.json',true);return}
@@ -493,7 +520,7 @@ function inspect(type,id){const entity=(type==='project'?state.projects:type==='
   if(type==='job')renderJobQuality(id);
 }
 async function act(action,id,index){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'project-providers':formProjectProviders(id);break;
- case'analysis-run':await startProjectReview();break;case'analysis-goal':createReviewGoal(id);break;
+ case'analysis-run':await startProjectReview();break;case'analysis-goal':createReviewGoal(id);break;case'provider-reconcile':formProviderReconciliation(id);break;
  case'open-project-analysis':analysisProject=id;nav('analysis');await loadProjectReview(id);break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
  case'queue-run':case'queue-pause':case'queue-resume':case'queue-stop':await runQueue(action.slice(6));break;
  case'verify':await verify(id);break;

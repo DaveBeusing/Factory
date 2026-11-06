@@ -183,9 +183,11 @@ public static class DashboardHost
                 store.Event(null, "plan_generating", goalId.ToString());
                 try
                 {
-                    await Planning.ProposeAsync(store, project, goal,
-                        ProviderRouter.Select(settings, store.Read(), project.Id, "planner", "medium").Runtime,
-                        CancellationToken.None);
+                    var provider = ProviderRouter.Select(settings, store.Read(), project.Id, "planner", "medium");
+                    var profile = ProviderRouter.Resolve(settings, store.Read(), project.Id, "planner");
+                    var tracked = new ProjectScopedAgentRuntime(provider.Runtime, store, project.Id, goal.Id,
+                        profile, "planner", provider.Model, settings.GoalReservationTokens);
+                    await Planning.ProposeAsync(store, project, goal, tracked, CancellationToken.None);
                     store.Event(null, "plan_generated", goalId.ToString());
                 }
                 catch (Exception ex) { store.Event(null, "plan_error", goalId + ": " + ex.Message); }

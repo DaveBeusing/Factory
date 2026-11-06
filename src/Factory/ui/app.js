@@ -217,15 +217,18 @@ function renderWorkers(){const w=state.workers;return header('Workers','Monitor 
 function renderQueue(){const queued=state.jobs.filter(j=>j.state==='queued');const active=state.jobs.filter(j=>['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state));const waiting=queued.filter(j=>j.dependsOn.some(dep=>!state.jobs.some(o=>o.id===dep&&o.integrated)));return header('Queue & scheduling','Control admission, prioritize work and inspect dependency blockers.')+`<div class="overview-hero"><div class="overview-hero-left"><div class="hero-orb">${ico('queue')}</div><div><h2>${state.paused?'Queue paused':'Scheduler ready'}</h2><p>${queued.length} queued · ${active.length} active · ${waiting.length} waiting for dependencies</p></div></div><div class="queue-controls"><button class="button button-primary" data-act="queue-run">${ico('play')} Run</button><button class="button button-muted" data-act="queue-pause">${ico('pause')} Pause</button><button class="button button-muted" data-act="queue-resume">${ico('refresh')} Resume</button><button class="button button-danger" data-act="queue-stop">${ico('stop')} Stop</button></div></div><div class="grid metrics-grid">${metric('Ready or queued',queued.length,'Eligible after constraints','layers')}${metric('Active',active.length,'Working or validating','activity')}${metric('Waiting dependencies',waiting.length,'Must integrate predecessors','route')}${metric('Global concurrency',settings.maxParallel??'—','Configured worker slots','cpu')}</div>${card('Work schedule','Prioritized by eligibility and conflict',queued.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(queued.slice().sort((a,b)=>b.priority-a.priority))):empty('check','Queue is empty','No pending jobs. Add a job or adopt a plan.','create-job','Add job'))}<div style="margin-top:17px">${card('In flight','Active jobs continue during queue pause',active.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(active)):empty('activity','Nothing running','Start the queue when jobs are ready.'))}</div>`}
 function renderEvents(){return header('Activity & audit trail','Recent persisted lifecycle events, decisions and operational changes.')+card('Event stream','Most recent events appear first',eventItems(state.events,250))}
 function renderUsage(){
+ const usd=new Intl.NumberFormat(undefined,{style:'currency',currency:'USD',maximumFractionDigits:6});
+ const reportedCost=value=>Number.isFinite(value)?usd.format(value):'Unavailable';
  let body=header('Provider capacity','Per-provider and per-project Factory token usage and allocations. Account quotas are separate.');
  const rows=(providerData?.usage||[]).map(p=>
    `<tr><td><strong>${esc(p.id)}</strong><small>${esc(p.kind)} · ${esc(p.model||'Default model')}</small></td>
    <td>${Number(p.inputTokens||0).toLocaleString()}</td><td>${Number(p.outputTokens||0).toLocaleString()}</td>
    <td>${Number(p.reservedTokens||0).toLocaleString()}</td>
    <td>${p.localRemainingTokens===null?'Not configured':Number(p.localRemainingTokens).toLocaleString()}</td>
+   <td>${reportedCost(p.reportedCostUsd)}</td>
    <td>${p.kind==='codex'&&usage?'See Codex account below':'Unavailable'}</td></tr>`).join('');
  body+=card('Provider and model consumption','Observed usage after provider attribution; unreported prior history cannot be reconstructed.',
-   rows?table(['Provider','Input tokens','Output tokens','Held / active','Local remaining','Account allowance'],rows):
+   rows?table(['Provider','Input tokens','Output tokens','Held / active','Local remaining','Reported USD','Account allowance'],rows):
    empty('gauge','Provider data unavailable','Connect to the controller to load provider utilization.'));
  const modelRows=(providerData?.usage||[]).flatMap(p=>(p.models||[]).flatMap(m=>
   (m.roles||[]).map(role=>`<tr><td>${esc(p.id)}</td><td>${esc(m.model)}</td><td>${esc(role.role)}</td>
@@ -238,9 +241,10 @@ function renderUsage(){
    `<tr><td>${esc(row.name)}</td><td>${esc(p.id)}</td><td>${Number(row.observedTokens||0).toLocaleString()}</td>
     <td>${Number(row.reservedTokens||0).toLocaleString()}</td>
     <td>${row.configuredLimit>0?Number(row.configuredLimit).toLocaleString():'Not configured'}</td>
-    <td>${row.remainingTokens===null?'Unknown':Number(row.remainingTokens).toLocaleString()}</td></tr>`)).join('');
+    <td>${row.remainingTokens===null?'Unknown':Number(row.remainingTokens).toLocaleString()}</td>
+    <td>${reportedCost(row.reportedCostUsd)}</td></tr>`)).join('');
  body+=`<div style="margin-top:17px">`+card('Project allocations','Local Factory ceilings are not provider-account entitlements.',
-   projects?table(['Project','Provider','Consumed','Reserved','Configured limit','Local remaining'],projects):
+   projects?table(['Project','Provider','Consumed','Reserved','Configured limit','Local remaining','Reported USD'],projects):
    '<p class="subtext">No project allocation records.</p>')+`</div>`;
  const holds=(providerData?.heldReservations||[]).map(h=>
    `<tr><td>${esc(h.providerId)}</td><td>${esc(h.usage?.jobId||'Unknown')}</td>
@@ -251,7 +255,7 @@ function renderUsage(){
   card('Held provider reservations','Unknown final usage must be independently verified before releasing unused capacity.',
    table(['Provider','Job','Reported input / output','Held tokens',''],holds))+`</div>`;
  if(usage)body+=`<div style="margin-top:17px">${usageCards()}</div>`;
- body+='<p class="subtext">Unknown provider account allowances are never estimated from local token use. Provider budgets are total local token ceilings, not rolling provider quotas.</p>';
+ body+='<p class="subtext">Reported USD sums available provider estimates and may omit turns. Unknown provider account allowances are never estimated from local token use. Provider budgets are total local token ceilings, not rolling provider quotas.</p>';
  return body;
 }
 function renderSettings(){return header('Settings & policies','Review and configure execution limits and publication guardrails.')+`<div class="content-grid">${card('Runtime policy','Changes are stored in ~/.factory/settings.json',`<div class="job-info-grid">${[['Global concurrency',settings.maxParallel],['Agent sessions',settings.maxAgentSessions],['Review rounds',settings.maxReviewRounds],['Lease seconds',settings.leaseSeconds],['Push enabled',settings.allowPush?'Yes':'No'],['Auto-merge',settings.autoMerge?'Yes':'No']].map(([a,b])=>`<div class="kv"><small>${esc(a)}</small><strong>${esc(b)}</strong></div>`).join('')}</div><button class="button button-muted" style="margin-top:18px" data-act="edit-settings">${ico('edit')} Edit configuration</button>`)}${card('Operational safety','Safeguards for reliable execution',`<div class="list-stack">${[['shield','Human-controlled integration','Merging and publishing remain permission-gated'],['route','Dependency-aware execution','Jobs do not start before integrated dependencies'],['activity','Event history','Actions are recorded in persistent state'],['cpu','Worker isolation','Separate Git worktrees; not OS sandboxes']].map(([i,t,d])=>`<div class="list-item"><span class="list-icon">${ico(i)}</span><div class="list-text"><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div>`)}</div>`}

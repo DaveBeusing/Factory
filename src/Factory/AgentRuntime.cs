@@ -12,6 +12,7 @@ public sealed class AgentRunResult
     public long InputTokens { get; set; }
     public long OutputTokens { get; set; }
     public bool UsageReported { get; set; }
+    public long? ProviderReportedCostMicros { get; set; }
 }
 
 public readonly record struct AgentTokenUsage(long InputTokens, long OutputTokens)

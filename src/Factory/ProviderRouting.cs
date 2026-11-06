@@ -46,6 +46,7 @@ public sealed class ProviderUsageEntry
     public long InputTokens { get; set; }
     public long OutputTokens { get; set; }
     public bool FinalUsageReported { get; set; }
+    public long? ReportedCostMicros { get; set; }
     public DateTimeOffset At { get; set; } = DateTimeOffset.UtcNow;
 }
 
@@ -103,6 +104,13 @@ public static class ProviderRouter
                     profile.Runtime is not ("exec" or "app-server"))
                     throw new ArgumentException("Unsupported Codex runtime");
                 break;
+            case "claude":
+                if (role == "builder")
+                    throw new InvalidOperationException("Claude Code supports only read-only planning, analysis and reviews");
+                if (profile.Model is null || !System.Text.RegularExpressions.Regex.IsMatch(
+                    profile.Model, @"\A[a-zA-Z0-9._:/-]{0,128}\z") || profile.Model.StartsWith('-'))
+                    throw new ArgumentException("Invalid Claude Code model identifier");
+                break;
             case "ollama":
                 if (role == "builder")
                     throw new InvalidOperationException("Ollama text-only adapter cannot modify files for builder jobs");
@@ -130,6 +138,7 @@ public static class ProviderRouter
             "codex" => (string.IsNullOrWhiteSpace(profile.Runtime) ? settings.Runtime : profile.Runtime)
                 == "app-server" ? new AppServerAgentRuntime(model) : new ExecAgentRuntime(model),
             "ollama" => new OllamaAgentRuntime(profile.Endpoint, model),
+            "claude" => new ClaudeReadOnlyAgentRuntime(model),
             _ => throw new InvalidOperationException("Unknown provider adapter")
         };
         return new(profile.Id, model, role,
@@ -263,12 +272,21 @@ public static class ProviderBudgetLedger
         return reservation.Reserved - reservation.Consumed;
     }
 
-    public static void Finish(FactoryState state, Guid usageId, bool finalReported)
+    public static void Finish(FactoryState state, Guid usageId, bool finalReported, long? reportedCostMicros = null)
     {
         var entry = state.ProviderUsages.Single(x => x.Id == usageId);
         entry.FinalUsageReported = finalReported;
+        if (reportedCostMicros is >= 0) entry.ReportedCostMicros = reportedCostMicros;
         var reservation = state.ProviderBudgetReservations.FirstOrDefault(x => x.UsageId == usageId);
         if (reservation != null) reservation.State = finalReported ? "released" : "held";
+    }
+
+    private static decimal? ReportedCostUsd(IEnumerable<ProviderUsageEntry> usage)
+    {
+        decimal? total = null;
+        foreach (var entry in usage)
+            if (entry.ReportedCostMicros is { } micros) total = (total ?? 0) + micros / 1_000_000m;
+        return total;
     }
 
     public static object Summary(FactoryState state, FactorySettings settings) =>
@@ -280,7 +298,7 @@ public static class ProviderBudgetLedger
             var spent = records.Sum(x => checked(x.InputTokens + x.OutputTokens));
             return new { profile.Id, profile.Kind, profile.Model, profile.Enabled,
                 inputTokens = records.Sum(x => x.InputTokens), outputTokens = records.Sum(x => x.OutputTokens),
-                observedTokens = spent, reservedTokens = pending,
+                observedTokens = spent, reservedTokens = pending, reportedCostUsd = ReportedCostUsd(records),
                 models = records.GroupBy(x => x.Model).Select(modelGroup => new
                 {
                     model = string.IsNullOrWhiteSpace(modelGroup.Key) ? "Provider default" : modelGroup.Key,
@@ -307,6 +325,7 @@ public static class ProviderBudgetLedger
                     return new { projectId = p.Id, p.Name, configuredLimit = limit,
                         inputTokens = projectRecords.Sum(x => x.InputTokens), outputTokens = projectRecords.Sum(x => x.OutputTokens),
                         observedTokens = projectSpent, reservedTokens = projectPending,
+                        reportedCostUsd = ReportedCostUsd(projectRecords),
                         remainingTokens = limit > 0 ? (long?)Math.Max(0, limit - projectSpent - projectPending) : null };
                 }).ToArray()
             };
@@ -432,7 +451,8 @@ public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore st
                 profile, role, model, reservationTokens).Id;
         });
         using var scope = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        bool completed = false;
+        bool finalUsage = false;
+        long? reportedCostMicros = null;
         bool limitReached = false;
         long lastIn = 0, lastOut = 0;
         void Observe(AgentTokenUsage usage)
@@ -447,13 +467,15 @@ public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore st
         {
             var result = await inner.RunAsync(directory, prompt, previousSession, scope.Token,
                 onSession, readOnly: true, onUsage: Observe);
+            reportedCostMicros = result.ProviderReportedCostMicros;
             if (result.UsageReported)
+            {
                 Observe(new AgentTokenUsage(result.InputTokens, result.OutputTokens));
+                finalUsage = result.InputTokens == lastIn && result.OutputTokens == lastOut;
+            }
             if (limitReached) throw new TokenBudgetExceededException("Project provider reservation exhausted");
-            if (!result.UsageReported)
+            if (!finalUsage)
                 throw new TokenBudgetExceededException("Planning provider did not report final token usage");
-            store.Change(state => ProviderBudgetLedger.Finish(state, usageId, true));
-            completed = true;
             return result;
         }
         catch (OperationCanceledException) when (limitReached && !cancellation.IsCancellationRequested)
@@ -462,8 +484,7 @@ public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore st
         }
         finally
         {
-            if (!completed)
-                store.Change(state => ProviderBudgetLedger.Finish(state, usageId, false));
+            store.Change(state => ProviderBudgetLedger.Finish(state, usageId, finalUsage, reportedCostMicros));
         }
     }
 }

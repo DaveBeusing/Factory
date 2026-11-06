@@ -19,8 +19,6 @@ public static class Commands
         using var proc = new Process();
         proc.StartInfo = StartInfo(executable, arguments, workingDirectory);
         proc.Start();
-        if (stdin != null) await proc.StandardInput.WriteAsync(stdin.AsMemory(), timeout.Token);
-        proc.StandardInput.Close();
         var output = new StringBuilder();
         var error = new StringBuilder();
         async Task DrainAsync(StreamReader reader, StringBuilder into, bool notify)
@@ -36,7 +34,20 @@ public static class Commands
         var stderr = DrainAsync(proc.StandardError, error, false);
         try
         {
+            IOException? inputError = null;
+            try
+            {
+                if (stdin != null)
+                {
+                    await proc.StandardInput.WriteAsync(stdin.AsMemory(), timeout.Token);
+                    await proc.StandardInput.FlushAsync(timeout.Token);
+                }
+                proc.StandardInput.Close();
+            }
+            catch (IOException ex) { inputError = ex; }
             await Task.WhenAll(proc.WaitForExitAsync(timeout.Token), stdout, stderr);
+            if (inputError is not null && proc.ExitCode == 0)
+                throw new IOException("The child process closed its input before receiving the full request", inputError);
         }
         catch (OperationCanceledException)
         {
@@ -94,6 +105,28 @@ public static class Commands
             "Native CLI (codex.exe) not found. Install it using the official Windows standalone installer, " +
             "restart Factory after installation, or set FACTORY_AGENT_EXECUTABLE to the full path of codex.exe. " +
             "PowerShell aliases are not executable paths.");
+    }
+
+    internal static string ResolveClaudeExecutable()
+    {
+        var configured = Environment.GetEnvironmentVariable("FACTORY_CLAUDE_EXECUTABLE");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            var path = Environment.ExpandEnvironmentVariables(configured.Trim().Trim('"'));
+            if (!Path.IsPathFullyQualified(path) || !File.Exists(path) ||
+                OperatingSystem.IsWindows() && !path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                throw new FileNotFoundException("FACTORY_CLAUDE_EXECUTABLE must name an existing absolute path to the native CLI");
+            return path;
+        }
+
+        var name = OperatingSystem.IsWindows() ? "claude.exe" : "claude";
+        var home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var candidates = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
+            .Select(entry => entry.Trim().Trim('"'))
+            .Where(Path.IsPathFullyQualified)
+            .Select(entry => Path.Combine(entry, name));
+        return FirstExistingExecutable(candidates.Prepend(Path.Combine(home, ".local", "bin", name)))
+            ?? throw new FileNotFoundException("Claude Code CLI not found. Install the native CLI or set FACTORY_CLAUDE_EXECUTABLE.");
     }
 
     // Pure helper for unit testing lookup precedence without installing software.

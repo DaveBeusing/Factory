@@ -52,7 +52,7 @@ Factory | C# / .NET 10
   enqueue --project NAME --title TITLE --description TEXT [--mode local|remote] [--paths file1,file2]
   run | recover | reconcile <job-guid> --reviewed --reason TEXT | status | pause | resume | verify <job-guid>
   goal add --project NAME --objective TEXT [--criteria TEXT] [--budget TOKENS]
-  plan --goal GUID | adopt --goal GUID [--mode local|remote]
+  plan --goal GUID | adopt --goal GUID [--mode local|remote] [--reviewed-existing-work]
   graph --project NAME | impact --project NAME --file RELATIVE_PATH
   knowledge --project NAME [--topic TOPIC --content TEXT]
   analytics | eval --suite FILE | test-audit --project NAME [--enqueue]
@@ -174,7 +174,8 @@ Environment: FACTORY_HOME overrides the local state directory.
                 Print(await Planning.ProposeAsync(store, project, goal, AgentRuntimeFactory.Create(settings), CancellationToken.None));
                 return 0;
             }
-            case "adopt": Print(Planning.Adopt(store, GuidArg(Required(args, "goal")), Option(args, "mode", "local"))); return 0;
+            case "adopt": Print(Planning.Adopt(store, GuidArg(Required(args, "goal")),
+                Option(args, "mode", "local"), Flag(args, "reviewed-existing-work"))); return 0;
             case "graph":
             {
                 var p = store.Project(Required(args, "project"));

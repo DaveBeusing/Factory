@@ -59,12 +59,12 @@ async function startStream(){if(streamController)streamController.abort();stream
  }catch(e){if(controller.signal.aborted)break;connected=false;statusFromHealth()}await new Promise(r=>setTimeout(r,2800))}
 }
 async function refreshState(){if(!token||loading)return;loading=true;try{state=await api('state');lastStateUpdate=Date.now();connected=true;render();statusFromHealth()}catch(e){connected=false;statusFromHealth();if(!lastStateUpdate)render();}finally{loading=false}}
-async function refreshUsage(){if(!token)return;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render()}
+async function refreshUsage(){if(!token)return;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render();refreshInspectorProviderCapacity()}
 async function connect(nextToken){if(nextToken!==undefined){if(nextToken!==token){lastHeartbeat=0;connected=false;health=null;if(streamController)streamController.abort()}token=nextToken;try{token?sessionStorage.setItem('factory-token',token):sessionStorage.removeItem('factory-token')}catch{}}
  if(!token){connected=false;if(streamController)streamController.abort();state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};usage=null;render();statusFromHealth();return}
  try{await refreshState();if(!connected)throw Error('Invalid token or server unreachable');$('connection-modal').close();startStream();refreshUsage();fetchSettings();fetchManagedWorkers();fetchProviders()}catch(e){notify(e.message,true);$('connection-modal').showModal()}}
 async function fetchSettings(){try{settings=await api('settings')}catch{}}
-async function fetchProviders(){try{providerData=await api('providers')}catch{providerData=null}condition('#usage-nav',!!usage||!!providerData);render()}
+async function fetchProviders(){try{providerData=await api('providers')}catch{providerData=null}condition('#usage-nav',!!usage||!!providerData);render();refreshInspectorProviderCapacity()}
 async function fetchManagedWorkers(){try{managedWorkers=await api('workers/managed')}catch{managedWorkers=[]}}
 async function mutate(path, method='POST',data){try{const result=await api(path,method,data);notify('Changes applied');await refreshState();if(path.includes('/plans/'))render();return result}catch(e){notify(e.message,true);throw e}}
 function header(title,desc,action,actionLabel){return `<div class="page-head"><div><div class="eyebrow">MISSION CONTROL / ${esc(view.toUpperCase())}</div><h1>${esc(title)}</h1><p>${esc(desc)}</p></div><div class="head-actions">${action?`<button class="button button-primary" data-act="${esc(action)}">${ico('plus')}${esc(actionLabel||'Create new')}</button>`:''}</div></div>`}
@@ -172,6 +172,14 @@ function createReviewGoal(findingId){
   },'Create draft goal');
 }
 function renderGoals(){const items=filtered(state.goals,['objective']);const map=Object.fromEntries(state.projects.map(p=>[p.id,p.name]));return header('Goals','Define outcomes, acceptance criteria and token budgets.','create-goal','Create goal')+`<section class="card">${toolbar('goals',['draft','active','paused','stopped','completed','archived'])}<div class="cards-list" style="padding:18px">${items.length?items.map(g=>{const jobs=state.jobs.filter(j=>j.goalId===g.id);const done=jobs.filter(j=>j.integrated).length;return `<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('target')}</span><div><div class="entity-name">${esc(shorten(g.objective,85))}</div><div class="entity-sub">${esc(map[g.projectId]||'Unknown project')}</div></div></div><div class="entity-body">${g.acceptanceCriteria.length} acceptance criteria · ${g.tokenBudget.toLocaleString()} tokens<br>${jobs.length} work packages · ${done} integrated</div>${jobs.length?`<div class="progress-track"><div class="progress-fill" style="width:${Math.round(done/jobs.length*100)}%"></div></div>`:''}<div class="entity-foot">${badge(g.state)}<div class="tiny-actions"><button class="tiny-button" data-inspect="goal:${g.id}">Inspect</button><button class="tiny-button" data-edit="goal:${g.id}">Edit</button><button class="tiny-button" data-act="project-plans" data-id="${g.projectId}">Plan goals</button></div></div></div>`}).join(''):empty('target','No matching goals','Create a goal and set clear success criteria.','create-goal','Create goal')}</div></section>`}
+function providerAccountAllowance(provider){
+ if(provider.kind!=='codex'||(!usage?.weekly&&!usage?.shortWindow))return 'Unavailable';
+ const windows=[['Weekly',usage.weekly],['Short window',usage.shortWindow]];
+ return windows.filter(([,window])=>window).map(([label,window])=>{
+  const reset=window.resetsAt?` · resets ${new Date(window.resetsAt).toLocaleString()}`:'';
+  return `<small>${label}: ${number(window.remainingPercent)}% remaining${esc(reset)}</small>`;
+ }).join('')+`<small>Shared controller Codex account${usage.stale?' · stale':''}</small>`;
+}
 function projectProviderCapacity(projectId){
  if(!providerData)return '<p class="subtext">Provider capacity is unavailable.</p>';
  const planner=providerData.assignments.find(a=>a.projectId===projectId&&a.role==='planner')?.providerId||'codex';
@@ -181,10 +189,14 @@ function projectProviderCapacity(projectId){
   const localCaps=[provider.localRemainingTokens,project.remainingTokens].filter(Number.isFinite);
   const remaining=localCaps.length?number(Math.min(...localCaps)):'No local cap';
   return `<tr><td>${esc(provider.id)}${provider.id===planner?'<small>Planner route</small>':''}${provider.enabled?'':'<small>Disabled</small>'}</td>
-   <td>${number(project.inputTokens)}</td><td>${number(project.outputTokens)}</td><td>${number(project.reservedTokens)}</td><td>${remaining}</td></tr>`;
+   <td>${number(project.inputTokens)}</td><td>${number(project.outputTokens)}</td><td>${number(project.reservedTokens)}</td><td>${remaining}</td><td>${providerAccountAllowance(provider)}</td></tr>`;
  }).join('');
- return `<h3>Project provider capacity</h3><p class="subtext">Remaining local capacity uses the tighter of each project and profile ceiling. Account allowances are shown in Capacity when available.</p>
- ${table(['Provider','Input','Output','Reserved','Local remaining'],rows)}`;
+ return `<h3>Project provider capacity</h3><p class="subtext">Local remaining uses the tighter project or profile ceiling. Account percentages describe the controller account and are separate from token budgets.</p>
+ ${table(['Provider','Input','Output','Reserved','Local remaining','Account allowance'],rows)}`;
+}
+function refreshInspectorProviderCapacity(){
+ const target=$('inspector-provider-capacity');
+ if(target)target.innerHTML=projectProviderCapacity(target.dataset.project);
 }
 function renderPlans(){
  const projects=state.projects.map(p=>`<option value="${esc(p.id)}" ${p.id===planProject?'selected':''}>${esc(p.name)}</option>`).join('');
@@ -555,16 +567,35 @@ async function renderJobProviderTurns(jobId){
  try{
   const turns=await api('jobs/'+jobId+'/provider-turns');
   if(inspectorKey!=='job:'+jobId||$('inspector-provider-turns')!==target)return;
+  const usd=new Intl.NumberFormat(undefined,{style:'currency',currency:'USD',maximumFractionDigits:6});
   const rows=turns.map(t=>`<tr><td>${esc(t.providerId)}<small>${esc(t.role)} · Lease generation ${esc(t.executionGeneration)}</small></td>
    <td>${esc(t.requestedModel||'Unknown')}</td><td>${esc(t.observedModel||'Unavailable')}</td>
    <td>${number(t.reserved)} / ${number(t.consumed)}</td>
-   <td>${badge(t.state)}${t.holdReason?`<small>${esc(t.holdReason)}</small>`:''}</td></tr>`).join('');
-  target.innerHTML=rows?table(['Provider and route','Requested model','Observed model','Reserved / recorded','Status'],rows):
+   <td>${Number.isFinite(t.reportedCostMicros)?usd.format(t.reportedCostMicros/1_000_000):'Unavailable'}</td>
+   <td>${badge(t.state)}${t.holdReason?`<small>${esc(t.holdReason)}</small>`:''}</td>
+   <td>${t.canRecoverReceipt?`<button class="tiny-button" data-act="recover-provider-receipt" data-id="${esc(jobId)}" data-index="${esc(t.id)}">Recover receipt</button>`:''}</td></tr>`).join('');
+  target.innerHTML=rows?table(['Provider and route','Requested model','Observed model','Reserved / recorded','Reported USD','Status','Actions'],rows):
    '<p class="subtext">No remote provider turns recorded.</p>';
  }catch(error){
   if(inspectorKey==='job:'+jobId&&$('inspector-provider-turns')===target)
    target.textContent='Provider evidence unavailable: '+error.message;
  }
+}
+
+function recoverProviderReceipt(jobId,turnId){
+ openForm('Recover executor receipt','The controller will validate the saved receipt and reconcile the recorded usage. The job stays blocked for separate review.',
+  field('reason','Recovery evidence','','textarea')+
+  field('reviewed','I independently reviewed the interrupted job',false,'checkbox')+
+  field('confirmOverrun','I verified usage above the reserved tokens, if applicable',false,'checkbox'),
+  async form=>{
+   const reason=values(form).reason.trim();
+   if(!form.elements.reviewed.checked||reason.length<10||reason.length>1000)
+    throw Error('Confirm your independent review and enter 10–1000 characters of evidence');
+   await mutate(`jobs/${jobId}/provider-turns/${turnId}/recover`,'POST',{
+    reviewed:true,reason,confirmOverrun:form.elements.confirmOverrun.checked
+   });
+   await Promise.all([renderJobProviderTurns(jobId),fetchProviders()]);
+  },'Reconcile receipt');
 }
 
 async function renderJobQuality(jobId){
@@ -647,7 +678,7 @@ async function renderGoalBudget(goalId){
    ${budget.planningHeld>0?'<p class="subtext">Reconcile held planning tokens in Capacity → Held provider reservations.</p>':''}
    <h3>Goal usage by provider</h3>
    ${providerRows?table(['Provider','Model','Role','Input','Output'],providerRows):'<p class="subtext">No attributed provider usage for this goal yet.</p>'}
-   ${goal?projectProviderCapacity(goal.projectId):''}
+   ${goal?`<div id="inspector-provider-capacity" data-project="${esc(goal.projectId)}">${projectProviderCapacity(goal.projectId)}</div>`:''}
    <h3>Per-job reported usage</h3>
    ${usageRows?table(['Job','Current owner','Input','Output','Total','Final usage'],usageRows):'<p class="subtext">No linked job usage reported.</p>'}
    <p class="subtext">Owner is the current lease assignment, not a complete historical worker attribution. Unconfirmed final usage is not a provider-account allowance.</p>
@@ -744,6 +775,7 @@ async function act(action,id,index,revision){switch(action){case'open-connection
  case'analysis-run':await startProjectReview();break;case'analysis-goal':createReviewGoal(id);break;case'provider-reconcile':formProviderReconciliation(id);break;
  case'provider-recover':formProviderHostRecovery(id);break;
  case'linked-provider-usage':closeInspector();nav('usage');await fetchProviders();break;
+ case'recover-provider-receipt':recoverProviderReceipt(id,index);break;
  case'project-plans':planProject=id;nav('plans');await loadPlans();break;
  case'open-project-analysis':closeInspector();analysisProject=id;nav('analysis');await loadProjectReview(id);break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
  case'queue-run':case'queue-pause':case'queue-resume':case'queue-stop':await runQueue(action.slice(6));break;

@@ -101,13 +101,15 @@ internal static class RemoteProviderLeaseTests
             var builder = Begin(builderRequest);
             Check(builder.VerifyRemoteBase && builder.Task.Contains(job.Title), "First builder was not bound to controller task");
             Reject(() => Begin(builderRequest), "duplicate turn dispatch");
-            var receipt = Receipt(builder);
-            Check(Record(builder, receipt) && !Record(builder, receipt), "Receipt was not fenced against replay");
+            var receipt = Receipt(builder) with { ReportedCostMicros = 125_000 };
+            Check(Record(builder, receipt) && !Record(builder, receipt with { ReportedCostMicros = 999_000 }),
+                "Receipt was not fenced against replay");
             var code = Begin(Request("review:code", Head));
             var architecture = Begin(Request("review:architecture", Head));
             Reject(() => Begin(Request("review:security", Head)), "oversubscribed concurrent reviews");
             Check(code.ExpectedInputTree == Tree && code.BaseCommit == Base, "Review was not bound to builder tree and base");
-            Check(Record(code, Receipt(code)) && Record(architecture, Receipt(architecture)), "Reviews did not settle");
+            Check(Record(code, Receipt(code) with { ReportedCostMicros = -1 }) && Record(architecture, Receipt(architecture)),
+                "Reviews did not settle");
             foreach (var role in new[] { "review:security", "review:ux" })
             {
                 var grant = Begin(Request(role, Head));
@@ -118,6 +120,9 @@ internal static class RemoteProviderLeaseTests
             status.Job = new FactoryJob { Id = job.Id, ProjectId = project.Id, Mode = JobExecutionModes.Remote,
                 Attempt = claim.Job.Attempt, State = JobStates.PrReady, HeadSha = Head };
             var completedSnapshot = store.Read();
+            var reportedCosts = completedSnapshot.ProviderUsages.Select(u => u.ReportedCostMicros).ToArray();
+            Check(reportedCosts.Count(cost => cost is null) == 4 && reportedCosts.Contains(125_000L),
+                "Remote cost was lost, replaced by replay, or inferred for an unknown amount");
             Check(!RemoteProviderRouting.VerifyCompletion(completedSnapshot, completedSnapshot.RemoteProviderLeases.Single(),
                 Head, Base), "Unverified GitHub tree was accepted");
             Check(await WorkerProtocol.CompleteAsync(store, status, new FixtureVerifier(), settings: settings) &&
@@ -148,9 +153,13 @@ internal static class RemoteProviderLeaseTests
                 "Expiry released an uncertain liability");
             var restarted = new StateStore(scratch.FullName);
             var recovery = new RemoteReceiptRecoveryInput(true, "Verified durable executor receipt", false);
-            RemoteProviderRouting.SettleRecoveredReceipt(restarted, expiringJob.Id, interrupted.TurnId, recovery, Receipt(interrupted));
-            RemoteProviderRouting.SettleRecoveredReceipt(restarted, expiringJob.Id, interrupted.TurnId, recovery, Receipt(interrupted));
+            var recoveredReceipt = Receipt(interrupted) with { ReportedCostMicros = 25_000 };
+            RemoteProviderRouting.SettleRecoveredReceipt(restarted, expiringJob.Id, interrupted.TurnId, recovery, recoveredReceipt);
+            RemoteProviderRouting.SettleRecoveredReceipt(restarted, expiringJob.Id, interrupted.TurnId, recovery,
+                recoveredReceipt with { ReportedCostMicros = 999_000 });
             var settled = new StateStore(scratch.FullName).Read();
+            Check(settled.ProviderUsages.Single(u => u.Id == heldTurn.UsageId).ReportedCostMicros == 25_000,
+                "Receipt recovery did not persist the reported cost");
             Check(settled.RemoteProviderTurns.Single(t => t.Id == interrupted.TurnId).ObservedModel == interrupted.Route.Model,
                 "Receipt recovery did not persist the verified observed model");
             Check(settled.Jobs.Single(j => j.Id == expiringJob.Id) is { State: JobStates.Blocked, TokensIn: 30, TokensOut: 10 } &&
@@ -321,7 +330,8 @@ internal static class RemoteProviderLeaseTests
         var restarted = new StateStore(store.Home);
         var saved = await RemoteProviderExecutor.ReadReceiptAsync(restarted,
             new(builderGrant.TurnId, RemoteProviderExecutor.Digest(builderGrant)), ct);
-        Check(saved is { FinalUsage: true } && saved.OutputTree == built.OutputTree && saved.Patch.SequenceEqual(built.Patch),
+        Check(saved is { FinalUsage: true, ReportedCostMicros: 1234 } && built.ReportedCostMicros == 1234 &&
+            saved.OutputTree == built.OutputTree && saved.Patch.SequenceEqual(built.Patch),
             "Executor restart lost the durable receipt");
         Check(await RemoteProviderExecutor.ReadReceiptAsync(restarted,
             new(builderGrant.TurnId, RemoteProviderExecutor.Digest(builderGrant with { Budget = builderGrant.Budget + 1 })), ct) is null,
@@ -389,7 +399,7 @@ internal static class RemoteProviderLeaseTests
             if (readOnly) Check(prompt.Contains("+changed by executor"), "Review prompt omitted the independently read diff");
             else await File.WriteAllTextAsync(Path.Combine(directory, "fixture.txt"), "changed by executor\n", cancellation);
             return new AgentRunResult { ObservedModel = model, InputTokens = 30, OutputTokens = 10,
-                UsageReported = true, Success = true, FinalText = "VERDICT: PASS" };
+                UsageReported = true, Success = true, FinalText = "VERDICT: PASS", ProviderReportedCostMicros = 1234 };
         }
     }
 

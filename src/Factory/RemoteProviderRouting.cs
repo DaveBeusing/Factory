@@ -52,7 +52,8 @@ public sealed record RemoteExecutorGrant(Guid TurnId, Guid LeaseId, Guid JobId, 
 
 public sealed record RemoteExecutorReceipt(Guid TurnId, Guid LeaseId, string ProviderId, string Role,
     string InputCommit, string ObservedModel, long InputTokens, long OutputTokens, bool FinalUsage,
-    bool Success, string FinalText, bool FinalTextIsFallback, string OutputTree, byte[] Patch);
+    bool Success, string FinalText, bool FinalTextIsFallback, string OutputTree, byte[] Patch,
+    long? ReportedCostMicros = null);
 
 public sealed record RemoteReceiptRecoveryInput(bool Reviewed, string Reason, bool ConfirmOverrun);
 
@@ -217,6 +218,12 @@ public static class RemoteProviderRouting
         return (lease.ExecutorUrl, grant);
     }
 
+    internal static bool CanRecoverReceipt(RemoteProviderTurn turn, RemoteProviderLease lease, FactoryJob job,
+        FactorySettings settings) => turn.State == "held" && turn.GrantDigest.Length == 64 &&
+        !JobStates.Active.Contains(job.State) && string.IsNullOrEmpty(job.LeaseOwner) &&
+        string.Equals(settings.RemoteProviderExecutorUrl, lease.ExecutorUrl, StringComparison.Ordinal) &&
+        IsExecutorUrl(lease.ExecutorUrl) && ExecutorCredential(settings) is not null;
+
     public static async Task<object> RecoverReceiptAsync(StateStore store, FactorySettings settings, Guid jobId,
         Guid turnId, RemoteReceiptRecoveryInput input, CancellationToken ct)
     {
@@ -226,8 +233,7 @@ public static class RemoteProviderRouting
         var turn = state.RemoteProviderTurns.Single(t => t.Id == turnId);
         var lease = state.RemoteProviderLeases.Single(l => l.Id == turn.LeaseId && l.JobId == jobId);
         if (turn.State == "reconciled") return new { turn.Id, turn.State };
-        if (turn.State != "held" || turn.GrantDigest.Length != 64 ||
-            !string.Equals(settings.RemoteProviderExecutorUrl, lease.ExecutorUrl, StringComparison.Ordinal))
+        if (!CanRecoverReceipt(turn, lease, state.Jobs.Single(j => j.Id == jobId), settings))
             throw new InvalidOperationException("No held receipt from the configured executor is available");
         var credential = ExecutorCredential(settings) ?? throw new InvalidOperationException("Executor credential unavailable");
         var receipt = await RemoteProviderExecutor.FetchReceiptAsync(lease.ExecutorUrl, credential,
@@ -253,7 +259,7 @@ public static class RemoteProviderRouting
         {
             Reviewed = input.Reviewed, Reason = reason[..Math.Min(reason.Length, 1000)],
             ConfirmOverrun = input.ConfirmOverrun, FinalInputTokens = receipt.InputTokens, FinalOutputTokens = receipt.OutputTokens
-        }, receipt.ObservedModel);
+        }, receipt.ObservedModel, receipt.ReportedCostMicros);
     }
 
     internal static bool Record(FactoryState state, FactorySettings settings, RemoteExecutorGrant grant, RemoteExecutorReceipt receipt)
@@ -277,7 +283,8 @@ public static class RemoteProviderRouting
             return false;
         }
 
-        var providerRemaining = ProviderBudgetLedger.Record(state, turn.UsageId, new(receipt.InputTokens, receipt.OutputTokens));
+        var providerRemaining = ProviderBudgetLedger.Record(state, turn.UsageId,
+            new(receipt.InputTokens, receipt.OutputTokens), receipt.ReportedCostMicros);
         var goalRemaining = GoalBudgetLedger.Record(state, job, checked(job.TokensIn + receipt.InputTokens),
             checked(job.TokensOut + receipt.OutputTokens));
         turn.ObservedModel = receipt.ObservedModel ?? "";

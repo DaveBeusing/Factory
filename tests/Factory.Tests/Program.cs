@@ -21,9 +21,9 @@ if (args is ["--browser-recovery-fixture", var browserFixtureHome])
     return 0;
 }
 
-if (args is ["--browser-provider-evidence-fixture", var providerEvidenceFixtureHome])
+if (args is ["--browser-provider-evidence-fixture", var providerEvidenceFixtureHome, var fixtureExecutorUrl])
 {
-    BrowserRecoveryFixture.SeedProviderEvidence(providerEvidenceFixtureHome);
+    BrowserRecoveryFixture.SeedProviderEvidence(providerEvidenceFixtureHome, fixtureExecutorUrl);
     return 0;
 }
 
@@ -144,6 +144,14 @@ Test("Provider routing is project-scoped and rejects unsupported builder capabil
         throw new Exception("Non-loopback Ollama endpoint was allowed");
     }
     catch (InvalidOperationException) { }
+});
+
+Test("Provider ledger preserves its public three-parameter CLR signature", () =>
+{
+    var method = typeof(ProviderBudgetLedger).GetMethod(nameof(ProviderBudgetLedger.Record),
+        [typeof(FactoryState), typeof(Guid), typeof(AgentTokenUsage)]);
+    Assert(method is { IsPublic: true, IsStatic: true } && method.ReturnType == typeof(long),
+        "Precompiled callers require the original Record signature");
 });
 
 Test("Provider budget reservations guard concurrent capacity and preserve unknown usage", () =>

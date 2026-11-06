@@ -415,6 +415,8 @@ These components assist engineering decisions; static and agent-generated analys
 | Worktrees | Git isolation, **not** OS-level sandboxing |
 | Usage limits | No invented remaining percentages |
 
+For mixed provider routes on remote jobs, follow the [controller, executor and worker setup](docs/providers.md#set-up-mixed-remote-execution). The basic worker connection and authorization steps are below.
+
 For a remote worker, expose the controller only behind a properly configured TLS endpoint. The administrator provisions one scoped token for each stable worker ID using the **controller installation**:
 
 ```powershell

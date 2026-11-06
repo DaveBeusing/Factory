@@ -347,7 +347,8 @@ public static class DashboardHost
         app.MapGet("/api/jobs/{id:guid}/provider-turns", (Guid id) =>
         {
             var snapshot = store.Read();
-            if (!snapshot.Jobs.Any(job => job.Id == id)) return (IResult)Results.NotFound();
+            var job = snapshot.Jobs.SingleOrDefault(job => job.Id == id);
+            if (job is null) return (IResult)Results.NotFound();
             var turns = from lease in snapshot.RemoteProviderLeases
                         where lease.JobId == id
                         join turn in snapshot.RemoteProviderTurns on lease.Id equals turn.LeaseId
@@ -358,7 +359,8 @@ public static class DashboardHost
                         {
                             turn.Id, lease.ExecutionGeneration, turn.Role, usage.ProviderId, requestedModel = usage.Model,
                             turn.ObservedModel, reservation.Reserved, reservation.Consumed, turn.State, turn.HoldReason,
-                            usage.FinalUsageReported
+                            usage.FinalUsageReported, usage.ReportedCostMicros,
+                            canRecoverReceipt = RemoteProviderRouting.CanRecoverReceipt(turn, lease, job, settings)
                         };
             return Results.Ok(turns.Take(100).ToArray());
         });

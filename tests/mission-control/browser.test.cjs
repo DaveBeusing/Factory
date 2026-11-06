@@ -2,6 +2,8 @@ const assert = require('node:assert/strict');
 const { execFileSync, spawn } = require('node:child_process');
 const { mkdir, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
+const { createServer } = require('node:http');
+const { once } = require('node:events');
 const path = require('node:path');
 const { createInterface } = require('node:readline');
 const test = require('node:test');
@@ -32,19 +34,19 @@ function dashboardUrl(child) {
 
 const root = path.resolve(__dirname, '../..');
 
-function browserTest(name, exercise, seed = async () => {}) {
-  test(name, { timeout: 60_000 }, () => withDashboard(exercise, seed));
+function browserTest(name, exercise, seed = async () => {}, allowance = {}) {
+  test(name, { timeout: 60_000 }, () => withDashboard(exercise, seed, allowance));
 }
 
-async function withDashboard(exercise, seed) {
+async function withDashboard(exercise, seed, allowance) {
   const dll = path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll');
   const home = await mkdtemp(path.join(tmpdir(), 'factory-browser-'));
-  let server, stopped, browser;
+  let server, stopped, browser, fixture;
   try {
-    await seed(home);
+    fixture = await seed(home);
     server = spawn('dotnet', [dll, 'dashboard', '--listen', 'http://127.0.0.1:0'], {
       cwd: home,
-      env: { ...process.env, FACTORY_HOME: home, 'Logging__LogLevel__Microsoft.Hosting.Lifetime': 'Information' },
+      env: { ...process.env, ...fixture?.env, FACTORY_HOME: home, 'Logging__LogLevel__Microsoft.Hosting.Lifetime': 'Information' },
       stdio: ['ignore', 'pipe', 'inherit']
     });
     stopped = new Promise((resolve) => server.once('close', resolve));
@@ -57,7 +59,7 @@ async function withDashboard(exercise, seed) {
     const errors = [];
     page.on('pageerror', (error) => errors.push(error.message));
     // Account quotas are external. All Mission Control APIs exercised here use the real controller.
-    await page.route('**/api/usage', (route) => route.fulfill({ json: {} }));
+    await page.route('**/api/usage', (route) => route.fulfill({ json: allowance }));
     await page.goto(url);
 
     const connection = page.locator('#connection-modal');
@@ -74,7 +76,7 @@ async function withDashboard(exercise, seed) {
       if (!response.ok()) assert.fail(`${options.method || 'GET'} ${resource}: ${response.status()} ${await response.text()}`);
       return response.json();
     };
-    await exercise({ page, nav, form, inspector, api, home, connection });
+    await exercise({ page, nav, form, inspector, api, home, connection, fixture });
     assert.deepEqual(errors, []);
   } finally {
     try {
@@ -82,6 +84,7 @@ async function withDashboard(exercise, seed) {
     } finally {
       server?.kill();
       await stopped;
+      await fixture?.dispose?.();
       await rm(home, { recursive: true, force: true });
     }
   }
@@ -181,6 +184,9 @@ browserTest('recovers a foreign-host hold and settles linked provider and goal b
   const budget = () => api(`goals/${goal.id}/budget`);
   await nav.getByRole('button', { name: 'Goal planner' }).click();
   await page.getByRole('button', { name: 'Goal & budget' }).click();
+  await inspector.getByText('Weekly: 65% remaining', { exact: true }).waitFor();
+  await inspector.getByText('Shared controller Codex account · stale', { exact: true }).waitFor();
+  await inspector.getByRole('row', { name: /local-ollama/ }).getByText('Unavailable', { exact: true }).waitFor();
   await inspector.getByRole('button', { name: 'Review linked provider turns in Capacity' }).click();
   await page.getByRole('button', { name: 'Review stopped host' }).click();
   await form.getByLabel(/I verified the original runner/).check();
@@ -227,30 +233,75 @@ browserTest('recovers a foreign-host hold and settles linked provider and goal b
   assert.equal(settled.available, 860);
   assert.equal(settled.reservations[0].state, 'released');
   assert.equal(settled.jobs[0].usageComplete, true);
-}, (home) => {
+}, async (home) => {
   const fixture = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
   execFileSync('dotnet', [fixture, '--browser-recovery-fixture', home], { timeout: 15_000 });
-});
+  await writeFile(path.join(home, 'settings.json'), JSON.stringify({ providers: [
+    { id: 'codex', kind: 'codex', tokenLimit: 3000 }, { id: 'local-ollama', kind: 'ollama', model: 'fixture:small' }
+  ] }));
+}, { weekly: { usedPercent: 35, remainingPercent: 65 }, stale: true });
 
-browserTest('shows held provider-turn evidence without exposing lease credentials', async ({ page, nav, inspector, api }) => {
+browserTest('recovers a held executor receipt without exposing lease credentials', async ({ page, nav, form, inspector, api, fixture }) => {
   const snapshot = await api('state');
   const [job] = snapshot.jobs;
   const turns = await api(`jobs/${job.id}/provider-turns`);
   assert.equal(turns.length, 1);
   assert.equal(turns[0].consumed, 90);
+  assert.equal(turns[0].canRecoverReceipt, true);
   for (const response of [snapshot, turns]) {
-    assert.doesNotMatch(JSON.stringify(response), /fixture-lease-secret|fixture-receipt-digest/);
+    assert.doesNotMatch(JSON.stringify(response), /fixture-lease-secret|A{64}/);
   }
   await nav.getByRole('button', { name: 'Jobs', exact: false }).click();
   await page.getByRole('row', { name: /Blocked provider fixture/ }).getByRole('button', { name: 'Inspect' }).click();
   await inspector.getByRole('heading', { name: 'Remote provider turns' }).waitFor();
   const evidence = inspector.getByRole('row', { name: /fixture-provider/ });
   await evidence.getByText('requested-v1', { exact: true }).waitFor();
-  await evidence.getByText('observed-v2', { exact: true }).waitFor();
   await evidence.getByText('512 / 90', { exact: true }).waitFor();
-  await evidence.getByText('Model mismatch requires review', { exact: true }).waitFor();
-  assert.doesNotMatch(await inspector.innerText(), /fixture-lease-secret|fixture-receipt-digest/);
-}, (home) => {
-  const fixture = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
-  execFileSync('dotnet', [fixture, '--browser-provider-evidence-fixture', home], { timeout: 15_000 });
+  await evidence.getByText('Executor response was interrupted', { exact: true }).waitFor();
+  assert.doesNotMatch(await inspector.innerText(), /fixture-lease-secret|A{64}/);
+
+  fixture.receipt = {
+    turnId: turns[0].id, leaseId: snapshot.remoteProviderLeases[0].id, providerId: 'fixture-provider', role: 'builder',
+    inputCommit: '', observedModel: 'requested-v1', inputTokens: 70, outputTokens: 35, finalUsage: true,
+    success: false, finalText: '', finalTextIsFallback: false, outputTree: '', patch: '', reportedCostMicros: 125000
+  };
+  await evidence.getByRole('button', { name: 'Recover receipt' }).click();
+  await form.getByLabel('Recovery evidence').fill('Verified the stopped fixture job and its durable receipt.');
+  await form.getByLabel('I independently reviewed the interrupted job').check();
+  await form.getByRole('button', { name: 'Reconcile receipt' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await evidence.getByText('reconciled', { exact: true }).waitFor();
+  await evidence.getByText('512 / 105', { exact: true }).waitFor();
+  const [settled] = await api(`jobs/${job.id}/provider-turns`);
+  assert.equal(settled.reportedCostMicros, 125000);
+  assert.equal(settled.observedModel, 'requested-v1');
+  assert.equal(settled.canRecoverReceipt, false);
+  assert.equal((await api('state')).jobs[0].state, 'blocked');
+}, async (home) => {
+  const token = 'b'.repeat(64);
+  const fixture = { env: { FACTORY_REMOTE_EXECUTOR_TOKEN: token }, receipt: null };
+  const executor = createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    const query = JSON.parse(body);
+    if (request.method !== 'POST' || request.url !== '/api/executor/receipt' ||
+        request.headers.authorization !== `Bearer ${token}` || query.grantDigest !== 'A'.repeat(64) ||
+        query.turnId !== fixture.receipt?.turnId) {
+      response.writeHead(404).end();
+      return;
+    }
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(fixture.receipt));
+  });
+  executor.listen(0, '127.0.0.1');
+  await once(executor, 'listening');
+  fixture.dispose = () => new Promise((resolve) => executor.close(resolve));
+  try {
+    const dll = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
+    execFileSync('dotnet', [dll, '--browser-provider-evidence-fixture', home,
+      `http://127.0.0.1:${executor.address().port}/`], { timeout: 15_000 });
+    return fixture;
+  } catch (error) {
+    await fixture.dispose();
+    throw error;
+  }
 });

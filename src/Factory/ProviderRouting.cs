@@ -282,7 +282,10 @@ public static class ProviderBudgetLedger
         catch (System.ComponentModel.Win32Exception) { return false; }
     }
 
-    public static long Record(FactoryState state, Guid usageId, AgentTokenUsage total)
+    public static long Record(FactoryState state, Guid usageId, AgentTokenUsage total) =>
+        Record(state, usageId, total, reportedCostMicros: null);
+
+    internal static long Record(FactoryState state, Guid usageId, AgentTokenUsage total, long? reportedCostMicros)
     {
         var entry = state.ProviderUsages.Single(x => x.Id == usageId);
         var reservation = state.ProviderBudgetReservations.FirstOrDefault(x => x.UsageId == usageId);
@@ -292,6 +295,7 @@ public static class ProviderBudgetLedger
             return long.MaxValue;
         entry.InputTokens = total.InputTokens;
         entry.OutputTokens = total.OutputTokens;
+        if (reportedCostMicros is >= 0) entry.ReportedCostMicros = reportedCostMicros;
         if (reservation is null) return long.MaxValue;
         reservation.Consumed = checked(total.InputTokens + total.OutputTokens);
         return reservation.Reserved > 0 ? reservation.Reserved - reservation.Consumed : long.MaxValue;
@@ -459,10 +463,10 @@ public static class ProviderBudgetReconciliation
     }
 
     public static object Reconcile(StateStore store, Guid reservationId, ProviderBudgetReconciliationInput input) =>
-        Reconcile(store, reservationId, input, observedModel: null);
+        Reconcile(store, reservationId, input, observedModel: null, reportedCostMicros: null);
 
     internal static object Reconcile(StateStore store, Guid reservationId, ProviderBudgetReconciliationInput input,
-        string? observedModel)
+        string? observedModel, long? reportedCostMicros)
     {
         var evidence = EvidenceReason(input.Reviewed, input.Reason);
         if (input.FinalInputTokens < 0 || input.FinalOutputTokens < 0)
@@ -484,6 +488,7 @@ public static class ProviderBudgetReconciliation
             usage.InputTokens = input.FinalInputTokens;
             usage.OutputTokens = input.FinalOutputTokens;
             usage.FinalUsageReported = true;
+            if (reportedCostMicros is >= 0) usage.ReportedCostMicros = reportedCostMicros;
             reservation.Consumed = consumed;
             reservation.State = "released";
             var remoteTurn = state.RemoteProviderTurns.SingleOrDefault(turn => turn.UsageId == usage.Id);

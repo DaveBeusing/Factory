@@ -109,14 +109,24 @@ public sealed class QualityEngine
             ["security"] = "Secrets, untrusted input, access control, unsafe execution",
             ["ux"] = "User-visible behavior, discoverability and usability when applicable"
         };
-        var diff = Commands.Run("git", ["-C", job.Worktree, "diff", $"{project.BaseBranch}...HEAD", "--stat"],
+        // A text-only reviewer receives the actual code patch; a partial diff
+        // must never be presented as complete review evidence.
+        var diff = Commands.Run("git", ["-C", job.Worktree, "diff", $"{project.BaseBranch}...HEAD"],
             Environment.CurrentDirectory);
+        const int maxReviewChars = 100_000;
+        if (!diff.Ok || diff.Output.Length > maxReviewChars)
+        {
+            report.Findings.Add(!diff.Ok ? "Unable to obtain review diff" :
+                "Review diff exceeds supported full-context size; split the work package");
+            report.Passed = false;
+            return report;
+        }
         var completed = await Task.WhenAll(reviewers.Select(async pair =>
         {
             var (role, checklist) = pair;
            var instruction = "Review only; DO NOT edit files, commit, push or merge. " + checklist +
                 ". Review this branch against " + project.BaseBranch + ". Return first line exactly VERDICT: PASS or VERDICT: CHANGES. " +
-                "Second line onward provide evidence with file paths. Task: " + job.Description + "\nDiff summary:\n" + diff.Output;
+                "Second line onward provide evidence with file paths. Task: " + job.Description + "\nComplete source patch (review the changed code, not just file names):\n" + diff.Output;
            try
             {
                 var result = await (_reviewRuntime?.Invoke(role) ?? _agent)

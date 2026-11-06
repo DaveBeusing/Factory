@@ -190,7 +190,7 @@ public static class ProviderBudgetLedger
                 state.ProviderUsages.Where(filter).Sum(x => checked(x.InputTokens + x.OutputTokens));
             long Pending(Func<ProviderBudgetReservation, bool> filter) =>
                 state.ProviderBudgetReservations.Where(x => x.State != "released" && filter(x))
-                    .Sum(x => checked(x.Reserved - x.Consumed));
+                    .Sum(x => Math.Max(0, checked(x.Reserved - x.Consumed)));
             var allowed = (long)reservationTokens;
             if (globalCap > 0) allowed = Math.Min(allowed,
                 globalCap - Used(x => x.ProviderId == profile.Id) -
@@ -233,7 +233,7 @@ public static class ProviderBudgetLedger
         {
             var records = state.ProviderUsages.Where(u => u.ProviderId == profile.Id).ToArray();
             var pending = state.ProviderBudgetReservations.Where(r => r.ProviderId == profile.Id &&
-                r.State != "released").Sum(r => checked(r.Reserved - r.Consumed));
+                r.State != "released").Sum(r => Math.Max(0, checked(r.Reserved - r.Consumed)));
             var spent = records.Sum(x => checked(x.InputTokens + x.OutputTokens));
             return new { profile.Id, profile.Kind, profile.Model, profile.Enabled,
                 inputTokens = records.Sum(x => x.InputTokens), outputTokens = records.Sum(x => x.OutputTokens),
@@ -373,6 +373,44 @@ public static class ProjectProviderManager
             state.Events.Add(new FactoryEvent { Type = "provider_configuration_updated",
                 Message = "Project provider settings changed: " + project.Name });
             return new { projectId, routes = input.Routes, budgets = input.Budgets };
+        });
+    }
+}
+
+public sealed class ProviderBudgetReconciliationInput
+{
+    public long FinalInputTokens { get; set; }
+    public long FinalOutputTokens { get; set; }
+    public bool Reviewed { get; set; }
+    public string Reason { get; set; } = "";
+}
+
+public static class ProviderBudgetReconciliation
+{
+    public static object Reconcile(StateStore store, Guid reservationId, ProviderBudgetReconciliationInput input)
+    {
+        if (!input.Reviewed || input.Reason.Trim().Length < 10 ||
+            input.FinalInputTokens < 0 || input.FinalOutputTokens < 0)
+            throw new InvalidOperationException("Verified nonnegative totals and an evidence reason are required");
+        _ = checked(input.FinalInputTokens + input.FinalOutputTokens);
+        return store.Change(state =>
+        {
+            var reservation = state.ProviderBudgetReservations.Single(x => x.Id == reservationId);
+            if (reservation.State != "held")
+                throw new InvalidOperationException("Only held provider reservations can be reconciled");
+            var usage = state.ProviderUsages.Single(x => x.Id == reservation.UsageId);
+            if (input.FinalInputTokens < usage.InputTokens || input.FinalOutputTokens < usage.OutputTokens)
+                throw new InvalidOperationException("Verified usage cannot be lower than already reported usage");
+            usage.InputTokens = input.FinalInputTokens;
+            usage.OutputTokens = input.FinalOutputTokens;
+            usage.FinalUsageReported = true;
+            reservation.Consumed = checked(input.FinalInputTokens + input.FinalOutputTokens);
+            reservation.State = "released";
+            state.Events.Add(new FactoryEvent { JobId = usage.JobId,
+                Type = "provider_budget_reconciled",
+                Message = "Provider " + usage.ProviderId + " usage " + usage.Id + ": " + input.Reason.Trim() });
+            return new { reservation.Id, reservation.State, usage.ProviderId,
+                usage.InputTokens, usage.OutputTokens };
         });
     }
 }

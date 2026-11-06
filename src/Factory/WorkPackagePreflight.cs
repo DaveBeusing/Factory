@@ -171,6 +171,20 @@ public static class WorkPackagePreflight
         return report;
     }
 
+    public static WorkPackagePreflightReport? InspectDirectJob(
+        FactoryState state, ProjectInfo project, string title, string description)
+    {
+        RequireMaster(project);
+        // Old test fixtures may construct an incomplete ProjectInfo without a path.
+        // Real registered projects always have a validated Git root.
+        if (string.IsNullOrWhiteSpace(project.Path)) return null;
+        return Inspect(state, project, new FactoryGoal
+        {
+            ProjectId = project.Id, Objective = title,
+            AcceptanceCriteria = [description]
+        });
+    }
+
     private static ExistingCodeCandidate? ParseMatch(string commit, string line)
     {
         // git grep -n for a tree-ish: <commit>:<path>:<line>:<snippet>

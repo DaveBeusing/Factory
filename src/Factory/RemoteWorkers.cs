@@ -62,6 +62,12 @@ public static class WorkerProtocol
     {
         if (!WorkerAuthentication.IsValidWorkerId(workerId)) return null;
         JobRecovery.QuarantineExpired(store, JobExecutionModes.Remote);
+        // Remote claims currently transfer only the reference Codex runtime configuration,
+        // not project role routes or controller-side provider reservations. Refuse projects
+        // with explicit provider routing rather than silently using a different adapter.
+        var projectsWithRoutes = store.Read().Projects
+            .Where(p => store.GetProviderRoutes(p.Id).Count > 0)
+            .Select(p => p.Id).ToHashSet();
         return store.Change(s =>
         {
             if (s.Paused || !settings.AllowPush) return null;
@@ -73,7 +79,8 @@ public static class WorkerProtocol
                 job =>
                 {
                     var project = s.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
-                    return project is not null && !string.IsNullOrWhiteSpace(project.Origin) &&
+                    return project is not null && !projectsWithRoutes.Contains(project.Id) &&
+                        !string.IsNullOrWhiteSpace(project.Origin) &&
                         WorkerAuthorization.CanExecute(s, registered, project, job, settings);
                 },
                 reservationTokens: settings.GoalReservationTokens);

@@ -382,6 +382,8 @@ async function renderGoalBudget(goalId){
  if(!target||inspectorKey!=='goal:'+goalId)return;
  try{
   const budget=await api('goals/'+goalId+'/budget');
+  const linkedGoal=state.goals.find(g=>g.id===goalId);
+  const providerBudget=linkedGoal?await api('projects/'+linkedGoal.projectId+'/provider-capacity').catch(()=>null):null;
   if(inspectorKey!=='goal:'+goalId||!$('inspector-goal-budget'))return;
   const nf=x=>Number(x||0).toLocaleString();
   const rows=budget.reservations||[];
@@ -423,6 +425,11 @@ async function renderGoalBudget(goalId){
    <p class="subtext">Goal-budget accounting is separate from provider account allowances. Final usage that is unknown must remain unsettled.</p>
    <h3>Reservations</h3>${rows.length?table(['Job','Status','Reserved','Consumed','Outstanding'],records):'<p class="subtext">No reservations reported.</p>'}
    ${held>0?`<button class="button button-muted" data-act="budget-reconcile" data-id="${goalId}">Review held usage</button>`:''}
+   <h3>Provider capacity for this goal's project</h3>
+   <p class="subtext">These are project-wide controller budgets shared by all goals and roles. They are not provider account allowances, nor a forecast of this goal's future token consumption.</p>
+   ${providerBudget?table(['Provider','Local cap','Consumed','Reserved / held','Locally available'],
+    providerBudget.map(p=>'<tr><td>'+esc(p.providerId)+'</td><td>'+(p.tokenLimit==null?'Not set':nf(p.tokenLimit))+'</td><td>'+nf(p.consumedTokens)+'</td><td>'+nf(p.outstandingTokens)+'</td><td>'+(p.remainingTokens==null?'Unknown / uncapped':nf(p.remainingTokens))+'</td></tr>').join('')):
+    '<p class="subtext">Provider budget data is currently unavailable.</p>'}
    <h3>Per-job reported usage</h3>
    ${usageRows?table(['Job','Current owner','Input','Output','Total','Final usage'],usageRows):'<p class="subtext">No linked job usage reported.</p>'}
    <p class="subtext">Owner is the current lease assignment, not a complete historical worker attribution. Unconfirmed final usage is not a provider-account allowance.</p>

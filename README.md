@@ -318,11 +318,11 @@ Factory inspects the exact current `master` commit before planning, checking exi
 Review the proposed scope, already existing implementations, related PRs, priorities, dependencies and affected paths. **Plan generation does not authorize execution.** After independently confirming that overlapping work will not be duplicated, explicitly acknowledge that review and adopt the plan:
 
 ```powershell
-.\dist\Factory.exe adopt --goal '<goal-guid>' --mode local --reviewed-existing-work
+.\dist\Factory.exe adopt --goal '<goal-guid>' --plan-revision '<revision-guid>' --mode local --reviewed-existing-work
 .\dist\Factory.exe run
 ```
 
-Before adoption, Factory checks for dependency cycles and rejects a plan when its referenced base commit has become stale.
+Use the `revision` from the reviewed plan output. Factory checks for dependency cycles and rejects adoption when the saved plan, goal objective, acceptance criteria or base commit has changed.
 
 ### Directly queue a task
 

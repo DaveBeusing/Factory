@@ -547,7 +547,7 @@ Test("Master-first preflight finds existing code and preserves adoption review",
 
         var plan = MissionControlManager.SavePlan(store, new FactoryPlan
         {
-            GoalId = goal.Id, ProjectId = project.Id,
+            GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
             Packages = [new PlannedPackage
             {
                 Title = "Complete existing GoalPlanner", Description = "Finish and test existing code",
@@ -558,11 +558,11 @@ Test("Master-first preflight finds existing code and preserves adoption review",
             "Manual plan was not pinned to an inspected master");
         try
         {
-            Planning.Adopt(store, goal.Id, "local");
+            Planning.Adopt(store, goal.Id, "local", planRevision: plan.Revision!.Value);
             throw new Exception("Existing implementation was adopted without human review");
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("explicit review")) { }
-        var adopted = Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true);
+        var adopted = Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true, planRevision: plan.Revision!.Value);
         Assert(adopted.Count == 1 && adopted[0].Title.Contains("Complete existing"));
         Assert(store.Read().Goals.Single().State == "active");
     }
@@ -627,13 +627,13 @@ Test("Master-first preflight rejects stale master and non-master projects", () =
         store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
         var plan = MissionControlManager.SavePlan(store, new FactoryPlan
         {
-            GoalId = goal.Id, ProjectId = project.Id,
+            GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
             Packages = [new PlannedPackage { Title = "Diagnostics", Description = "Improve output",
                 Files = ["README.md"] }]
         });
         try
         {
-            Planning.Adopt(store, goal.Id, "local");
+            Planning.Adopt(store, goal.Id, "local", planRevision: plan.Revision!.Value);
             throw new Exception("Plan without matches bypassed review acknowledgement");
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("explicit review")) { }
@@ -642,7 +642,7 @@ Test("Master-first preflight rejects stale master and non-master projects", () =
         Git("commit", "-m", "Advance master");
         try
         {
-            Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true);
+            Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true, planRevision: plan.Revision!.Value);
             throw new Exception("Stale base was accepted");
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("master advanced")) { }
@@ -653,6 +653,108 @@ Test("Master-first preflight rejects stale master and non-master projects", () =
             throw new Exception("Non-master project accepted for work-package creation");
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("must be based on master")) { }
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
+await TestAsync("Plan adoption requires the reviewed plan and current goal revisions", async () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-plan-revisions-" + Guid.NewGuid().ToString("N"));
+    var repo = Directory.CreateDirectory(Path.Combine(root, "repo")).FullName;
+    try
+    {
+        void Git(params string[] args) => GitOperations.Git(repo, args);
+        Git("init", "-b", "master");
+        File.WriteAllText(Path.Combine(repo, "README.md"), "# Fixture");
+        Git("add", ".");
+        Git("-c", "user.name=Factory Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Initial");
+
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "Plan revisions", Path = repo };
+        var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Original diagnostics", AcceptanceCriteria = ["Old criterion"] };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
+
+        FactoryPlan Draft(FactoryGoal snapshot, string title, Guid? revision = null) => new()
+        {
+            GoalId = snapshot.Id, ProjectId = snapshot.ProjectId, Revision = revision,
+            GoalRevision = Planning.GoalRevision(snapshot),
+            Packages = [new() { Title = title, Description = "Reviewed fixture package", Files = ["README.md"] }]
+        };
+        void Reject(Action action, string message)
+        {
+            try { action(); }
+            catch (InvalidOperationException ex) when (ex.Message.Contains(message, StringComparison.OrdinalIgnoreCase)) { return; }
+            throw new Exception("Expected rejection: " + message);
+        }
+
+        var legacy = Draft(goal, "Legacy package");
+        legacy.GoalRevision = "";
+        var path = Planning.PathFor(store, goal.Id);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, Json.Stringify(legacy));
+        Reject(() => Planning.Adopt(store, goal.Id, "local", true), "predates revision tracking");
+        var original = MissionControlManager.SavePlan(store, Draft(goal, "Original package"));
+        Assert(original.Revision is not null && original.GoalRevision == Planning.GoalRevision(goal));
+        var revisedGoal = MissionControlManager.UpdateGoal(store, goal.Id, new GoalInput
+        {
+            ProjectId = project.Id, Objective = goal.Objective, AcceptanceCriteria = ["New criterion"], TokenBudget = 100000
+        });
+        Reject(() => Planning.Adopt(store, goal.Id, "local", true, original.Revision!.Value), "Goal changed");
+        Reject(() => MissionControlManager.SavePlan(store, Draft(goal, "Old editor", original.Revision)), "Goal changed");
+        Assert(store.Read().Jobs.Count == 0);
+
+        var revised = MissionControlManager.SavePlan(store, Draft(revisedGoal, "Revised package", original.Revision));
+        Reject(() => Planning.Adopt(store, goal.Id, "local", true, original.Revision!.Value), "current plan revision");
+        Reject(() => Planning.Adopt(store, goal.Id, "local", true), "current plan revision");
+        Reject(() => MissionControlManager.SavePlan(store, Draft(revisedGoal, "Stale edit", original.Revision)), "Plan changed");
+
+        var paused = new PausedPlanAgent();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var generating = Planning.ProposeAsync(store, project, revisedGoal, paused, timeout.Token, revised.Revision);
+        await Task.WhenAny(paused.Entered.Task, generating).WaitAsync(timeout.Token);
+        Assert(paused.Entered.Task.IsCompletedSuccessfully, "Generation did not reach the fixture runtime");
+        var latest = MissionControlManager.SavePlan(store, Draft(revisedGoal, "Saved during generation", revised.Revision));
+        paused.Resume.SetResult();
+        try
+        {
+            await generating;
+            throw new Exception("Generation overwrote a newer manual plan");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("Plan changed")) { }
+        Assert(MissionControlManager.ReadPlan(store, goal.Id)?.Revision == latest.Revision);
+        var withBudgetChange = MissionControlManager.UpdateGoal(store, goal.Id, new GoalInput
+        {
+            ProjectId = project.Id, Objective = revisedGoal.Objective,
+            AcceptanceCriteria = revisedGoal.AcceptanceCriteria, TokenBudget = 120000
+        });
+        Assert(Planning.GoalRevision(withBudgetChange) == latest.GoalRevision);
+
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var edit = Task.Run(async () =>
+        {
+            await gate.Task;
+            try
+            {
+                MissionControlManager.UpdateGoal(store, goal.Id, new GoalInput
+                {
+                    ProjectId = project.Id, Objective = "Concurrent objective", AcceptanceCriteria = ["New criterion"], TokenBudget = 100000
+                });
+                return true;
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("retain their adopted objective")) { return false; }
+        });
+        var adoption = Task.Run(async () =>
+        {
+            await gate.Task;
+            try { return Planning.Adopt(store, goal.Id, "local", true, latest.Revision!.Value).Count; }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("Goal changed")) { return 0; }
+        });
+        gate.SetResult();
+        await Task.WhenAll(edit, adoption).WaitAsync(timeout.Token);
+        var state = store.Read();
+        Assert(edit.Result ? adoption.Result == 0 && state.Jobs.Count == 0 :
+            adoption.Result == 1 && state.Jobs.Single().Title == "Saved during generation" &&
+            state.Goals.Single().Objective == revisedGoal.Objective);
     }
     finally { try { Directory.Delete(root, true); } catch { } }
 });
@@ -732,6 +834,7 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     Assert(!script.Contains("$('connection-pill')", StringComparison.Ordinal));
     Assert(style.Contains("@keyframes brand-heartbeat", StringComparison.Ordinal));
     Assert(style.Contains("prefers-reduced-motion:reduce", StringComparison.Ordinal));
+    Assert(script.Contains("planRevision:revision", StringComparison.Ordinal));
     Assert(script.Contains("reviewedExistingWork", StringComparison.Ordinal),
         "Direct job intake acknowledgement is not exposed in Mission Control");
     Assert(html.Contains("data-view=\"recovery\"", StringComparison.Ordinal));
@@ -3312,6 +3415,25 @@ internal sealed class FakeAgent : IAgentRuntime
         Directory.CreateDirectory(src);
         File.WriteAllText(Path.Combine(src, "generated.txt"), "Tested content");
         return Task.FromResult(new AgentRunResult { Success = true, FinalText = "Implementation complete", SessionId = "fake-session", InputTokens = 8, OutputTokens = 4, UsageReported = true });
+    }
+}
+
+internal sealed class PausedPlanAgent : IAgentRuntime
+{
+    public TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource Resume { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
+    {
+        Entered.SetResult();
+        await Resume.Task.WaitAsync(cancellation);
+        return new AgentRunResult
+        {
+            Success = true,
+            FinalText = """{"packages":[{"title":"Generated","description":"Fixture proposal","files":["README.md"]}]}"""
+        };
     }
 }
 

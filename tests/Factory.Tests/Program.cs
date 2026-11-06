@@ -151,6 +151,46 @@ Test("Provider routing enforces declared read-only capability", () =>
     catch (ArgumentException) { }
 });
 
+Test("Remote claims read provider routing from the claim transaction", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-provider-route-guard-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "remote-route-guard", Origin = "https://example.com/repo.git" };
+        store.Change(s => s.Projects.Add(project));
+        Assert(!store.ChangeWithProviderRouteGuard((s, projects) =>
+            projects.Contains(project.Id)));
+        store.ReplaceProviderRoutes(project.Id,
+        [
+            new ProjectProviderRoute { ProjectId = project.Id, Role = "review",
+                ProviderId = "claude", Model = "sonnet" }
+        ]);
+        Assert(store.ChangeWithProviderRouteGuard((s, projects) =>
+            projects.Contains(project.Id)), "Remote claim must observe configured project provider routes");
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(s => s.Jobs.Add(job));
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(),
+            "remote:test-worker", 120, local: false));
+        try
+        {
+            store.ReplaceProviderRoutes(project.Id, []);
+            throw new Exception("Routing mutated while remote execution was active");
+        }
+        catch (InvalidOperationException) { }
+        store.Change(s =>
+        {
+            var current = s.Jobs.Single();
+            current.State = JobStates.Blocked;
+            current.LeaseUntil = null;
+        });
+        store.ReplaceProviderRoutes(project.Id, []);
+        Assert(!store.ChangeWithProviderRouteGuard((s, projects) =>
+            projects.Contains(project.Id)));
+    }
+    finally { try { Directory.Delete(home, recursive: true); } catch { } }
+});
+
 Test("Project provider budgets serialize reservations and report real consumption", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-provider-budget-" + Guid.NewGuid().ToString("N"));

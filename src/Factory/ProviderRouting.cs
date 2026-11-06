@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
 
@@ -56,6 +57,9 @@ public sealed class ProviderBudgetReservation
     public string ProviderId { get; set; } = "";
     public long Reserved { get; set; }
     public long Consumed { get; set; }
+    public int OwnerProcessId { get; set; }
+    public string OwnerMachine { get; set; } = "";
+    public DateTimeOffset? OwnerStartedAt { get; set; }
     // active, held, released. Unknown final usage keeps the unspent liability held.
     public string State { get; set; } = "active";
 }
@@ -206,11 +210,44 @@ public static class ProviderBudgetLedger
                 Pending(x => x.ProviderId == profile.Id && x.ProjectId == job.ProjectId));
             if (allowed < BudgetedAgentRuntime.MinimumTurnAllowance)
                 throw new TokenBudgetExceededException("Provider budget does not allow another reserved turn");
+            using var owner = Process.GetCurrentProcess();
             state.ProviderBudgetReservations.Add(new ProviderBudgetReservation
-            { UsageId = usage.Id, ProjectId = job.ProjectId, ProviderId = profile.Id, Reserved = allowed });
+            {
+                UsageId = usage.Id, ProjectId = job.ProjectId, ProviderId = profile.Id, Reserved = allowed,
+                OwnerProcessId = owner.Id, OwnerMachine = Environment.MachineName,
+                OwnerStartedAt = new DateTimeOffset(owner.StartTime.ToUniversalTime())
+            });
         }
         state.ProviderUsages.Add(usage);
         return usage;
+    }
+
+    public static void HoldOrphans(FactoryState state)
+    {
+        foreach (var reservation in state.ProviderBudgetReservations.Where(r => r.State == "active"))
+        {
+            if (!OwnerStopped(reservation)) continue;
+            reservation.State = "held";
+            var usage = state.ProviderUsages.Single(u => u.Id == reservation.UsageId);
+            state.Events.Add(new FactoryEvent { JobId = usage.JobId, Type = "provider_budget_held",
+                Message = "Provider reservation " + reservation.Id + " requires verification after its owner stopped" });
+        }
+    }
+
+    private static bool OwnerStopped(ProviderBudgetReservation reservation)
+    {
+        if (reservation.OwnerProcessId <= 0 || reservation.OwnerStartedAt is null ||
+            !reservation.OwnerMachine.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+            return false;
+        try
+        {
+            using var process = Process.GetProcessById(reservation.OwnerProcessId);
+            return process.HasExited ||
+                new DateTimeOffset(process.StartTime.ToUniversalTime()) != reservation.OwnerStartedAt;
+        }
+        catch (ArgumentException) { return true; }
+        catch (InvalidOperationException) { return false; }
+        catch (System.ComponentModel.Win32Exception) { return false; }
     }
 
     public static long Record(FactoryState state, Guid usageId, AgentTokenUsage total)
@@ -274,69 +311,6 @@ public static class ProviderBudgetLedger
                 }).ToArray()
             };
         }).ToArray();
-}
-
-public sealed class AttributedAgentRuntime(IAgentRuntime inner, StateStore store, Guid jobId,
-    ProviderProfile profile, string role, string model, int reservationTokens,
-    ExecutionFence? fence = null) : IAgentRuntime
-{
-    public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
-        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
-        Action<AgentTokenUsage>? onUsage = null)
-    {
-        var usageId = store.Change(state =>
-        {
-            var job = state.Jobs.Single(j => j.Id == jobId);
-            if (fence is { } claim) JobRecovery.Require(job, claim);
-            return ProviderBudgetLedger.Begin(state, job, profile, role, model, reservationTokens).Id;
-        });
-        using var scope = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
-        bool completed = false;
-        bool capped = false;
-        long lastIn = 0, lastOut = 0;
-        void Observe(AgentTokenUsage usage)
-        {
-            if (usage.InputTokens < lastIn || usage.OutputTokens < lastOut) return;
-            var remaining = store.Change(state =>
-            {
-                var job = state.Jobs.Single(j => j.Id == jobId);
-                if (fence is { } claim) JobRecovery.Require(job, claim);
-                return ProviderBudgetLedger.Record(state, usageId, usage);
-            });
-            lastIn = usage.InputTokens;
-            lastOut = usage.OutputTokens;
-            onUsage?.Invoke(usage);
-            if (remaining <= 0)
-            {
-                capped = true;
-                scope.Cancel();
-            }
-        }
-        try
-        {
-            var result = await inner.RunAsync(directory, prompt, previousSession, scope.Token,
-                onSession, readOnly, Observe);
-            if (result.UsageReported)
-                Observe(new AgentTokenUsage(result.InputTokens, result.OutputTokens));
-            if (capped) throw new TokenBudgetExceededException("Configured provider reservation exhausted");
-            store.Change(state => ProviderBudgetLedger.Finish(state, usageId, result.UsageReported));
-            completed = true;
-            return result;
-        }
-        catch (OperationCanceledException) when (capped && !cancellation.IsCancellationRequested)
-        {
-            throw new TokenBudgetExceededException("Configured provider reservation exhausted");
-        }
-        finally
-        {
-            if (!completed)
-            {
-                // No final provider report: never release an uncertain liability.
-                try { store.Change(state => ProviderBudgetLedger.Finish(state, usageId, false)); }
-                catch (LostExecutionLeaseException) { }
-            }
-        }
-    }
 }
 
 public sealed class ProjectProvidersInput
@@ -443,6 +417,7 @@ public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore st
     {
         if (!readOnly)
             throw new InvalidOperationException("Project-scoped analysis and planning must be read-only");
+        store.Change(ProviderBudgetLedger.HoldOrphans);
         var usageId = store.Change(state =>
         {
             if (!state.Projects.Any(p => p.Id == projectId && p.Status == "active"))

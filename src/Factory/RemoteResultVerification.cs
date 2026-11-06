@@ -259,10 +259,15 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         const string query = """
             query($owner: String!, $name: String!, $base: String!, $sha: GitObjectID!, $pr: Int!) {
               repository(owner: $owner, name: $name) {
-                ref(qualifiedName: $base) { branchProtectionRule { requiresStatusChecks requiredStatusCheckContexts } }
+                ref(qualifiedName: $base) {
+                  refUpdateRule { requiredStatusCheckContexts }
+                  branchProtectionRule {
+                    requiresStatusChecks requiredStatusCheckContexts requiredStatusChecks { context app { databaseId } }
+                  }
+                }
                 object(oid: $sha) { ... on Commit { oid statusCheckRollup {
                   contexts(first: 100) { pageInfo { hasNextPage } nodes {
-                    ... on CheckRun { name isRequired(pullRequestNumber: $pr) conclusion }
+                    ... on CheckRun { name isRequired(pullRequestNumber: $pr) conclusion checkSuite { app { databaseId } } }
                     ... on StatusContext { context isRequired(pullRequestNumber: $pr) state }
                   } }
                 } } }
@@ -295,25 +300,61 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             .ToHashSet(StringComparer.Ordinal);
 
         // The rollup only contains checks that exist. Read the branch policy independently.
-        var protection = repo.GetProperty("ref").GetProperty("branchProtectionRule");
-        if (protection.ValueKind != JsonValueKind.Null && protection.GetProperty("requiresStatusChecks").GetBoolean())
-            foreach (var context in protection.GetProperty("requiredStatusCheckContexts").EnumerateArray())
-                RequireSuccessfulContext(context, successful);
+        VerifyClassicProtection(repo.GetProperty("ref"), successful, checks);
 
         var rulesResult = await _runGitHub(
-            ["api", $"repos/{repository}/rules/branches/{Uri.EscapeDataString(baseBranch)}"], 45, ct);
+            ["api", "--paginate", "--slurp", $"repos/{repository}/rules/branches/{Uri.EscapeDataString(baseBranch)}?per_page=100"], 45, ct);
         if (!rulesResult.Ok) throw new InvalidOperationException("Cannot verify required GitHub branch rules");
         using var rules = JsonDocument.Parse(rulesResult.Output);
-        foreach (var rule in rules.RootElement.EnumerateArray())
+        if (rules.RootElement.GetArrayLength() == 0)
+            throw new InvalidOperationException("GitHub returned no branch rules page");
+        foreach (var rule in rules.RootElement.EnumerateArray().SelectMany(page => page.EnumerateArray()))
         {
             var type = rule.GetProperty("type").GetString();
             if (type == "workflows")
                 throw new InvalidOperationException("Required GitHub workflow rules cannot be verified from check contexts");
             if (type != "required_status_checks") continue;
             foreach (var check in rule.GetProperty("parameters").GetProperty("required_status_checks").EnumerateArray())
-                RequireSuccessfulContext(check.GetProperty("context"), successful);
+            {
+                var context = check.GetProperty("context");
+                RequireSuccessfulContext(context, successful);
+                if (check.TryGetProperty("integration_id", out var appId) && appId.ValueKind != JsonValueKind.Null)
+                    RequireSuccessfulApp(context, appId, checks);
+            }
         }
         return successful;
+    }
+
+    private static void VerifyClassicProtection(JsonElement branch, HashSet<string> successful, JsonElement[] checks)
+    {
+        const string unavailable = "Cannot verify classic GitHub required check sources; use a controller credential that can read branch protection";
+        var visibleRule = branch.GetProperty("refUpdateRule");
+        var visibleContexts = visibleRule.ValueKind == JsonValueKind.Null
+            ? default : visibleRule.GetProperty("requiredStatusCheckContexts");
+        var protection = branch.GetProperty("branchProtectionRule");
+        if (protection.ValueKind == JsonValueKind.Null || !protection.GetProperty("requiresStatusChecks").GetBoolean())
+        {
+            // Read-only viewers can see the context names even when GitHub hides the rule and app pins.
+            if (visibleContexts.ValueKind == JsonValueKind.Array && visibleContexts.GetArrayLength() > 0)
+                throw new InvalidOperationException(unavailable);
+            return;
+        }
+
+        var required = protection.GetProperty("requiredStatusChecks");
+        if (required.ValueKind != JsonValueKind.Array) throw new InvalidOperationException(unavailable);
+        var described = new HashSet<string?>(StringComparer.Ordinal);
+        foreach (var check in required.EnumerateArray())
+        {
+            var context = check.GetProperty("context");
+            RequireSuccessfulContext(context, successful);
+            described.Add(context.GetString());
+            var app = check.GetProperty("app");
+            if (app.ValueKind != JsonValueKind.Null)
+                RequireSuccessfulApp(context, app.GetProperty("databaseId"), checks);
+        }
+        if (protection.GetProperty("requiredStatusCheckContexts").EnumerateArray().Any(c => !described.Contains(c.GetString())) ||
+            (visibleContexts.ValueKind == JsonValueKind.Array && visibleContexts.EnumerateArray().Any(c => !described.Contains(c.GetString()))))
+            throw new InvalidOperationException(unavailable);
     }
 
     private static void RequireSuccessfulContext(JsonElement context, HashSet<string> successful)
@@ -321,5 +362,17 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         var name = context.GetString();
         if (string.IsNullOrWhiteSpace(name) || !successful.Contains(name))
             throw new InvalidOperationException("Required GitHub check has no successful result at the verified commit: " + name);
+    }
+
+    private static void RequireSuccessfulApp(JsonElement context, JsonElement appId, JsonElement[] checks)
+    {
+        var name = context.GetString();
+        if (appId.ValueKind != JsonValueKind.Number || !appId.TryGetInt64(out var expected) || expected <= 0 ||
+            !checks.Any(check => check.TryGetProperty("name", out var checkName) && checkName.GetString() == name &&
+                check.TryGetProperty("checkSuite", out var suite) && suite.ValueKind == JsonValueKind.Object &&
+                suite.TryGetProperty("app", out var app) && app.ValueKind == JsonValueKind.Object &&
+                app.TryGetProperty("databaseId", out var actual) && actual.ValueKind == JsonValueKind.Number &&
+                actual.TryGetInt64(out var id) && id == expected))
+            throw new InvalidOperationException("Required GitHub check has no successful result from its configured app: " + name);
     }
 }

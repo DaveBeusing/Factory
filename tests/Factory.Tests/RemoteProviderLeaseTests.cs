@@ -227,7 +227,8 @@ internal static class RemoteProviderLeaseTests
 
         GitHubWorkerResultVerifier Verifier(bool forcePush = false, bool wrongCheckCommit = false, bool wrongBase = false,
             bool intermediateHead = false, bool includeSecurityResult = false, bool requireClassicSecurity = false,
-            bool requireRulesetSecurity = false)
+            bool requireRulesetSecurity = false, int? requiredApp = null, int? observedApp = null,
+            bool hideClassicDetails = false)
         {
             var currentHead = Head;
             return new GitHubWorkerResultVerifier((args, _, _) =>
@@ -250,21 +251,35 @@ internal static class RemoteProviderLeaseTests
                 else if (args is ["api", var comparePath] && comparePath == $"repos/{repository}/compare/{Base}...{Head}?per_page=1")
                     output = Json.Stringify(new { base_commit = new { sha = wrongBase ? Tree : Base },
                         files = new[] { new { filename = "fixture.txt", status = "modified" } } });
-                else if (args is ["api", var rulesPath] && rulesPath == $"repos/{repository}/rules/branches/master")
+                else if (args is ["api", "--paginate", "--slurp", var rulesPath] &&
+                         rulesPath == $"repos/{repository}/rules/branches/master?per_page=100")
                     output = requireRulesetSecurity
-                        ? """[{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"security"}]}}]"""
-                        : "[]";
+                        ? Json.Stringify(new object[][] {
+                            [new { type = "deletion" }],
+                            [new { type = "required_status_checks", parameters = new {
+                                required_status_checks = new[] { new { context = "security", integration_id = requiredApp } }
+                            } }]
+                        })
+                        : "[[]]";
                 else if (args is ["api", "graphql", ..] && args.Contains("sha=" + Head) && args.Contains("base=refs/heads/master"))
                 {
                     if (intermediateHead) currentHead = Base;
                     var nodes = new List<object> { new { name = "build", isRequired = true,
                         conclusion = intermediateHead ? null : "SUCCESS" } };
                     if (includeSecurityResult)
-                        nodes.Add(new { context = "security", isRequired = true, state = "SUCCESS" });
+                        nodes.Add(observedApp is int app
+                            ? new { name = "security", isRequired = true, conclusion = "SUCCESS",
+                                checkSuite = new { app = new { databaseId = app } } }
+                            : (object)new { context = "security", isRequired = true, state = "SUCCESS" });
                     output = Json.Stringify(new { data = new { repository = new {
-                        @ref = new { branchProtectionRule = requireClassicSecurity ? new {
-                            requiresStatusChecks = true, requiredStatusCheckContexts = new[] { "security" }
-                        } : null },
+                        @ref = new {
+                            refUpdateRule = requireClassicSecurity ? new { requiredStatusCheckContexts = new[] { "security" } } : null,
+                            branchProtectionRule = requireClassicSecurity && !hideClassicDetails ? new {
+                                requiresStatusChecks = true, requiredStatusCheckContexts = new[] { "security" },
+                                requiredStatusChecks = new[] { new { context = "security",
+                                    app = requiredApp is int expected ? new { databaseId = expected } : null } }
+                            } : null
+                        },
                         @object = new {
                         oid = wrongCheckCommit ? Base : Head, statusCheckRollup = new { contexts = new {
                             pageInfo = new { hasNextPage = false },
@@ -286,8 +301,19 @@ internal static class RemoteProviderLeaseTests
         await RejectAsync(Verifier(forcePush: false, wrongBase: true), "different base commit");
         await RejectAsync(Verifier(forcePush: false, intermediateHead: true), "missing, pending or failing");
         await RejectAsync(Verifier(requireClassicSecurity: true), "no successful result at the verified commit: security");
+        await RejectAsync(Verifier(requireClassicSecurity: true, hideClassicDetails: true, includeSecurityResult: true,
+                observedApp: 123), "Cannot verify classic GitHub required check sources");
         await RejectAsync(Verifier(requireRulesetSecurity: true), "no successful result at the verified commit: security");
         await Verifier(includeSecurityResult: true, requireClassicSecurity: true, requireRulesetSecurity: true)
+            .VerifyAsync(project, job, status, CancellationToken.None);
+        await RejectAsync(Verifier(includeSecurityResult: true, requireClassicSecurity: true, requiredApp: 123, observedApp: 456),
+            "no successful result from its configured app: security");
+        await RejectAsync(Verifier(includeSecurityResult: true, requireRulesetSecurity: true, requiredApp: 123, observedApp: 456),
+            "no successful result from its configured app: security");
+        await RejectAsync(Verifier(includeSecurityResult: true, requireRulesetSecurity: true, requiredApp: 123),
+            "no successful result from its configured app: security");
+        await Verifier(includeSecurityResult: true, requireClassicSecurity: true, requireRulesetSecurity: true,
+                requiredApp: 123, observedApp: 123)
             .VerifyAsync(project, job, status, CancellationToken.None);
 
         async Task RejectAsync(GitHubWorkerResultVerifier verifier, string reason)

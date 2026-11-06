@@ -55,11 +55,20 @@ internal static class RemoteProviderLeaseTests
             Check(WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion) is null,
                 "Disabled mixed routing accepted a claim");
             settings.EnableRemoteProviderRouting = true;
-            Check(WorkerAuthentication.Authorized("POST", "/api/executor/turn", "Bearer " + token, null, settings),
-                "Dedicated executor authentication failed");
-            Check(!WorkerAuthentication.Authorized("POST", "/api/executor/turn",
-                "Bearer " + WorkerAuthentication.CreateToken(settings.WorkerTokenKey, worker), worker, settings),
-                "Worker token authorized the executor");
+            var workerToken = WorkerAuthentication.CreateToken(settings.WorkerTokenKey, worker);
+            foreach (var path in new[] { "/api/executor/turn", "/api/executor/turn/", "/API/Executor/Turn/" })
+            {
+                Check(WorkerAuthentication.Authorized("POST", path, "Bearer " + token, null, settings),
+                    "Dedicated executor authentication failed for " + path);
+                Check(!WorkerAuthentication.Authorized("POST", path, "Bearer " + settings.ApiToken, null, settings),
+                    "Administrator token authorized the executor at " + path);
+                Check(!WorkerAuthentication.Authorized("POST", path, "Bearer " + workerToken, worker, settings),
+                    "Worker token authorized the executor at " + path);
+                Check(!WorkerAuthentication.Authorized("GET", path, "Bearer " + token, null, settings),
+                    "Unexpected executor request method was authorized");
+            }
+            Check(!WorkerAuthentication.Authorized("POST", "/api/executor/unknown/", "Bearer " + settings.ApiToken, null, settings),
+                "An unknown executor endpoint inherited administrator authorization");
             Check(!WorkerAuthentication.Authorized("POST", "/api/worker/turn", "Bearer " + token, worker, settings),
                 "Executor credential authorized a worker request");
 
@@ -146,6 +155,82 @@ internal static class RemoteProviderLeaseTests
                     if (file.IsReadOnly) file.IsReadOnly = false;
             scratch.Delete(recursive: true);
         }
+    }
+
+    public static async Task VerifyMovingPullHeadAsync()
+    {
+        const string repository = "example/fixture";
+        var project = new ProjectInfo
+        {
+            Origin = "https://github.com/" + repository, BaseBranch = "master",
+            Checks = [new CheckCommand { Name = "build" }]
+        };
+        var job = new FactoryJob
+        {
+            ProjectId = project.Id, Mode = JobExecutionModes.Remote, Attempt = 1, State = JobStates.PrReady,
+            HeadSha = Head, PrUrl = project.Origin + "/pull/1", ExpectedPaths = ["fixture.txt"]
+        };
+        job.Branch = $"factory/{job.Id:N}";
+        var status = new WorkerStatus
+        {
+            Job = job, ProviderLeaseId = Guid.NewGuid(),
+            Evidence = Json.Stringify(new
+            {
+                jobId = job.Id, job.Attempt, outcome = "ready", commit = Head,
+                report = new
+                {
+                    passed = true, headSha = Head, findings = Array.Empty<string>(),
+                    checks = new[] { new { name = "build", exitCode = 0 } },
+                    reviews = new Dictionary<string, string>
+                    {
+                        ["code"] = "PASS\nfixture", ["architecture"] = "PASS\nfixture",
+                        ["security"] = "PASS\nfixture", ["ux"] = "PASS\nfixture"
+                    }
+                }
+            })
+        };
+
+        GitHubWorkerResultVerifier Verifier(bool forcePush)
+        {
+            var currentHead = Head;
+            return new GitHubWorkerResultVerifier((args, _, _) =>
+            {
+                string output;
+                if (args is ["api", var commitPath] && commitPath == $"repos/{repository}/git/commits/{Head}")
+                {
+                    if (forcePush) currentHead = Base;
+                    output = Json.Stringify(new { sha = Head, tree = new { sha = Tree } });
+                }
+                else if (args is ["api", var pullPath] && pullPath == $"repos/{repository}/pulls/1")
+                {
+                    var repo = new { full_name = repository };
+                    output = Json.Stringify(new
+                    {
+                        state = "open", @base = new { repo, @ref = "master" },
+                        head = new { repo, @ref = job.Branch, sha = currentHead }
+                    });
+                }
+                else if (args is ["api", "--paginate", "--slurp", _])
+                    output = """[[{"filename":"fixture.txt"}]]""";
+                else if (args is ["pr", "checks", ..])
+                    output = """[{"name":"build","state":"SUCCESS"}]""";
+                else
+                    throw new Exception("Unexpected GitHub request: " + string.Join(" ", args));
+                return Task.FromResult(new CommandResult(0, output, ""));
+            });
+        }
+
+        var stable = await Verifier(forcePush: false).VerifyAsync(project, job, status, CancellationToken.None);
+        Check(stable.TreeSha == Tree, "Stable PR did not return the verified tree");
+        try
+        {
+            await Verifier(forcePush: true).VerifyAsync(project, job, status, CancellationToken.None);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("head commit differs", StringComparison.Ordinal))
+        {
+            return;
+        }
+        throw new Exception("A force-push during the tree lookup was accepted");
     }
 
     private static async Task VerifyExecutorAsync(StateStore store, FactorySettings settings, string scratch,

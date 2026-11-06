@@ -10,6 +10,7 @@ if (args is ["--verify-windows-package", var windowsPackage])
 if (args is ["--verify-remote-provider-leases"])
 {
     await RemoteProviderLeaseTests.RunAsync();
+    await RemoteProviderLeaseTests.VerifyMovingPullHeadAsync();
     Console.WriteLine("PASS remote provider leases and executor");
     return 0;
 }
@@ -1569,6 +1570,8 @@ Test("Unknown worker capabilities and foreign grants are rejected", () =>
 
 await TestAsync("Remote provider leases fence route, model, budget and completion evidence",
     RemoteProviderLeaseTests.RunAsync);
+await TestAsync("Remote provider verification rejects a force-push during the commit tree lookup",
+    RemoteProviderLeaseTests.VerifyMovingPullHeadAsync);
 
 Test("Remote claims never take local jobs", () =>
 {

@@ -43,3 +43,27 @@ The controller checks each required context at the verified PR head. For classic
 The controller reads every page of active rules. When GitHub exposes classic required contexts but hides their source configuration, verification stops. Use a controller credential that can read the classic branch protection details for that repository.
 
 The proposed policy for `master` requires a pull request, the `build-and-test` check from GitHub Actions, and an independent approval. Stale approvals should be dismissed on new commits. Test this policy in a disposable or explicitly authorized repository first. Verify that a missing result, an untrusted same-name result, an unapproved push and a changed PR head fail, and that the approved PR with the trusted check can merge. Record any emergency override against the exact head and the operator who authorized it. Applying repository settings requires a separate operator decision.
+
+### LT-02 test results
+
+The validation started from Factory `master` at `b6f22ea` on 2026-11-06. GitHub listed no open Factory PRs and [#22](https://github.com/DaveBeusing/Factory/issues/22) as the only open issue. Factory `master` had no active rules. All test changes used the [separate synthetic repository](https://github.com/DaveBeusing/factory-lt02-ruleset-test).
+
+The [full test ruleset](https://github.com/DaveBeusing/factory-lt02-ruleset-test/rules/26723921) requires one approving review, dismisses stale reviews, blocks force-pushes and requires an up-to-date branch and `build-and-test` from GitHub Actions app `15368`. It has no bypass actors. The [check-only control](https://github.com/DaveBeusing/factory-lt02-ruleset-test/rules/26723923) targets a different branch and requires zero approvals.
+
+| Test | Observed result |
+| --- | --- |
+| Missing check | GitHub rejected the [control PR](https://github.com/DaveBeusing/factory-lt02-ruleset-test/pull/2) with HTTP 405 and reported the expected `build-and-test` check. |
+| Same-name result from the wrong source | A successful commit status posted by the operator still produced HTTP 405 because the expected GitHub App had not set it. |
+| Approval gate and direct push | With a trusted status, the [full-policy PR](https://github.com/DaveBeusing/factory-lt02-ruleset-test/pull/1) still returned HTTP 405 for missing approval. A direct push to the full-policy branch was rejected with `GH013`. A direct push with the trusted status to the zero-approval control branch succeeded. |
+| Changed PR head | The [second control PR](https://github.com/DaveBeusing/factory-lt02-ruleset-test/pull/3) rejected a merge with the old SHA with HTTP 409 and rejected the new head with HTTP 405 until it had its own status. |
+| Trusted source control | A [workflow-issued commit status](https://github.com/DaveBeusing/factory-lt02-ruleset-test/actions/runs/42287304012) from the expected App allowed the exact new head to merge in the second control PR. |
+
+The initial positive control used a commit status. GitHub listed the successful manually dispatched [workflow job](https://github.com/DaveBeusing/factory-lt02-ruleset-test/actions/runs/42286568776) and the [explicit check run](https://github.com/DaveBeusing/factory-lt02-ruleset-test/actions/runs/42287466374) in the commit's REST check listing. In both cases the full-policy PR still reported the required check as missing. The initial synthetic PR-event test did not start a workflow. Factory's verifier requires a check run with a verifiable app ID for pinned checks.
+
+### Owner-only rollout
+
+With no second reviewer available, the owner approved two separate rulesets. The review ruleset requires one approval and dismisses stale reviews. It has a `pull_request` bypass for the `DaveBeusing` user only. The other ruleset blocks force-pushes and requires the up-to-date `build-and-test` check from GitHub Actions app `15368`. It has an empty bypass list.
+
+In [synthetic PR #4](https://github.com/DaveBeusing/factory-lt02-ruleset-test/pull/4), GitHub returned HTTP 405 for a missing check and again for a successful same-name status from the wrong source. On the next head, a [pull-request workflow](https://github.com/DaveBeusing/factory-lt02-ruleset-test/actions/runs/42288480276) produced a successful `build-and-test` Check Run from app `15368`. A direct push of that same green head returned `GH013`. The exact head then merged through the regular PR API as `d7a9b72`, with an empty review list and no admin override.
+
+After this test, Factory activated the [required check ruleset](https://github.com/DaveBeusing/Factory/rules/26724496) and [review ruleset](https://github.com/DaveBeusing/Factory/rules/26724498) on `refs/heads/master` at `b6f22ea`.

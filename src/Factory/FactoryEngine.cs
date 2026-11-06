@@ -212,12 +212,22 @@ public sealed class FactoryEngine
             ? new(_settings.GoalExtensionIncrementTokens, _settings.GoalExtensionThresholdTokens,
                 _settings.MaxJobReservationTokens)
             : null;
-        var runtime = new BudgetedAgentRuntime(
-            _runtimeOverridden ? _agent : AgentRuntimeFactory.Create(_settings, j.Risk),
-            _store, id, fence, extensionPolicy,
-            _remoteBudgetExtension is null ? null : token => _remoteBudgetExtension(id, token),
-            _settings.GoalExtensionThresholdTokens);
-        var qualityEngine = new QualityEngine(runtime);
+        IAgentRuntime RuntimeFor(string role)
+        {
+            var snapshot = _store.Read();
+            var selected = _runtimeOverridden ? (ProviderSelection?)null :
+                ProviderRouter.Select(_settings, snapshot, p.Id, role, j.Risk);
+            var meter = selected is { } choice
+                ? new JobProviderMeter(ProviderRouter.Resolve(_settings, snapshot, p.Id, role),
+                    role, choice.Model, _settings.GoalReservationTokens)
+                : null;
+            return new BudgetedAgentRuntime(selected?.Runtime ?? _agent, _store, id, fence, extensionPolicy,
+                _remoteBudgetExtension is null ? null : token => _remoteBudgetExtension(id, token),
+                _settings.GoalExtensionThresholdTokens, meter);
+        }
+        var runtime = RuntimeFor("builder");
+        var qualityEngine = new QualityEngine(runtime,
+            _runtimeOverridden ? null : role => RuntimeFor("review:" + role));
         var worktree = _git.Prepare(p, j);
         UpdateOwned(id, fence, x =>
         {

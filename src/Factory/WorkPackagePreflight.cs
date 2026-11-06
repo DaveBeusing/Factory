@@ -21,6 +21,9 @@ public sealed class WorkPackagePreflightReport
     public List<OpenWorkCandidate> OpenPullRequests { get; set; } = [];
     public bool PullRequestsChecked { get; set; }
     public string PullRequestCheckNote { get; set; } = "";
+    public List<OpenWorkCandidate> OpenIssues { get; set; } = [];
+    public bool IssuesChecked { get; set; }
+    public string IssueCheckNote { get; set; } = "";
 }
 
 public sealed class ExistingCodeCandidate
@@ -127,52 +130,51 @@ public static class WorkPackagePreflight
                 .ToList();
         }
 
-        // GitHub PR inspection is optional in local-first deployments. Unknown is
-        // explicitly recorded; a missing gh CLI or authentication is not 'no open PR'.
         var origin = GitOperations.Origin(project.Path) ?? "";
-        if (!(origin.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
-              origin.StartsWith("git@github.com:", StringComparison.OrdinalIgnoreCase) ||
-              origin.StartsWith("ssh://git@github.com/", StringComparison.OrdinalIgnoreCase)))
-        {
-            report.PullRequestCheckNote = "GitHub PR inventory not applicable or origin unavailable.";
-        }
-        else
-        {
-            try
-            {
-                var result = Commands.Run("gh",
-                    ["pr", "list", "--state", "open", "--base", "master",
-                     "--json", "number,title,headRefName,url", "--limit", "100"],
-                    project.Path, 20);
-                if (!result.Ok)
-                    report.PullRequestCheckNote = "Open PR inventory unavailable; check the hosting service before adoption.";
-                else
-                {
-                    using var document = JsonDocument.Parse(result.Output);
-                    if (document.RootElement.ValueKind != JsonValueKind.Array)
-                        throw new JsonException("Unexpected pull-request response");
-                    report.PullRequestsChecked = document.RootElement.GetArrayLength() < 100;
-                    if (!report.PullRequestsChecked)
-                        report.PullRequestCheckNote = "Open PR inventory reached its 100-item limit; manually check for further PRs.";
-                    report.OpenPullRequests = document.RootElement.EnumerateArray()
-                        .Select(pr => new OpenWorkCandidate
-                        {
-                            Number = pr.GetProperty("number").GetInt32(),
-                            Title = pr.GetProperty("title").GetString() ?? "",
-                            HeadBranch = pr.GetProperty("headRefName").GetString() ?? "",
-                            Url = pr.GetProperty("url").GetString() ?? ""
-                        })
-                        .Where(pr => terms.Any(term =>
-                            pr.Title.Contains(term, StringComparison.OrdinalIgnoreCase)))
-                        .Take(30).ToList();
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                report.PullRequestCheckNote = "Open PR inventory unavailable; inspect open PRs manually.";
-            }
-        }
+        var github = origin.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
+                     origin.StartsWith("git@github.com:", StringComparison.OrdinalIgnoreCase) ||
+                     origin.StartsWith("ssh://git@github.com/", StringComparison.OrdinalIgnoreCase);
+        (report.OpenPullRequests, report.PullRequestsChecked, report.PullRequestCheckNote) =
+            InspectOpenWork(project, terms, github, pullRequests: true);
+        (report.OpenIssues, report.IssuesChecked, report.IssueCheckNote) =
+            InspectOpenWork(project, terms, github, pullRequests: false);
         return report;
+    }
+
+    private static (List<OpenWorkCandidate> Matches, bool Checked, string Note) InspectOpenWork(
+        ProjectInfo project, List<string> terms, bool github, bool pullRequests)
+    {
+        var label = pullRequests ? "Open PR" : "Open issue";
+        if (!github) return ([], false, label + " inventory not applicable or origin unavailable.");
+        const int limit = 100;
+        var args = pullRequests
+            ? new[] { "pr", "list", "--state", "open", "--base", "master",
+                "--json", "number,title,headRefName,url", "--limit", limit.ToString() }
+            : new[] { "issue", "list", "--state", "open",
+                "--json", "number,title,url", "--limit", limit.ToString() };
+        try
+        {
+            var result = Commands.Run("gh", args, project.Path, 20);
+            if (result.Ok)
+            {
+                using var document = JsonDocument.Parse(result.Output);
+                var entries = document.RootElement;
+                var complete = entries.GetArrayLength() < limit;
+                var matches = entries.EnumerateArray()
+                    .Select(item => new OpenWorkCandidate
+                    {
+                        Number = item.GetProperty("number").GetInt32(),
+                        Title = item.GetProperty("title").GetString() ?? "",
+                        HeadBranch = pullRequests ? item.GetProperty("headRefName").GetString() ?? "" : "",
+                        Url = item.GetProperty("url").GetString() ?? ""
+                    })
+                    .Where(item => terms.Any(term => item.Title.Contains(term, StringComparison.OrdinalIgnoreCase)))
+                    .ToList();
+                return (matches, complete, complete ? "" : label + " inventory reached its 100-item limit.");
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { }
+        return ([], false, label + " inventory unavailable; inspect the hosting service before adoption.");
     }
 
     public static WorkPackagePreflightReport? InspectDirectJob(

@@ -445,10 +445,7 @@ public static class MissionControlManager
         var p = s.Projects.Single(p => p.Id == goal.ProjectId);
         plan.Preflight = WorkPackagePreflight.Inspect(s, p, goal);
         plan.BaseCommit = plan.Preflight.BaseCommit;
-        var path = Planning.PathFor(store, goal.Id);
-        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllText(path + ".tmp", Json.Stringify(plan));
-        File.Move(path + ".tmp", path, overwrite: true);
+        Planning.Write(store, plan);
         store.Event(null, "plan_saved", goal.Id.ToString());
         return plan;
     }

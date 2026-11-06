@@ -1,4 +1,14 @@
+using System.Diagnostics;
 using Factory;
+
+if (args is ["--provider-crash-fixture", var fixtureHome, var projectArg, var goalArg])
+{
+    var store = new StateStore(fixtureHome);
+    var runtime = new ProjectScopedAgentRuntime(new ProviderCrashFixture(), store,
+        Guid.Parse(projectArg), Guid.Parse(goalArg), new ProviderProfile(), "planner", "fixture", 512);
+    await runtime.RunAsync(fixtureHome, "fixture", "", CancellationToken.None, readOnly: true);
+    return 1;
+}
 
 var results = new List<(string Name, bool Passed, string Error)>();
 void Test(string name, Action test)
@@ -29,6 +39,339 @@ void GrantRemoteWorker(StateStore store, string workerId, params Guid[] projectI
         ]
     });
 }
+
+Test("Provider routing is project-scoped and rejects unsupported builder capabilities", () =>
+{
+    var project = new ProjectInfo { Name = "multi-provider" };
+    var state = new FactoryState();
+    state.Projects.Add(project);
+    var settings = new FactorySettings
+    {
+        Providers =
+        [
+            new ProviderProfile { Id = "codex", Kind = "codex" },
+            new ProviderProfile { Id = "local-model", Kind = "ollama",
+                Model = "review-model", Endpoint = "http://127.0.0.1:11434" }
+        ]
+    };
+    state.ProviderAssignments.Add(new ProviderAssignment
+        { ProjectId = project.Id, Role = "review", ProviderId = "local-model" });
+    Assert(ProviderRouter.Select(settings, state, project.Id, "review:security", "high").Id == "local-model");
+    Assert(ProviderRouter.Select(settings, state, project.Id, "builder", "high").Id == "codex");
+    state.ProviderAssignments.Add(new ProviderAssignment
+        { ProjectId = project.Id, Role = "builder", ProviderId = "local-model" });
+    try
+    {
+        ProviderRouter.Select(settings, state, project.Id, "builder", "high");
+        throw new Exception("Text-only provider was allowed to modify source");
+    }
+    catch (InvalidOperationException) { }
+    try
+    {
+        ProviderRouter.Validate(new ProviderProfile
+            { Id = "remote", Kind = "ollama", Model = "unsafe", Endpoint = "http://example.com:11434" },
+            "planner");
+        throw new Exception("Non-loopback Ollama endpoint was allowed");
+    }
+    catch (InvalidOperationException) { }
+});
+
+Test("Provider budget reservations guard concurrent capacity and preserve unknown usage", () =>
+{
+    var p = new ProjectInfo { Name = "budgeted" };
+    var j = new FactoryJob { ProjectId = p.Id };
+    var state = new FactoryState();
+    state.Projects.Add(p);
+    state.Jobs.Add(j);
+    var provider = new ProviderProfile { Id = "limited", Kind = "codex", TokenLimit = 1000 };
+    state.ProviderBudgetLimits.Add(new ProviderBudgetLimit
+        { ProjectId = p.Id, ProviderId = provider.Id, TokenLimit = 800 });
+    var first = ProviderBudgetLedger.Begin(state, j, provider, "builder", "", 600);
+    Assert(state.ProviderBudgetReservations.Single().Reserved == 600);
+    try
+    {
+        ProviderBudgetLedger.Begin(state, j, provider, "review:code", "", 600);
+        throw new Exception("Reserved provider capacity was oversubscribed");
+    }
+    catch (TokenBudgetExceededException) { }
+    Assert(ProviderBudgetLedger.Record(state, first.Id, new AgentTokenUsage(150, 100)) == 350);
+    ProviderBudgetLedger.Finish(state, first.Id, false);
+    Assert(state.ProviderBudgetReservations.Single().State == "held");
+    try
+    {
+        ProviderBudgetLedger.Begin(state, j, provider, "review:code", "", 300);
+        throw new Exception("Held budget liability was released without reconciliation");
+    }
+    catch (TokenBudgetExceededException) { }
+    ProviderBudgetLedger.Finish(state, first.Id, true);
+    var second = ProviderBudgetLedger.Begin(state, j, provider, "review:code", "", 300);
+    Assert(state.ProviderBudgetReservations.Last().Reserved == 300);
+    ProviderBudgetLedger.Record(state, second.Id, new AgentTokenUsage(50, 25));
+    ProviderBudgetLedger.Finish(state, second.Id, true);
+    Assert(state.ProviderBudgetReservations.Last().State == "released");
+});
+
+Test("Provider usage, assignments and local budgets persist in SQLite", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-provider-schema-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var p = new ProjectInfo { Name = "persistence" };
+        var j = new FactoryJob { ProjectId = p.Id };
+        store.Change(s =>
+        {
+            s.Projects.Add(p); s.Jobs.Add(j);
+            s.ProviderAssignments.Add(new ProviderAssignment
+                { ProjectId = p.Id, Role = "planner", ProviderId = "codex" });
+            s.ProviderBudgetLimits.Add(new ProviderBudgetLimit
+                { ProjectId = p.Id, ProviderId = "codex", TokenLimit = 20000 });
+            var usage = ProviderBudgetLedger.Begin(s, j,
+                new ProviderProfile { Id = "codex", TokenLimit = 20000 }, "builder", "", 1024);
+            ProviderBudgetLedger.Record(s, usage.Id, new AgentTokenUsage(120, 30));
+            ProviderBudgetLedger.Finish(s, usage.Id, true);
+        });
+        var state = new StateStore(home).Read();
+        Assert(state.ProviderAssignments.Single().Role == "planner");
+        Assert(state.ProviderBudgetLimits.Single().TokenLimit == 20000);
+        Assert(state.ProviderUsages.Single().InputTokens == 120);
+        Assert(state.ProviderBudgetReservations.Single().State == "released");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Provider-scoped planning is charged to the goal and attributed model", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-provider-planning-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "planning" };
+        var goal = new FactoryGoal { ProjectId = project.Id, TokenBudget = 5000 };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
+        var profile = new ProviderProfile { Id = "planner-model", Kind = "codex", TokenLimit = 1000 };
+        var tracked = new ProjectScopedAgentRuntime(new FakeAgent(), store,
+            project.Id, goal.Id, profile, "planner", "planning-v1", 512);
+        var result = tracked.RunAsync(home, "Review this bounded context", "", CancellationToken.None,
+            readOnly: true).GetAwaiter().GetResult();
+        Assert(result.Success && result.UsageReported);
+        var state = store.Read();
+        var entry = state.ProviderUsages.Single();
+        Assert(entry.JobId is null && entry.Role == "planner" && entry.Model == "planning-v1");
+        Assert(entry.InputTokens == 8 && entry.OutputTokens == 4 && entry.FinalUsageReported);
+        Assert(state.ProviderBudgetReservations.Single().State == "released");
+        using var summary = System.Text.Json.JsonDocument.Parse(Json.Stringify(GoalBudgetLedger.Summary(state, goal.Id)));
+        var provider = summary.RootElement.GetProperty("providers")[0];
+        Assert(provider.GetProperty("providerId").GetString() == profile.Id);
+        Assert(provider.GetProperty("inputTokens").GetInt64() == 8 &&
+            provider.GetProperty("outputTokens").GetInt64() == 4);
+        Assert(GoalBudgetLedger.Available(state, goal.Id) == 4988,
+            "Provider planning consumption was omitted from goal liability");
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Controller crash holds provider reservations and permits verified recovery", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-provider-crash-" + Guid.NewGuid().ToString("N"));
+    Process? controller = null;
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "crash fixture" };
+        var goal = new FactoryGoal { ProjectId = project.Id, TokenBudget = 2000 };
+        store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
+        var start = new ProcessStartInfo(Environment.ProcessPath!)
+        {
+            UseShellExecute = false, CreateNoWindow = true
+        };
+        if (Path.GetFileNameWithoutExtension(start.FileName).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
+            start.ArgumentList.Add(System.Reflection.Assembly.GetExecutingAssembly().Location);
+        foreach (var arg in new[] { "--provider-crash-fixture", home, project.Id.ToString(), goal.Id.ToString() })
+            start.ArgumentList.Add(arg);
+        controller = Process.Start(start) ?? throw new Exception("Cannot start fixture controller");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+        var marker = Path.Combine(home, "provider-dispatched");
+        while (!File.Exists(marker) && !controller.HasExited)
+            await Task.Delay(50, timeout.Token);
+        Assert(File.Exists(marker) && !controller.HasExited, "Provider turn never started");
+
+        JobRecovery.QuarantineExpired(store);
+        var reservation = store.Read().ProviderBudgetReservations.Single();
+        Assert(reservation.State == "active" && reservation.OwnerProcessId == controller.Id,
+            "Recovery changed a live controller's reservation");
+        controller.Kill();
+        await controller.WaitForExitAsync(timeout.Token);
+
+        var reopened = new StateStore(home);
+        JobRecovery.QuarantineExpired(reopened);
+        JobRecovery.QuarantineExpired(reopened);
+        var recovered = reopened.Read();
+        Assert(recovered.ProviderBudgetReservations.Single().State == "held");
+        Assert(recovered.Events.Count(e => e.Type == "provider_budget_held") == 1);
+        Assert(GoalBudgetLedger.Available(recovered, goal.Id) == 1488, "Unknown usage was released");
+        ProviderBudgetReconciliation.Reconcile(reopened, reservation.Id, new()
+        {
+            Reviewed = true, Reason = "Fixture verified final use", FinalInputTokens = 15, FinalOutputTokens = 5
+        });
+        var runtime = new ProjectScopedAgentRuntime(new FakeAgent(), reopened, project.Id, goal.Id,
+            new ProviderProfile(), "planner", "fixture", 512);
+        Assert((await runtime.RunAsync(home, "retry", "", timeout.Token, readOnly: true)).Success);
+        Assert(GoalBudgetLedger.Available(reopened.Read(), goal.Id) == 1968);
+    }
+    finally
+    {
+        if (controller is not null)
+        {
+            if (!controller.HasExited) { controller.Kill(); await controller.WaitForExitAsync(); }
+            controller.Dispose();
+        }
+        try { Directory.Delete(home, true); } catch { }
+    }
+});
+
+Test("Schema 7 provider reservations upgrade to held without releasing capacity", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-provider-upgrade-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "schema 7 fixture" };
+        var goal = new FactoryGoal { ProjectId = project.Id, TokenBudget = 2000 };
+        store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal);
+            ProviderBudgetLedger.Begin(s, new FactoryJob { Id = Guid.Empty, ProjectId = project.Id, GoalId = goal.Id },
+                new ProviderProfile(), "planner", "fixture", 512);
+        });
+        using (var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}"))
+        {
+            db.Open();
+            using var downgrade = db.CreateCommand();
+            downgrade.CommandText = """
+                ALTER TABLE provider_budget_reservations DROP COLUMN owner_process_id;
+                ALTER TABLE provider_budget_reservations DROP COLUMN owner_machine;
+                ALTER TABLE provider_budget_reservations DROP COLUMN owner_started_at;
+                PRAGMA user_version=7;
+                """;
+            downgrade.ExecuteNonQuery();
+        }
+        var upgraded = new StateStore(home).Read();
+        Assert(upgraded.ProviderBudgetReservations.Single().State == "held");
+        Assert(GoalBudgetLedger.Available(upgraded, goal.Id) == 1488);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("A failed provider debit rolls back the matching goal debit", async () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-atomic-provider-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "rollback fixture" };
+        var goal = new FactoryGoal { ProjectId = project.Id, TokenBudget = 4096, State = "active" };
+        var job = new FactoryJob { ProjectId = project.Id, GoalId = goal.Id };
+        var fence = store.Change(s =>
+        {
+            s.Projects.Add(project); s.Goals.Add(goal); s.Jobs.Add(job);
+            return JobRecovery.Assign(job, "fixture", 60, local: true, state: s, reservationTokens: 1024);
+        });
+        using var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")}");
+        db.Open();
+        using var trigger = db.CreateCommand();
+        trigger.CommandText = """
+            CREATE TRIGGER reject_provider_debit BEFORE UPDATE OF input_tokens ON provider_usages
+            WHEN NEW.input_tokens > OLD.input_tokens
+            BEGIN SELECT RAISE(ABORT, 'fixture rejected provider debit'); END;
+            """;
+        trigger.ExecuteNonQuery();
+        var runtime = new BudgetedAgentRuntime(new FakeAgent(), store, job.Id, fence,
+            provider: new JobProviderMeter(new ProviderProfile { TokenLimit = 1024 }, "builder", "fixture", 512));
+        try
+        {
+            await runtime.RunAsync(home, "fixture", "", CancellationToken.None, readOnly: true);
+            throw new Exception("Provider debit unexpectedly succeeded");
+        }
+        catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.Message.Contains("fixture rejected provider debit")) { }
+
+        var state = store.Read();
+        Assert(state.Jobs.Single().TokensIn == 0 && state.Jobs.Single().TokensOut == 0);
+        Assert(state.BudgetReservations.Single().Consumed == 0);
+        Assert(state.ProviderUsages.Single().InputTokens == 0);
+        Assert(state.ProviderBudgetReservations.Single().State == "held");
+
+        trigger.CommandText = "DROP TRIGGER reject_provider_debit;";
+        trigger.ExecuteNonQuery();
+        Assert((await runtime.RunAsync(home, "retry", "", CancellationToken.None, readOnly: true)).Success);
+        state = store.Read();
+        Assert(state.Jobs.Single().TokensIn == 8 && state.Jobs.Single().TokensOut == 4);
+        Assert(state.BudgetReservations.Single().Consumed == 12);
+        Assert(state.ProviderUsages.Sum(u => u.InputTokens + u.OutputTokens) == 12);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Project review yields commit-bound findings and draft goals", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-project-review-" + Guid.NewGuid().ToString("N"));
+    var repository = Path.Combine(home, "repo");
+    try
+    {
+        Directory.CreateDirectory(repository);
+        GitOperations.Git(repository, "init", "-b", "master");
+        GitOperations.Git(repository, "config", "user.name", "Factory Fixture");
+        GitOperations.Git(repository, "config", "user.email", "fixture@example.invalid");
+        File.WriteAllText(Path.Combine(repository, "sample.cs"), "public static class Sample {}");
+        GitOperations.Git(repository, "add", "sample.cs");
+        GitOperations.Git(repository, "commit", "-m", "initial");
+        var store = new StateStore(Path.Combine(home, "factory"));
+        var project = new ProjectInfo { Name = "review-fixture", Path = repository };
+        store.Change(s => s.Projects.Add(project));
+        var master = GitOperations.Head(repository);
+        GitOperations.Git(repository, "checkout", "-b", "feature/review-fixture");
+        File.WriteAllText(Path.Combine(repository, "README.md"), "# Feature branch README");
+        GitOperations.Git(repository, "add", "README.md");
+        GitOperations.Git(repository, "commit", "-m", "Add feature-only README");
+        var review = ProjectReviewer.AnalyzeAsync(store, project.Id, CancellationToken.None)
+            .GetAwaiter().GetResult();
+        Assert(review.Commit == master && review.Commit != GitOperations.Head(repository));
+        Assert(review.Findings.Any(f => f.Id == "missing-readme"),
+            "A feature-branch README must not count as evidence on master");
+        Assert(review.Findings.Any(f => f.Id == "missing-quality-gates"));
+        Assert(ProjectReviewer.Read(store, project.Id)?.Id == review.Id);
+        var goal = ProjectReviewer.CreateDraftGoal(store, project.Id, new ReviewGoalInput
+        {
+            ReviewId = review.Id, FindingId = "missing-quality-gates", TokenBudget = 10000
+        });
+        Assert(goal.State == "draft" && goal.ProjectId == project.Id);
+        Assert(goal.AcceptanceCriteria.Count > 0);
+        var updatedReview = ProjectReviewer.AnalyzeAsync(store, project.Id, CancellationToken.None)
+            .GetAwaiter().GetResult();
+        Assert(updatedReview.Id != review.Id);
+        try
+        {
+            ProjectReviewer.CreateDraftGoal(store, project.Id,
+                new ReviewGoalInput { ReviewId = review.Id, FindingId = "missing-quality-gates" });
+            throw new Exception("Replaced review created a goal");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("replaced")) { }
+        GitOperations.Git(repository, "checkout", "master");
+        File.WriteAllText(Path.Combine(repository, "sample.cs"), "public static class Sample { public static int Value => 1; }");
+        GitOperations.Git(repository, "add", "sample.cs");
+        GitOperations.Git(repository, "commit", "-m", "advance");
+        try
+        {
+            ProjectReviewer.CreateDraftGoal(store, project.Id,
+                new ReviewGoalInput { FindingId = "missing-quality-gates" });
+            throw new Exception("Stale analysis created a new goal");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("master advanced")) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
 
 Test("Master-first preflight finds existing code and preserves adoption review", () =>
 {
@@ -250,6 +593,21 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     var html = Resource("Factory.Ui.Index");
     var script = Resource("Factory.Ui.Script");
     var style = Resource("Factory.Ui.Style");
+    Assert(html.Contains("data-view=\"analysis\"", StringComparison.Ordinal));
+    Assert(script.Contains("startProjectReview()", StringComparison.Ordinal));
+    Assert(script.Contains("formProjectProviders(id)", StringComparison.Ordinal));
+    Assert(script.Contains("formProviderReconciliation(id)", StringComparison.Ordinal));
+    Assert(html.Contains("id=\"brand-connection\"", StringComparison.Ordinal));
+    Assert(html.Contains("id=\"brand-connection-dot\"", StringComparison.Ordinal));
+    Assert(!html.Contains("id=\"connection-pill\"", StringComparison.Ordinal));
+    Assert(!html.Contains("id=\"open-connection\"", StringComparison.Ordinal));
+    Assert(html.IndexOf("id=\"top-create\"", StringComparison.Ordinal) <
+        html.IndexOf("id=\"open-search\"", StringComparison.Ordinal));
+    Assert(html.Contains("id=\"top-create\" aria-label=\"Create new\"", StringComparison.Ordinal));
+    Assert(script.Contains("$('brand-connection').addEventListener", StringComparison.Ordinal));
+    Assert(!script.Contains("$('connection-pill')", StringComparison.Ordinal));
+    Assert(style.Contains("@keyframes brand-heartbeat", StringComparison.Ordinal));
+    Assert(style.Contains("prefers-reduced-motion:reduce", StringComparison.Ordinal));
     Assert(script.Contains("reviewedExistingWork", StringComparison.Ordinal),
         "Direct job intake acknowledgement is not exposed in Mission Control");
     Assert(html.Contains("data-view=\"recovery\"", StringComparison.Ordinal));
@@ -1244,7 +1602,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 6, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 8, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -1749,7 +2107,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 6);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 8);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -2249,7 +2607,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 6);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 8);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -2804,6 +3162,18 @@ await TestAsync("Remote reservation overrun fences worker and preserves actual u
 var passed = results.Count(x => x.Passed);
 Console.WriteLine($"{passed}/{results.Count} passed");
 return passed == results.Count ? 0 : 1;
+
+internal sealed class ProviderCrashFixture : IAgentRuntime
+{
+    public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
+    {
+        File.WriteAllText(Path.Combine(directory, "provider-dispatched"), "");
+        await Task.Delay(Timeout.Infinite, cancellation);
+        throw new InvalidOperationException("Fixture must be stopped by its parent");
+    }
+}
 
 internal sealed class FakeAgent : IAgentRuntime
 {

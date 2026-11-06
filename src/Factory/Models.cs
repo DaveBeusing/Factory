@@ -19,6 +19,10 @@ public sealed class FactoryState
     public List<GoalBudgetReservation> BudgetReservations { get; set; } = [];
     public List<GoalBudgetExtension> BudgetExtensions { get; set; } = [];
     public List<FactoryGoal> Goals { get; set; } = [];
+    public List<ProviderAssignment> ProviderAssignments { get; set; } = [];
+    public List<ProviderBudgetLimit> ProviderBudgetLimits { get; set; } = [];
+    public List<ProviderUsageEntry> ProviderUsages { get; set; } = [];
+    public List<ProviderBudgetReservation> ProviderBudgetReservations { get; set; } = [];
     public List<FactoryEvent> Events { get; set; } = [];
     public List<KnowledgeItem> Knowledge { get; set; } = [];
     public List<GraphNode> Graph { get; set; } = [];
@@ -236,6 +240,8 @@ public sealed class FactorySettings
     public int LeaseSeconds { get; set; } = 120;
     public int MaxReviewRounds { get; set; } = 3;
     public string Runtime { get; set; } = "exec";
+    // Explicit provider profiles. Only Codex is enabled by default.
+    public List<ProviderProfile> Providers { get; set; } = [new()];
     public string Model { get; set; } = "";
     public Dictionary<string, string> ModelRoutes { get; set; } = new()
     {

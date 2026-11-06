@@ -4,8 +4,7 @@
 
 Factory can manage multiple repositories and local or remote workers. Git pushes are opt-in; merges and deployments remain manual. An implemented branch is **not** treated as integrated until Factory verifies the change in the target branch.
 
-> [!IMPORTANT]
-> This distribution contains **source code**. The Mission Control redesign has not yet undergone a real .NET build or Windows end-to-end validation in the packaging environment. Build and run the included tests on your own machine before using it with production repositories. The .NET build and authenticated agent/GitHub integration have not been validated in the packaging environment.
+See the [documentation index](docs/README.md) for Mission Control, planning, provider budgets and release policy.
 
 ## Contents
 
@@ -25,6 +24,7 @@ Factory can manage multiple repositories and local or remote workers. Git pushes
 14. [Validation and known limitations](#14-validation-and-known-limitations)
 15. [Versioning and release governance](#15-versioning-and-release-governance)
 16. [Master-first work-package preflight](#16-master-first-work-package-preflight)
+
 
 ## 1. Requirements
 
@@ -144,11 +144,11 @@ To override the default location for the current terminal session:
 $env:FACTORY_HOME = '<absolute-directory>'
 ```
 
-Factory uses a **relational SQLite schema (database version 4)** with separate tables for projects, goals, jobs, workers, events, knowledge, graph nodes, releases and evaluations. Ordered child tables store dependencies, expected paths, acceptance criteria, check commands and arguments, protected paths, imports, symbols and failure records. The schema uses foreign keys, useful query indexes, WAL and atomic transactions. The existing StateStore snapshot API is preserved while only changed entities are persisted.
+Factory uses a **relational SQLite schema (database version 8)** with separate tables for projects, goals, jobs, workers, events, knowledge, graph nodes, releases and evaluations. Ordered child tables store dependencies, expected paths, acceptance criteria, check commands and arguments, protected paths, imports, symbols and failure records. The schema uses foreign keys, useful query indexes, WAL and atomic transactions. The existing StateStore snapshot API is preserved while only changed entities are persisted.
 
 **Breaking storage change:** Earlier versions stored all state as a single JSON document inside `factory_state`. Legacy JSON data is not automatically imported into the relational schema. Back up the existing `%USERPROFILE%\.factory\factory.sqlite3` (and any SQLite WAL/SHM files after stopping Factory), then set `FACTORY_HOME` to a new directory before running this version. A legacy or unknown database is rejected without overwriting its data. Do not delete an existing state database until you have verified that a clean start is acceptable for your goals/jobs/history.
 
-Factory supports in-place relational schema upgrades from versions 2 and 3 to version 4. Earlier single-row JSON state remains unsupported; there is no JSON importer. Back up `.factory` before replacing an installation or changing machines. Do not commit its configuration, tokens, or state files into a repository. Existing configurations retain their administrator token and receive a new independent worker key on first launch.
+Factory supports in-place relational schema upgrades from versions 2–7 to version 8. Earlier single-row JSON state remains unsupported; there is no JSON importer. Back up `.factory` before replacing an installation or changing machines. Do not commit its configuration, tokens, or state files into a repository. Existing configurations retain their administrator token and receive a new independent worker key on first launch.
 
 ### Important settings
 
@@ -217,13 +217,16 @@ Mission Control is a responsive, dark-first control center with a global command
 | **Overview** | Health, operational KPIs, pipeline, goals, workers and recent events |
 | **Projects** | Register, edit paths, checks and protected paths, activate, pause, disable or archive repositories |
 | **Goals** | Create and edit objectives, acceptance criteria and token budgets; activate, pause, stop, complete and archive |
-| **Plans** | Generate through the agent, manually create/edit packages and dependencies, validate/adopt, run associated queue work and pause/resume/stop associated goals |
+| **Goal planner** | Filter by project, check master and open work, edit named dependencies, review budget and adopt a plan |
+| **Project review** | Inspect master and project health, then turn a reviewed finding into an editable draft goal |
 | **Jobs** | Create/edit, prioritize, directly start eligible local jobs, inspect stages and evidence, request local pause/stop, acknowledge review and requeue, verify integration |
 | **Queue** | Start, pause new scheduling, resume, or request cancellation of locally active jobs |
 | **Workers** | Register/configure, start/stop locally managed worker processes, view real heartbeats and platform, enable, drain or disable new remote-job claims |
 | **Activity** | Inspect persisted lifecycle and audit events |
-| **Capacity** | Show weekly and short-window allowance cards **only when the account reports them**; hide missing windows and the empty navigation entry |
-| **Settings** | Adjust concurrency, review rounds, worker lease and other supported runtime controls; auto-merging remains unavailable |
+| **Capacity** | Inspect provider, model and role usage, local allocations, held reservations and reported Codex account windows |
+| **Settings** | Adjust concurrency, review rounds, worker lease and other supported runtime controls |
+
+Use the icon-only **+** left of Search for creation shortcuts. The sidebar **F** opens connection settings and shows heartbeat status. See the [Mission Control guide](docs/mission-control.md).
 
 **Enforced work-package boundaries:** Every job must declare nonempty `ExpectedPaths` (1–100 relative file or directory paths). File entries permit that exact path; directory entries permit that path and descendants. Factory uses the same normalized scope rules for scheduling conflicts and execution. After the agent runs, before any commit, and again at quality/release gates, Factory checks the complete Git change set: committed changes from the project base, staged and unstaged tracked changes, deletions, both paths of renames, and untracked non-ignored files. Out-of-scope changes, unsafe declarations, and incomplete Git path listings fail closed with `blocked` / `scope`. The worktree is preserved and no commit, push or PR is prepared for the offending attempt. Protected project paths remain prohibited even after an amendment.
 
@@ -410,7 +413,7 @@ flowchart TD
 - Persistent goals with acceptance criteria and token budgets.
 - Every local or remote claim atomically reserves a bounded job allowance from the shared SQLite goal ledger. Disjoint work packages belonging to one goal may run in parallel without committing the same reserved capacity twice.
 - Before every builder or reviewer turn, at least 256 tokens must remain in that job's reservation. Streaming usage is charged against the reservation; reviews are serialized within each job. A delayed provider report can exceed the allowance for one turn, so such overruns are recorded and blocked rather than silently forgiven.
-- Finished jobs release unused budget only with confirmed final usage. Expired leases, missing usage and aborted jobs hold the uncertain balance until explicit audited reconciliation. Planning and diagnostics outside execution jobs are not included in the job budget.
+- Finished jobs release unused budget only with confirmed final usage. Expired leases, missing usage and aborted jobs hold the uncertain balance until explicit audited reconciliation. Provider-routed planning also uses the goal ledger. Project advisory review has its own provider attribution and local caps.
 - Read-only repository inspection and proposed task decomposition.
 - Priorities, dependencies, risk classification, and predicted affected paths.
 - Cycle detection, file-path conflict handling, work grouping and per-project capacity limits.
@@ -523,6 +526,7 @@ The server must have valid HTTPS certificate configuration. A secure connection 
 | `analytics`, `eval` | Inspect metrics and run evaluation suites |
 | `release` | Prepare source archives, release notes and checksums |
 | `usage` | Read account-level rate-limit and reset information |
+| `providers` | List project routes, Factory-local provider limits and observed token usage |
 | `dashboard` | Run Mission Control |
 | `worker-token --id ID` | Provision a scoped worker bearer credential on the controller |
 | `worker` | Run an authenticated remote worker using `FACTORY_WORKER_TOKEN` |
@@ -539,7 +543,7 @@ The solution includes source-level tests for relational SQLite persistence, sche
 
 The external agent CLI and GitHub must be validated with real authentication and a controlled test repository before production use. The agent app-server protocol used for weekly usage data is subject to upstream changes. Remote-worker isolation and plugin trust must be evaluated in the intended deployment environment.
 
-No backward-compatible database migration is provided. Factory-specific configuration, commands, assemblies and runtime storage use the generic name **Factory**, with the provider-specific executable referenced only where integration requires it.
+Relational upgrades preserve existing records. To downgrade, restore a database backup compatible with the previous binary. Factory-specific configuration, commands, assemblies and runtime storage use the generic name **Factory**, with the provider-specific executable referenced only where integration requires it.
 
 
 ## 15. Versioning and release governance
@@ -560,6 +564,6 @@ See [the complete versioning and compatibility policy](docs/versioning.md) and [
 
 ## 16. Master-first work-package preflight
 
-Every Factory work package starts from the current `master` branch, with a recorded source commit. It must never be stacked on a different unmerged PR branch. The preflight runs before agent-generated and manually saved plans and checks the committed master source tree, relevant existing Factory jobs, and matching open GitHub PR titles when the native `gh` CLI is authenticated and available. Keyword matches are evidence candidates, **not a claim that functionality is finished**.
+Every Factory work package starts from the current `master` branch, with a recorded source commit. It must never be stacked on a different unmerged PR branch. The preflight runs before agent-generated and manually saved plans and checks the committed master source tree, relevant existing Factory jobs, and matching open GitHub PR and issue titles when the native `gh` CLI is authenticated and available. Keyword matches are evidence candidates, **not a claim that functionality is finished**.
 
-Factory requires explicit operator review before adopting **every** plan; a keyword scan cannot prove that no overlap exists. If the master commit advances, or a previously verified matching PR inventory changes, the plan must be refreshed. The old worktree is preserved rather than silently reset or overwritten. See the [master-first preflight guide](docs/planning-preflight.md) for workflow, CLI/API details and limitations. This process does not automatically merge PRs or assert that external work was integrated.
+Factory requires explicit operator review before adopting **every** plan; a keyword scan cannot prove that no overlap exists. If the master commit advances, or a previously verified matching PR or issue inventory changes, the plan must be refreshed. The old worktree is preserved rather than silently reset or overwritten. See the [master-first preflight guide](docs/planning-preflight.md) for workflow, CLI/API details and limitations. This process does not automatically merge PRs or assert that external work was integrated.

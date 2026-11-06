@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed class StateStore
 {
-    private const int DatabaseVersion = 6;
+    private const int DatabaseVersion = 8;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -25,6 +25,10 @@ public sealed class StateStore
         new("jobs", nameof(FactoryState.Jobs), typeof(FactoryJob)),
         new("goal_budget_reservations", nameof(FactoryState.BudgetReservations), typeof(GoalBudgetReservation)),
         new("goal_budget_extensions", nameof(FactoryState.BudgetExtensions), typeof(GoalBudgetExtension)),
+        new("provider_assignments", nameof(FactoryState.ProviderAssignments), typeof(ProviderAssignment)),
+        new("provider_budget_limits", nameof(FactoryState.ProviderBudgetLimits), typeof(ProviderBudgetLimit)),
+        new("provider_usages", nameof(FactoryState.ProviderUsages), typeof(ProviderUsageEntry)),
+        new("provider_budget_reservations", nameof(FactoryState.ProviderBudgetReservations), typeof(ProviderBudgetReservation)),
         new("knowledge_items", nameof(FactoryState.Knowledge), typeof(KnowledgeItem)),
         new("graph_nodes", nameof(FactoryState.Graph), typeof(GraphNode)),
         new("evaluations", nameof(FactoryState.Evaluations), typeof(EvaluationResult)),
@@ -182,6 +186,50 @@ public sealed class StateStore
             """);
     }
 
+    private static void UpgradeProviders(SqliteConnection db, SqliteTransaction tx)
+    {
+        // Additive migration. Existing jobs have no reconstructable per-provider usage:
+        // historical unattributed totals remain in the existing goal ledger.
+        Execute(db, tx, """
+            CREATE TABLE IF NOT EXISTS provider_assignments(
+                position INTEGER NOT NULL, id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE NO ACTION,
+                role TEXT NOT NULL, provider_id TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_assignment_role
+                ON provider_assignments(project_id,role);
+            CREATE TABLE IF NOT EXISTS provider_budget_limits(
+                position INTEGER NOT NULL, id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE NO ACTION,
+                provider_id TEXT NOT NULL, token_limit INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_budget_project
+                ON provider_budget_limits(project_id,provider_id);
+            CREATE TABLE IF NOT EXISTS provider_usages(
+                position INTEGER NOT NULL, id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE NO ACTION,
+                goal_id TEXT, job_id TEXT REFERENCES jobs(id) ON DELETE NO ACTION,
+                execution_generation INTEGER NOT NULL,
+                provider_id TEXT NOT NULL, model TEXT NOT NULL, role TEXT NOT NULL,
+                input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+                final_usage_reported INTEGER NOT NULL, at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_provider_usage_scope
+                ON provider_usages(provider_id,project_id,job_id);
+            CREATE TABLE IF NOT EXISTS provider_budget_reservations(
+                position INTEGER NOT NULL, id TEXT PRIMARY KEY,
+                usage_id TEXT NOT NULL REFERENCES provider_usages(id) ON DELETE NO ACTION,
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE NO ACTION,
+                provider_id TEXT NOT NULL, reserved INTEGER NOT NULL,
+                consumed INTEGER NOT NULL, state TEXT NOT NULL,
+                owner_process_id INTEGER NOT NULL, owner_machine TEXT NOT NULL, owner_started_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_provider_reservation_scope
+                ON provider_budget_reservations(provider_id,project_id,state);
+            PRAGMA user_version=8;
+            """);
+    }
+
     private static void UpgradeWorkerAuthorization(SqliteConnection db, SqliteTransaction tx)
     {
         // Existing worker identities get no grants or trusted capability evidence.
@@ -231,6 +279,20 @@ public sealed class StateStore
         var schemaVersion = Convert.ToInt32(version.ExecuteScalar(), CultureInfo.InvariantCulture);
         if (schemaVersion == DatabaseVersion)
         {
+            tx.Commit();
+            return;
+        }
+        if (schemaVersion == 7)
+        {
+            // Version 7 recorded no invocation owner. Upgrades require stopped controllers.
+            // Preserve uncertain usage as a held liability for explicit reconciliation.
+            Execute(db, tx, """
+                ALTER TABLE provider_budget_reservations ADD COLUMN owner_process_id INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE provider_budget_reservations ADD COLUMN owner_machine TEXT NOT NULL DEFAULT '';
+                ALTER TABLE provider_budget_reservations ADD COLUMN owner_started_at TEXT;
+                UPDATE provider_budget_reservations SET state='held' WHERE state='active';
+                PRAGMA user_version=8;
+                """);
             tx.Commit();
             return;
         }
@@ -303,6 +365,7 @@ public sealed class StateStore
                 """);
             UpgradeWorkerAuthorization(db, tx);
             CreateBudgetExtensionTable(db, tx);
+            UpgradeProviders(db, tx);
             tx.Commit();
             return;
         }
@@ -310,12 +373,20 @@ public sealed class StateStore
         {
             UpgradeWorkerAuthorization(db, tx);
             CreateBudgetExtensionTable(db, tx);
+            UpgradeProviders(db, tx);
             tx.Commit();
             return;
         }
         if (schemaVersion == 5)
         {
             CreateBudgetExtensionTable(db, tx);
+            UpgradeProviders(db, tx);
+            tx.Commit();
+            return;
+        }
+        if (schemaVersion == 6)
+        {
+            UpgradeProviders(db, tx);
             tx.Commit();
             return;
         }
@@ -419,6 +490,7 @@ public sealed class StateStore
             PRAGMA user_version=5;
             """);
         CreateBudgetExtensionTable(db, tx);
+        UpgradeProviders(db, tx);
         tx.Commit();
     }
 

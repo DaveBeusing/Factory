@@ -10,12 +10,17 @@ public static class GoalBudgetLedger
     public const string Active = "active", Held = "held", Released = "released";
 
     private static long Spent(FactoryState state, Guid goalId)
-        => state.Jobs.Where(j => j.GoalId == goalId)
-            .Aggregate(0L, (sum, job) => checked(sum + job.TokensIn + job.TokensOut));
+        => checked(state.Jobs.Where(j => j.GoalId == goalId)
+            .Aggregate(0L, (sum, job) => checked(sum + job.TokensIn + job.TokensOut)) +
+            state.ProviderUsages.Where(u => u.GoalId == goalId && !u.JobId.HasValue)
+                .Aggregate(0L, (sum, usage) => checked(sum + usage.InputTokens + usage.OutputTokens)));
 
     private static long Outstanding(FactoryState state, Guid goalId)
-        => state.BudgetReservations.Where(r => r.GoalId == goalId && r.State is Active or Held)
-            .Aggregate(0L, (sum, r) => checked(sum + Math.Max(0, r.Reserved - r.Consumed)));
+        => checked(state.BudgetReservations.Where(r => r.GoalId == goalId && r.State is Active or Held)
+            .Aggregate(0L, (sum, r) => checked(sum + Math.Max(0, r.Reserved - r.Consumed))) +
+            state.ProviderBudgetReservations.Where(r => r.State is Active or Held &&
+                state.ProviderUsages.Any(u => u.Id == r.UsageId && !u.JobId.HasValue && u.GoalId == goalId))
+                .Aggregate(0L, (sum, r) => checked(sum + Math.Max(0, r.Reserved - r.Consumed))));
 
     public static long Available(FactoryState state, Guid goalId, Guid? claimingJobId = null)
     {
@@ -40,13 +45,24 @@ public static class GoalBudgetLedger
         var committed = Outstanding(state, goalId);
         var reservations = state.BudgetReservations.Where(r => r.GoalId == goalId).ToArray();
         var goalJobs = state.Jobs.Where(j => j.GoalId == goalId).ToArray();
+        var usages = state.ProviderUsages.Where(u => u.GoalId == goalId).ToArray();
+        var planningIds = usages.Where(u => !u.JobId.HasValue).Select(u => u.Id).ToHashSet();
+        var planningReservations = state.ProviderBudgetReservations.Where(r => planningIds.Contains(r.UsageId)).ToArray();
+        long PlanningOutstanding(string status) => planningReservations.Where(r => r.State == status)
+            .Sum(r => Math.Max(0, r.Reserved - r.Consumed));
         return new
         {
             goalId, total = goal.TokenBudget, consumed, committed,
             activeOutstanding = reservations.Where(r => r.State == Active)
-                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)),
+                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)) + PlanningOutstanding(Active),
             heldOutstanding = reservations.Where(r => r.State == Held)
-                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)),
+                .Sum(r => Math.Max(0, r.Reserved - r.Consumed)) + PlanningOutstanding(Held),
+            providers = usages.GroupBy(u => new { u.ProviderId, u.Model, u.Role }).Select(group => new
+            {
+                group.Key.ProviderId, group.Key.Model, group.Key.Role,
+                inputTokens = group.Sum(u => u.InputTokens), outputTokens = group.Sum(u => u.OutputTokens)
+            }).ToArray(),
+            planningHeld = PlanningOutstanding(Held),
             available = Available(state, goalId),
             requiresReconciliation = reservations.Any(r => r.State == Held),
             jobs = goalJobs.Select(j => new

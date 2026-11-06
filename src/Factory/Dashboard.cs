@@ -66,6 +66,41 @@ public static class DashboardHost
         });
         app.MapGet("/api/state", () => Results.Ok(store.Read()));
         app.MapGet("/api/usage", async (CancellationToken ct) => Results.Ok(await UsageMonitor.GetAsync(store.Home, ct)));
+        app.MapGet("/api/providers", () =>
+        {
+            var snapshot = store.Read();
+            return Results.Ok(new
+            {
+                profiles = settings.Providers.Select(p => new
+                {
+                    p.Id, p.Kind, p.Model, p.Enabled, p.TokenLimit,
+                    capabilities = p.Kind == "codex"
+                        ? new[] { "read-only", "workspace-write", "token-usage", "session" }
+                        : new[] { "read-only", "text-only", "token-usage" }
+                }),
+                assignments = snapshot.ProviderAssignments,
+                budgets = snapshot.ProviderBudgetLimits,
+                heldReservations = snapshot.ProviderBudgetReservations.Where(x => x.State == "held")
+                    .Select(x => new { x.Id, x.ProviderId, x.ProjectId, x.Reserved, x.Consumed,
+                        usage = snapshot.ProviderUsages.Where(u => u.Id == x.UsageId)
+                            .Select(u => new { u.Id, u.JobId, u.InputTokens, u.OutputTokens }).SingleOrDefault() }),
+                usage = ProviderBudgetLedger.Summary(snapshot, settings),
+                // The separate /api/usage endpoint provides observed Codex account windows.
+                accountAllowances = "Unknown except where explicitly reported by /api/usage"
+            });
+        });
+        app.MapPut("/api/projects/{id:guid}/providers", (Guid id, ProjectProvidersInput input) =>
+            Results.Ok(ProjectProviderManager.Configure(store, settings, id, input)));
+        app.MapPost("/api/providers/budget-reservations/{id:guid}/reconcile",
+            (Guid id, ProviderBudgetReconciliationInput input) =>
+                Results.Ok(ProviderBudgetReconciliation.Reconcile(store, id, input)));
+        app.MapGet("/api/projects/{id:guid}/analysis", (Guid id) =>
+            ProjectReviewer.Read(store, id) is { } review
+                ? (IResult)Results.Ok(review) : Results.NotFound(new { error = "No review exists yet" }));
+        app.MapPost("/api/projects/{id:guid}/analysis", async (Guid id, CancellationToken ct) =>
+            Results.Ok(await ProjectReviewer.AnalyzeAsync(store, id, ct, settings)));
+        app.MapPost("/api/projects/{id:guid}/analysis/goals", (Guid id, ReviewGoalInput input) =>
+            Results.Created("/api/state", ProjectReviewer.CreateDraftGoal(store, id, input)));
         app.MapGet("/api/health", () => Results.Ok(Health(store)));
         app.MapGet("/api/workers/managed", () => Results.Ok(ManagedWorkers.RunningIds()));
         app.MapGet("/api/events/stream", async (HttpContext ctx) =>
@@ -144,18 +179,20 @@ public static class DashboardHost
             if (plan.GoalId != goalId) return (IResult)Results.BadRequest(new { error = "Plan goal ID mismatch" });
             return Results.Ok(MissionControlManager.SavePlan(store, plan));
         });
-        app.MapPost("/api/plans/{goalId:guid}/generate", (Guid goalId) =>
+        app.MapPost("/api/plans/{goalId:guid}/generate", async (Guid goalId, bool? wait) =>
         {
             var state = store.Read();
             var goal = state.Goals.Single(g => g.Id == goalId);
             if (goal.State != "draft") return (IResult)Results.Conflict(new { error = "Only draft goals can generate plans" });
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
+            if (wait == true)
+                return Results.Ok(await Planning.ProposeAsync(store, project, goal, settings, CancellationToken.None));
             _ = Task.Run(async () =>
             {
                 store.Event(null, "plan_generating", goalId.ToString());
                 try
                 {
-                    await Planning.ProposeAsync(store, project, goal, AgentRuntimeFactory.Create(settings), CancellationToken.None);
+                    await Planning.ProposeAsync(store, project, goal, settings, CancellationToken.None);
                     store.Event(null, "plan_generated", goalId.ToString());
                 }
                 catch (Exception ex) { store.Event(null, "plan_error", goalId + ": " + ex.Message); }

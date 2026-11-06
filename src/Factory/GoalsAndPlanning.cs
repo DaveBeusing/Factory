@@ -25,6 +25,17 @@ public sealed class FactoryPlan
 public static class Planning
 {
     public static string PathFor(StateStore store, Guid goalId) => System.IO.Path.Combine(store.Home, "plans", $"{goalId:N}.json");
+    public static Task<FactoryPlan> ProposeAsync(StateStore store, ProjectInfo project, FactoryGoal goal,
+        FactorySettings settings, CancellationToken ct)
+    {
+        var state = store.Read();
+        var route = ProviderRouter.Select(settings, state, project.Id, "planner", "medium");
+        var profile = ProviderRouter.Resolve(settings, state, project.Id, "planner");
+        var runtime = new ProjectScopedAgentRuntime(route.Runtime, store, project.Id, goal.Id,
+            profile, "planner", route.Model, settings.GoalReservationTokens);
+        return ProposeAsync(store, project, goal, runtime, ct);
+    }
+
     public static async Task<FactoryPlan> ProposeAsync(StateStore store, ProjectInfo p, FactoryGoal goal, IAgentRuntime agent, CancellationToken ct)
     {
         var current = store.Read();
@@ -38,15 +49,16 @@ public static class Planning
             preflight.BaseBranch, preflight.BaseCommit, preflight.SearchTerms,
             preflight.ExistingCode, preflight.ExistingJobs, preflight.OpenPullRequests,
             preflight.PullRequestsChecked, preflight.PullRequestCheckNote,
+            preflight.OpenIssues, preflight.IssuesChecked, preflight.IssueCheckNote,
             preflight.MasterFiles
         });
         var prompt = "READ ONLY: Do not modify source files. Plan exclusively against the verified master commit. " +
-            "Inspect existing source, tests, active work, and open pull requests BEFORE proposing packages. " +
+            "Inspect existing source, tests, active work, open issues and open pull requests BEFORE proposing packages. " +
             "When functionality already exists or is partially implemented, FIRST propose to finish, " +
             "repair, validate, or integrate that implementation, rather than recreate it. " +
             "Do not make a second package for work already implemented and verified. " +
             "Treat keyword matches as investigation leads, not proof that the feature exists. " +
-            "If the PR inventory is unavailable, clearly record the uncertainty; never claim no conflicting PR exists. " +
+            "If the PR or issue inventory is unavailable, clearly record the uncertainty; never claim no conflicting PR exists. " +
             "Work packages must be independently reviewable and based on master, never stacked on other PR branches. " +
             "Return ONLY valid JSON with a packages array, each item with title, description, risk (low|medium|high), " +
             "priority (0..100), files string array and dependsOn integer array (zero-based indices). " +
@@ -62,10 +74,27 @@ public static class Planning
         plan.BaseCommit = preflight.BaseCommit;
         plan.Preflight = preflight;
         Validate(plan);
-        var path = PathFor(store, goal.Id);
-        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-        File.WriteAllText(path, Json.Stringify(plan));
+        if (WorkPackagePreflight.MasterCommit(p) != plan.BaseCommit)
+            throw new InvalidOperationException("master advanced during planning; regenerate the proposal");
+        var latest = store.Read().Goals.Single(g => g.Id == goal.Id);
+        if (latest.State != "draft" || latest.Objective != goal.Objective ||
+            !latest.AcceptanceCriteria.SequenceEqual(goal.AcceptanceCriteria))
+            throw new InvalidOperationException("Goal changed during planning; regenerate the proposal");
+        Write(store, plan);
         return plan;
+    }
+
+    internal static void Write(StateStore store, FactoryPlan plan)
+    {
+        var path = PathFor(store, plan.GoalId);
+        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
+        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(temp, Json.Stringify(plan));
+            File.Move(temp, path, overwrite: true);
+        }
+        finally { File.Delete(temp); }
     }
     private static string ExtractJson(string raw)
     {
@@ -123,11 +152,17 @@ public static class Planning
             !fresh.OpenPullRequests.Select(p => p.Number).OrderBy(x => x)
                 .SequenceEqual(plan.Preflight.OpenPullRequests.Select(p => p.Number).OrderBy(x => x)))
             throw new InvalidOperationException("Matching open pull requests changed; refresh preflight and plan");
+        if (plan.Preflight.IssuesChecked && !fresh.IssuesChecked)
+            throw new InvalidOperationException("Open issues could not be rechecked; review before adoption");
+        if (fresh.IssuesChecked &&
+            !fresh.OpenIssues.Select(i => i.Number).OrderBy(n => n)
+                .SequenceEqual(plan.Preflight.OpenIssues.Select(i => i.Number).OrderBy(n => n)))
+            throw new InvalidOperationException("Matching open issues changed; refresh preflight and plan");
         // A keyword scan cannot prove the absence of other implementations or PRs.
         // Require the operator to acknowledge the review even when no candidates matched.
         if (!reviewedExistingWork)
             throw new InvalidOperationException(
-                "All new work packages require explicit review of existing master code and outstanding PRs before adoption");
+                "All new work packages require explicit review of existing master code and outstanding PRs and issues before adoption");
         return store.Change(state =>
         {
             var goal = state.Goals.Single(g => g.Id == goalId);

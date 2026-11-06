@@ -75,6 +75,7 @@ public static class JobRecovery
     {
         return store.Change(s =>
         {
+            if (mode is null) ProviderBudgetLedger.HoldOrphans(s);
             var ids = new List<Guid>();
             foreach (var job in s.Jobs.Where(j => (mode is null || j.Mode == mode) &&
                 !string.IsNullOrEmpty(j.LeaseOwner) &&

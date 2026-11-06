@@ -881,6 +881,92 @@ await TestAsync("Plan adoption requires the reviewed plan and current goal revis
     finally { try { Directory.Delete(root, true); } catch { } }
 });
 
+await TestAsync("Review requires exact passing verdicts and a complete checked patch", async () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-review-gate-" + Guid.NewGuid().ToString("N"));
+    var repo = Directory.CreateDirectory(Path.Combine(root, "repo")).FullName;
+    try
+    {
+        void Git(params string[] args) => GitOperations.Git(repo, args);
+        void Commit(string message)
+        {
+            Git("add", ".");
+            Git("-c", "user.name=Factory Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", message);
+        }
+        Git("init", "-b", "master");
+        File.WriteAllText(Path.Combine(repo, "README.md"), "Original context\n");
+        Commit("Base");
+        var baseHead = GitOperations.Head(repo);
+        Git("switch", "-c", "feature/review");
+        File.WriteAllText(Path.Combine(repo, "README.md"), "Actual reviewed change\n");
+        Commit("Review patch");
+        var head = GitOperations.Head(repo);
+        Git("config", "diff.external", "nonexistent-factory-fixture-diff");
+
+        var job = new FactoryJob { Worktree = repo, Description = "Review fixture" };
+        var project = new ProjectInfo { BaseBranch = "master" };
+        QualityResult Report(string? sha = null) => new() { Passed = true, HeadSha = sha ?? head };
+        var good = new ReviewFixtureAgent("VERDICT: PASS\r\nReviewed README.md");
+        var strict = new QualityEngine(good);
+        var invalid = new Dictionary<string, ReviewFixtureAgent>
+        {
+            ["code"] = new("VERDICT: PASS WITH ISSUES\nIncomplete"),
+            ["architecture"] = new("\nVERDICT: PASS\nLater line"),
+            ["security"] = new("VERDICT: PASS\r\nTool failure", success: false),
+            ["ux"] = new("VERDICT: PASS \nTrailing space")
+        };
+        var badReport = await new QualityEngine(good, role => invalid[role])
+            .ReviewAsync(project, job, Report(), CancellationToken.None);
+        Assert(!badReport.Passed && badReport.Reviews.Count == 4 &&
+            badReport.Reviews.Values.All(v => v.StartsWith("CHANGES\n", StringComparison.Ordinal)));
+
+        var fallback = new ReviewFixtureAgent("VERDICT: PASS", fallback: true);
+        var fallbackReport = await new QualityEngine(fallback).ReviewAsync(project, job, Report(), CancellationToken.None);
+        Assert(!fallbackReport.Passed && fallbackReport.Reviews.Values.All(v => v.StartsWith("CHANGES\n", StringComparison.Ordinal)));
+
+        var valid = await strict.ReviewAsync(project, job, Report(), CancellationToken.None);
+        Assert(valid.Passed && valid.Reviews.Count == 4 && good.Prompts.Count == 4);
+        Assert(good.Prompts.All(p => p.Contains("+Actual reviewed change")),
+            "Review did not receive the raw checked patch");
+
+        async Task RejectBeforeReview(string reason, string? sha = null)
+        {
+            var calls = good.Prompts.Count;
+            var report = await strict.ReviewAsync(project, job, Report(sha), CancellationToken.None);
+            Assert(!report.Passed && report.Reviews.Count == 0 &&
+                report.Findings.Any(f => f.Contains(reason, StringComparison.Ordinal)), reason);
+            Assert(good.Prompts.Count == calls, "A reviewer ran with unusable patch context");
+        }
+        await RejectBeforeReview("does not match the commit", baseHead);
+        project.BaseBranch = "missing";
+        await RejectBeforeReview("Unable to obtain review diff");
+        project.BaseBranch = "feature/review";
+        await RejectBeforeReview("No committed patch");
+        project.BaseBranch = "master";
+
+        File.WriteAllBytes(Path.Combine(repo, "fixture.bin"), [0, 1, 2, 3, 4]);
+        Commit("Binary patch");
+        await RejectBeforeReview("binary changes", GitOperations.Head(repo));
+        Git("switch", "--detach", head);
+
+        File.WriteAllText(Path.Combine(repo, "large.txt"), new string('x', 105000));
+        Commit("Oversized patch");
+        await RejectBeforeReview("exceeds supported full-context size", GitOperations.Head(repo));
+
+        Git("switch", "--detach", head);
+        var moved = false;
+        var movingReviewer = new ReviewFixtureAgent("VERDICT: PASS", onReview: () =>
+        {
+            if (moved) return;
+            moved = true;
+            Git("switch", "--detach", baseHead);
+        });
+        var changedHead = await new QualityEngine(movingReviewer).ReviewAsync(project, job, Report(), CancellationToken.None);
+        Assert(!changedHead.Passed && changedHead.Findings.Any(f => f.Contains("HEAD changed while")));
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
 Test("Job quality inspector validates commit identity and file boundary", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-quality-view-" + Guid.NewGuid().ToString("N"));
@@ -3537,6 +3623,21 @@ internal sealed class FakeAgent : IAgentRuntime
         Directory.CreateDirectory(src);
         File.WriteAllText(Path.Combine(src, "generated.txt"), "Tested content");
         return Task.FromResult(new AgentRunResult { Success = true, FinalText = "Implementation complete", SessionId = "fake-session", InputTokens = 8, OutputTokens = 4, UsageReported = true });
+    }
+}
+
+internal sealed class ReviewFixtureAgent(string verdict, bool success = true, bool fallback = false,
+    Action? onReview = null) : IAgentRuntime
+{
+    public List<string> Prompts { get; } = [];
+    public Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null)
+    {
+        if (!readOnly) throw new InvalidOperationException("Fixture requires read-only review");
+        Prompts.Add(prompt);
+        onReview?.Invoke();
+        return Task.FromResult(new AgentRunResult { Success = success, FinalText = verdict, FinalTextIsFallback = fallback });
     }
 }
 

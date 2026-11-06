@@ -102,6 +102,13 @@ public sealed class QualityEngine
         CancellationToken ct)
     {
         if (!report.Passed) return report;
+        if (!IntegrationVerifier.IsCommitSha(report.HeadSha) || !await CheckedHeadStillCurrentAsync(job, report.HeadSha, ct))
+        {
+            report.Findings.Add("Worktree HEAD does not match the commit that passed the checks");
+            report.Passed = false;
+            return report;
+        }
+
         var reviewers = new Dictionary<string, string>
         {
             ["code"] = "Correctness, tests, edge cases, maintainability",
@@ -109,45 +116,67 @@ public sealed class QualityEngine
             ["security"] = "Secrets, untrusted input, access control, unsafe execution",
             ["ux"] = "User-visible behavior, discoverability and usability when applicable"
         };
-        // A text-only reviewer receives the actual code patch; a partial diff
-        // must never be presented as complete review evidence.
-        var diff = Commands.Run("git", ["-C", job.Worktree, "diff", $"{project.BaseBranch}...HEAD"],
-            Environment.CurrentDirectory);
+        // Review the immutable checked commit with display filters disabled.
+        // Ask Git to identify binary changes with its machine-readable patch marker.
+        var diff = await Commands.RunAsync("git",
+            ["-C", job.Worktree, "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+                "--no-relative", "--ignore-submodules=none", "--submodule=short", "--unified=3", "--binary",
+                $"refs/heads/{project.BaseBranch}...{report.HeadSha}", "--"],
+            job.Worktree, cancellationToken: ct);
+        // Commands retains more output than the review limit, so a truncated capture
+        // also exceeds this limit and is never sent to reviewers.
         const int maxReviewChars = 100_000;
-        if (!diff.Ok || diff.Output.Length > maxReviewChars)
+        if (!diff.Ok || string.IsNullOrWhiteSpace(diff.Output) || diff.Output.Length > maxReviewChars)
         {
             report.Findings.Add(!diff.Ok ? "Unable to obtain review diff" :
+                string.IsNullOrWhiteSpace(diff.Output) ? "No committed patch to review" :
                 "Review diff exceeds supported full-context size; split the work package");
+            report.Passed = false;
+            return report;
+        }
+        if (diff.Output.Contains(Environment.NewLine + "GIT binary patch" + Environment.NewLine, StringComparison.Ordinal))
+        {
+            report.Findings.Add("Review patch contains binary changes that need a dedicated review");
             report.Passed = false;
             return report;
         }
         var completed = await Task.WhenAll(reviewers.Select(async pair =>
         {
             var (role, checklist) = pair;
-           var instruction = "Review only; DO NOT edit files, commit, push or merge. " + checklist +
+            var instruction = "Review only; DO NOT edit files, commit, push or merge. " + checklist +
                 ". Review this branch against " + project.BaseBranch + ". Return first line exactly VERDICT: PASS or VERDICT: CHANGES. " +
                 "Second line onward provide evidence with file paths. Task: " + job.Description + "\nComplete source patch (review the changed code, not just file names):\n" + diff.Output;
-           try
+            try
             {
                 var result = await (_reviewRuntime?.Invoke(role) ?? _agent)
                     .RunAsync(job.Worktree, instruction, "", ct, readOnly: true);
-               var verdict = result.Success && result.FinalText.TrimStart().StartsWith("VERDICT: PASS", StringComparison.Ordinal)
+                using var response = new StringReader(result.FinalText);
+                var verdict = result.Success && !result.FinalTextIsFallback && response.ReadLine() == "VERDICT: PASS"
                     ? "PASS" : "CHANGES";
-               return (role, verdict, result.FinalText[..Math.Min(3000, result.FinalText.Length)]);
-           }
+                return (Role: role, Verdict: verdict, Message: result.FinalText[..Math.Min(3000, result.FinalText.Length)]);
+            }
             catch (Exception ex) when (ex is not OperationCanceledException and not TokenBudgetExceededException)
             {
-                return (role, "CHANGES", "Reviewer exception: " + ex.Message);
-           }
+                return (Role: role, Verdict: "CHANGES", Message: "Reviewer exception: " + ex.Message);
+            }
         }));
         foreach (var (role, verdict, message) in completed)
         {
             report.Reviews[role] = verdict + "\n" + message;
-           if (verdict != "PASS") report.Findings.Add("Review requested changes: " + role);
+            if (verdict != "PASS") report.Findings.Add("Review requested changes: " + role);
         }
-        report.Passed = report.Findings.Count == 0 && report.Reviews.Values.All(v => v.StartsWith("PASS", StringComparison.Ordinal));
+        if (!await CheckedHeadStillCurrentAsync(job, report.HeadSha, ct))
+            report.Findings.Add("Worktree HEAD changed while the review was running");
+        report.Passed = report.Findings.Count == 0 && completed.All(review => review.Verdict == "PASS");
         return report;
     }
+    private static async Task<bool> CheckedHeadStillCurrentAsync(FactoryJob job, string checkedHead, CancellationToken ct)
+    {
+        var head = await Commands.RunAsync("git", ["-C", job.Worktree, "rev-parse", "--verify", "HEAD"],
+            job.Worktree, cancellationToken: ct);
+        return head.Ok && string.Equals(head.Output.Trim(), checkedHead, StringComparison.OrdinalIgnoreCase);
+    }
+
     public static string Evidence(StateStore store, FactoryJob job, QualityResult report)
     {
         var dir = Path.Combine(store.Home, "evidence", job.Id.ToString("N"));

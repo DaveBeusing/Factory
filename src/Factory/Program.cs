@@ -111,7 +111,9 @@ Environment: FACTORY_HOME overrides the local state directory.
                 var repo = GitOperations.RepositoryRoot(args[1]);
                 var name = Required(args, "name");
                 var baseBranch = Option(args, "base", "master");
-                GitOperations.Git(repo, "rev-parse", "--verify", baseBranch);
+                if (baseBranch != "master")
+                    throw new InvalidOperationException("All Factory work packages must be based on master");
+                GitOperations.Git(repo, "rev-parse", "--verify", "refs/heads/master");
                 var checksFile = Option(args, "checks-json");
                 var checks = string.IsNullOrEmpty(checksFile) ? new List<CheckCommand>() : CheckLoader.Read(checksFile);
                 var project = new ProjectInfo

@@ -130,6 +130,47 @@ Test("Provider usage, assignments and local budgets persist in SQLite", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Project review yields commit-bound findings and draft goals", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-project-review-" + Guid.NewGuid().ToString("N"));
+    var repository = Path.Combine(home, "repo");
+    try
+    {
+        Directory.CreateDirectory(repository);
+        GitOperations.Git(repository, "init", "-b", "master");
+        GitOperations.Git(repository, "config", "user.name", "Factory Fixture");
+        GitOperations.Git(repository, "config", "user.email", "fixture@example.invalid");
+        File.WriteAllText(Path.Combine(repository, "sample.cs"), "public static class Sample {}");
+        GitOperations.Git(repository, "add", "sample.cs");
+        GitOperations.Git(repository, "commit", "-m", "initial");
+        var store = new StateStore(Path.Combine(home, "factory"));
+        var project = new ProjectInfo { Name = "review-fixture", Path = repository };
+        store.Change(s => s.Projects.Add(project));
+        var review = ProjectReviewer.AnalyzeAsync(store, project.Id, CancellationToken.None)
+            .GetAwaiter().GetResult();
+        Assert(review.Commit == GitOperations.Head(repository));
+        Assert(review.Findings.Any(f => f.Id == "missing-quality-gates"));
+        Assert(ProjectReviewer.Read(store, project.Id)?.Id == review.Id);
+        var goal = ProjectReviewer.CreateDraftGoal(store, project.Id, new ReviewGoalInput
+        {
+            FindingId = "missing-quality-gates", TokenBudget = 10000
+        });
+        Assert(goal.State == "draft" && goal.ProjectId == project.Id);
+        Assert(goal.AcceptanceCriteria.Count > 0);
+        File.WriteAllText(Path.Combine(repository, "sample.cs"), "public static class Sample { public static int Value => 1; }");
+        GitOperations.Git(repository, "add", "sample.cs");
+        GitOperations.Git(repository, "commit", "-m", "advance");
+        try
+        {
+            ProjectReviewer.CreateDraftGoal(store, project.Id,
+                new ReviewGoalInput { FindingId = "missing-quality-gates" });
+            throw new Exception("Stale analysis created a new goal");
+        }
+        catch (InvalidOperationException) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Job quality inspector validates commit identity and file boundary", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-quality-view-" + Guid.NewGuid().ToString("N"));

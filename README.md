@@ -24,6 +24,7 @@ Factory can manage multiple repositories and local or remote workers. Git pushes
 13. [Command reference](#13-command-reference)
 14. [Validation and known limitations](#14-validation-and-known-limitations)
 15. [Versioning and release governance](#15-versioning-and-release-governance)
+16. [Master-first work-package preflight](#16-master-first-work-package-preflight)
 
 ## 1. Requirements
 
@@ -309,10 +310,12 @@ To inspect the registered repositories and current jobs:
 .\dist\Factory.exe plan --goal '<goal-guid>'
 ```
 
-Review the proposed scope, priorities, dependencies and affected paths. **Plan generation does not authorize execution.** When ready, explicitly adopt the proposal and start the queue:
+Factory inspects the exact current `master` commit before planning, checking existing source, recorded jobs and accessible open PRs. The planner requires a **clean master checkout**. Existing or partially implemented functionality should be finished and verified rather than reimplemented. Open PR data is explicitly marked unverified if GitHub CLI access is unavailable.
+
+Review the proposed scope, already existing implementations, related PRs, priorities, dependencies and affected paths. **Plan generation does not authorize execution.** After independently confirming that overlapping work will not be duplicated, explicitly acknowledge that review and adopt the plan:
 
 ```powershell
-.\dist\Factory.exe adopt --goal '<goal-guid>' --mode local
+.\dist\Factory.exe adopt --goal '<goal-guid>' --mode local --reviewed-existing-work
 .\dist\Factory.exe run
 ```
 
@@ -549,3 +552,10 @@ dotnet run --project tools/Factory.Versioning -- self-test
 Dedicated release branches may use `dotnet run --project tools/Factory.Versioning -- bump minor`, `bump patch`, or `channel rc`/`channel stable`; the resulting `Directory.Build.props` change requires review and release-owner approval before merging. No tag, GitHub release, deployment or automatic merge is performed by this tool.
 
 See [the complete versioning and compatibility policy](docs/versioning.md) and [ADR-0001](docs/adr/0001-versioning.md). `dist/build-manifest.json` records the effective version, full source SHA and executable checksum. Database schema and wire contracts remain separately versioned; a product bump does not automatically migrate or validate them.
+
+
+## 16. Master-first work-package preflight
+
+Every Factory work package starts from the current `master` branch, with a recorded source commit. It must never be stacked on a different unmerged PR branch. The preflight runs before agent-generated and manually saved plans and checks the committed master source tree, relevant existing Factory jobs, and matching open GitHub PR titles when the native `gh` CLI is authenticated and available. Keyword matches are evidence candidates, **not a claim that functionality is finished**.
+
+Factory requires explicit operator review before adopting a plan with potential overlap. If the master commit advances, or a previously verified matching PR inventory changes, the plan must be refreshed. The old worktree is preserved rather than silently reset or overwritten. See the [master-first preflight guide](docs/planning-preflight.md) for workflow, CLI/API details and limitations. This process does not automatically merge PRs or assert that external work was integrated.

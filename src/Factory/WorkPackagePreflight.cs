@@ -130,7 +130,9 @@ public static class WorkPackagePreflight
         // GitHub PR inspection is optional in local-first deployments. Unknown is
         // explicitly recorded; a missing gh CLI or authentication is not 'no open PR'.
         var origin = GitOperations.Origin(project.Path) ?? "";
-        if (!origin.Contains("github.com", StringComparison.OrdinalIgnoreCase))
+        if (!(origin.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
+              origin.StartsWith("git@github.com:", StringComparison.OrdinalIgnoreCase) ||
+              origin.StartsWith("ssh://git@github.com/", StringComparison.OrdinalIgnoreCase)))
         {
             report.PullRequestCheckNote = "GitHub PR inventory not applicable or origin unavailable.";
         }
@@ -149,7 +151,9 @@ public static class WorkPackagePreflight
                     using var document = JsonDocument.Parse(result.Output);
                     if (document.RootElement.ValueKind != JsonValueKind.Array)
                         throw new JsonException("Unexpected pull-request response");
-                    report.PullRequestsChecked = true;
+                    report.PullRequestsChecked = document.RootElement.GetArrayLength() < 100;
+                    if (!report.PullRequestsChecked)
+                        report.PullRequestCheckNote = "Open PR inventory reached its 100-item limit; manually check for further PRs.";
                     report.OpenPullRequests = document.RootElement.EnumerateArray()
                         .Select(pr => new OpenWorkCandidate
                         {

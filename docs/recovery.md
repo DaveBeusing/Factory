@@ -28,6 +28,14 @@ Pausing or stopping a project or goal prevents new scheduling for that scope. A 
 
 For automation with administrator authentication, submit `POST /api/providers/budget-reservations/{id}/recover` with `reviewed: true` and `reason`. The action applies to active reservations with a recorded owner on a different host.
 
+## Recover a remote executor receipt
+
+Open **Jobs → Inspect → Remote provider turns** to find the turn ID, lease generation, requested and observed model, recorded usage and reason for the hold. If the executor saved the receipt before the connection dropped, Factory can retrieve it without running the provider again.
+
+After quarantining the expired lease and reviewing the interrupted job, send `POST /api/jobs/{id}/provider-turns/{turnId}/recover` with administrator authentication, `reviewed: true` and a `reason` of 10–1000 characters. Include `confirmOverrun: true` after verifying any overrun. Recovery requires the original configured executor, its retained receipt and final usage matching the recorded provider, model and turn. It updates the budget ledgers and leaves the job blocked for separate review.
+
+If the executor has no matching receipt, keep the reservation held until you can verify final usage independently. Use the settlement workflow below for that evidence or for turns recorded before schema 11.
+
 ## Settle held usage
 
 1. In **Capacity → Held provider reservations**, select **Reconcile**. Enter verified final input and output totals for that **provider turn**, acknowledge the independent verification and record the evidence. Totals must be at least as high as the amounts already reported. A linked job must be inactive and have no lease owner.

@@ -87,6 +87,13 @@ public static class DashboardHost
         });
         app.MapPut("/api/projects/{id:guid}/providers", (Guid id, ProjectProvidersInput input) =>
             Results.Ok(ProjectProviderManager.Configure(store, settings, id, input)));
+        app.MapGet("/api/projects/{id:guid}/analysis", (Guid id) =>
+            ProjectReviewer.Read(store, id) is { } review
+                ? (IResult)Results.Ok(review) : Results.NotFound(new { error = "No review exists yet" }));
+        app.MapPost("/api/projects/{id:guid}/analysis", async (Guid id, CancellationToken ct) =>
+            Results.Ok(await ProjectReviewer.AnalyzeAsync(store, id, ct)));
+        app.MapPost("/api/projects/{id:guid}/analysis/goals", (Guid id, ReviewGoalInput input) =>
+            Results.Created("/api/state", ProjectReviewer.CreateDraftGoal(store, id, input)));
         app.MapGet("/api/health", () => Results.Ok(Health(store)));
         app.MapGet("/api/workers/managed", () => Results.Ok(ManagedWorkers.RunningIds()));
         app.MapGet("/api/events/stream", async (HttpContext ctx) =>

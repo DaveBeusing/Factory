@@ -84,9 +84,15 @@ public static class DashboardHost
                 assignments = snapshot.ProviderAssignments,
                 budgets = snapshot.ProviderBudgetLimits,
                 heldReservations = snapshot.ProviderBudgetReservations.Where(x => x.State == "held")
-                    .Select(x => new { x.Id, x.ProviderId, x.ProjectId, x.Reserved, x.Consumed,
-                        usage = snapshot.ProviderUsages.Where(u => u.Id == x.UsageId)
-                            .Select(u => new { u.Id, u.JobId, u.InputTokens, u.OutputTokens }).SingleOrDefault() }),
+                    .Join(snapshot.ProviderUsages, r => r.UsageId, u => u.Id, (r, u) => new
+                    {
+                        r.Id, r.ProviderId, r.ProjectId, r.Reserved, r.Consumed,
+                        goalReservationId = GoalBudgetLedger.LinkedReservation(snapshot, u)?.Id,
+                        usage = new { u.Id, u.JobId, u.GoalId, u.ExecutionGeneration, u.InputTokens, u.OutputTokens }
+                    }),
+                foreignReservations = snapshot.ProviderBudgetReservations
+                    .Where(r => r.State == "active" && ProviderBudgetLedger.HasForeignOwner(r))
+                    .Select(r => new { r.Id, r.ProviderId, r.ProjectId, r.OwnerMachine, r.Reserved, r.Consumed }),
                 usage = ProviderBudgetLedger.Summary(snapshot, settings),
                 // The separate /api/usage endpoint provides observed Codex account windows.
                 accountAllowances = "Unknown except where explicitly reported by /api/usage"
@@ -94,6 +100,9 @@ public static class DashboardHost
         });
         app.MapPut("/api/projects/{id:guid}/providers", (Guid id, ProjectProvidersInput input) =>
             Results.Ok(ProjectProviderManager.Configure(store, settings, id, input)));
+        app.MapPost("/api/providers/budget-reservations/{id:guid}/recover",
+            (Guid id, ProviderHostRecoveryInput input) =>
+                Results.Ok(ProviderBudgetReconciliation.HoldAfterHostRecovery(store, id, input.Reviewed, input.Reason)));
         app.MapPost("/api/providers/budget-reservations/{id:guid}/reconcile",
             (Guid id, ProviderBudgetReconciliationInput input) =>
                 Results.Ok(ProviderBudgetReconciliation.Reconcile(store, id, input)));
@@ -214,7 +223,7 @@ public static class DashboardHost
             Results.Ok(GoalBudgetLedger.Summary(store.Read(), id)));
         app.MapPost("/api/goals/{id:guid}/budget/reconcile", (Guid id, BudgetReconciliationInput input) =>
             Results.Ok(GoalBudgetLedger.Reconcile(store, id, input.ReservationId,
-                input.FinalTokensIn, input.FinalTokensOut, input.Reviewed, input.Reason)));
+                input.FinalTokensIn, input.FinalTokensOut, input.Reviewed, input.Reason, input.ConfirmOverrun)));
         app.MapPost("/api/goals", (GoalInput input) => Results.Created("/api/state", MissionControlManager.CreateGoal(store, input)));
         app.MapPut("/api/goals/{id:guid}", (Guid id, GoalInput input) => Results.Ok(MissionControlManager.UpdateGoal(store, id, input)));
         app.MapPost("/api/goals/{id:guid}/action", (Guid id, ControlInput input) =>
@@ -375,9 +384,16 @@ public sealed class PlanAdoptInput
 
 public sealed class BudgetReconciliationInput
 {
+    public bool ConfirmOverrun { get; set; }
     public Guid ReservationId { get; set; }
     public long FinalTokensIn { get; set; }
     public long FinalTokensOut { get; set; }
+    public bool Reviewed { get; set; }
+    public string Reason { get; set; } = "";
+}
+
+public sealed class ProviderHostRecoveryInput
+{
     public bool Reviewed { get; set; }
     public string Reason { get; set; } = "";
 }

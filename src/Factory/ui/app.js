@@ -247,13 +247,20 @@ function renderUsage(){
    projects?table(['Project','Provider','Consumed','Reserved','Configured limit','Local remaining','Reported USD'],projects):
    '<p class="subtext">No project allocation records.</p>')+`</div>`;
  const holds=(providerData?.heldReservations||[]).map(h=>
-   `<tr><td>${esc(h.providerId)}</td><td>${esc(h.usage?.jobId||'Unknown')}</td>
+   `<tr><td>${esc(h.providerId)}</td><td>${esc(h.usage?.jobId||'Project operation')}${h.goalReservationId?`<small>Goal reservation ${esc(h.goalReservationId.slice(0,8))} · Generation ${esc(h.usage.executionGeneration)}</small>`:''}</td>
     <td>${Number(h.usage?.inputTokens||0).toLocaleString()} / ${Number(h.usage?.outputTokens||0).toLocaleString()}</td>
     <td>${number(Math.max(0,h.reserved-h.consumed))}</td>
     <td><button class="tiny-button" data-act="provider-reconcile" data-id="${esc(h.id)}">Reconcile</button></td></tr>`).join('');
  if(holds)body+=`<div style="margin-top:17px">`+
   card('Held provider reservations','Unknown final usage must be independently verified before releasing unused capacity.',
    table(['Provider','Job','Reported input / output','Held tokens',''],holds))+`</div>`;
+ const foreign=(providerData?.foreignReservations||[]).map(r=>
+  `<tr><td>${esc(r.providerId)}</td><td>${esc(r.ownerMachine)}</td>
+   <td>${number(Math.max(0,r.reserved-r.consumed))}</td>
+   <td><button class="tiny-button" data-act="provider-recover" data-id="${esc(r.id)}">Review stopped host</button></td></tr>`).join('');
+ if(foreign)body+=`<div style="margin-top:17px">`+
+  card('Reservations from another host','Verify the old runner has stopped before marking its reservations held.',
+   table(['Provider','Recorded host','Reserved tokens outstanding',''],foreign))+`</div>`;
  if(usage)body+=`<div style="margin-top:17px">${usageCards()}</div>`;
  body+='<p class="subtext">Reported USD sums available provider estimates and may omit turns. Unknown provider account allowances are never estimated from local token use. Provider budgets are total local token ceilings, not rolling provider quotas.</p>';
  return body;
@@ -341,7 +348,8 @@ function formProviderReconciliation(id){
  const html=field('input','Verified input tokens',reservation.usage?.inputTokens||0,'number')+
   field('output','Verified output tokens',reservation.usage?.outputTokens||0,'number')+
   field('reason','Independent evidence and justification','','textarea')+
-  field('reviewed','I verified the final usage outside this dashboard',false,'checkbox');
+  field('reviewed','I verified the final usage outside this dashboard',false,'checkbox')+
+  field('confirmOverrun','I verified usage above the reserved tokens, if applicable',false,'checkbox');
  openForm('Reconcile provider usage','Only reconcile after confirming the provider reported final token totals.',
   html,async f=>{
     const x=values(f),input=Number(x.input),output=Number(x.output);
@@ -350,9 +358,23 @@ function formProviderReconciliation(id){
       throw Error('Verified token totals and an evidence reason are required');
     if(!confirm('Release the provider budget reservation after verified usage reconciliation?'))return;
     await mutate('providers/budget-reservations/'+id+'/reconcile','POST',
-      {finalInputTokens:input,finalOutputTokens:output,reviewed:true,reason:x.reason.trim()});
+      {finalInputTokens:input,finalOutputTokens:output,reviewed:true,reason:x.reason.trim(),
+        confirmOverrun:f.elements.confirmOverrun.checked});
     await fetchProviders();
   },'Reconcile usage');
+}
+function formProviderHostRecovery(id){
+ const reservation=(providerData?.foreignReservations||[]).find(item=>item.id===id);
+ if(!reservation)return;
+ openForm('Recover reservation from another host','Verify the original runner and its provider process have stopped. Tokens stay reserved until usage is reconciled.',
+  field('reviewed','I verified the original runner on '+reservation.ownerMachine+' has stopped',false,'checkbox')+
+  field('reason','Shutdown evidence','','textarea'),async form=>{
+   const reason=values(form).reason.trim();
+   if(!form.elements.reviewed.checked||reason.length<10||reason.length>1000)
+    throw Error('Confirm the original runner stopped and give an evidence reason of 10 to 1000 characters');
+   await mutate('providers/budget-reservations/'+id+'/recover','POST',{reviewed:true,reason});
+   await fetchProviders();
+  },'Mark reservation held');
 }
 function formProjectProviders(id){
  const profiles=(providerData?.profiles||[]).filter(p=>p.enabled);
@@ -602,7 +624,8 @@ async function renderGoalBudget(goalId){
    </div><div class="progress-track" role="meter" aria-label="Consumed and reserved goal capacity" aria-valuenow="${percent.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${percent.toFixed(1)}%"></div></div>
    <p class="subtext">Goal-budget accounting is separate from provider account allowances. Final usage that is unknown must remain unsettled.</p>
    <h3>Reservations</h3>${rows.length?table(['Job','Status','Reserved','Consumed','Outstanding'],records):'<p class="subtext">No reservations reported.</p>'}
-   ${rows.some(r=>r.state==='held')?`<button class="button button-muted" data-act="budget-reconcile" data-id="${goalId}">Review held usage</button>`:''}
+   ${rows.some(r=>r.pendingProviderTurns)?`<p><button class="button button-muted" data-act="linked-provider-usage">Review linked provider turns in Capacity</button></p>`:''}
+    ${rows.some(r=>r.state==='held'&&!r.pendingProviderTurns)?`<button class="button button-muted" data-act="budget-reconcile" data-id="${goalId}">Review held usage</button>`:''}
    ${budget.planningHeld>0?'<p class="subtext">Reconcile held planning tokens in Capacity → Held provider reservations.</p>':''}
    <h3>Goal usage by provider</h3>
    ${providerRows?table(['Provider','Model','Role','Input','Output'],providerRows):'<p class="subtext">No attributed provider usage for this goal yet.</p>'}
@@ -623,16 +646,17 @@ async function renderGoalBudget(goalId){
 }
 async function reconcileGoalBudget(goalId){
  const budget=await api('goals/'+goalId+'/budget');
- const held=(budget.reservations||[]).filter(r=>r.state==='held');
- if(!held.length){notify('No held reservations to reconcile');return}
+ const held=(budget.reservations||[]).filter(r=>r.state==='held'&&!r.pendingProviderTurns);
+ if(!held.length){notify('Review linked provider turns in Capacity before settling the goal');return}
  const options=held.map(r=>[r.id,(state.jobs.find(j=>j.id===r.jobId)?.title||r.jobId)+' · '+r.outstanding+' outstanding']);
- const first=held[0],job=state.jobs.find(j=>j.id===first.jobId);
+ const first=held[0],job=(budget.jobs||[]).find(j=>j.id===first.jobId);
  openForm('Reconcile held usage','Administrator action. Only independently verified final provider usage can release unknown liabilities.',
   field('reservationId','Held reservation',first.id,'select',options)+
   field('finalTokensIn','Final input tokens',job?.tokensIn||0,'number')+
   field('finalTokensOut','Final output tokens',job?.tokensOut||0,'number')+
   field('reason','Evidence and review justification','','textarea')+
-  field('reviewed','I independently verified the final usage',false,'checkbox'),
+  field('reviewed','I independently verified the final usage',false,'checkbox')+
+   field('confirmOverrun','I verified usage above the reserved tokens, if applicable',false,'checkbox'),
   async form=>{
    const x=values(form),input=Number(x.finalTokensIn),output=Number(x.finalTokensOut);
    if(!form.elements.reviewed.checked||x.reason.trim().length<10||
@@ -640,10 +664,20 @@ async function reconcileGoalBudget(goalId){
     throw Error('Verified nonnegative integer totals and a justification of at least 10 characters are required');
    if(!confirm('Release unused reserved capacity based on independently verified final usage? This action is recorded.'))return;
    await mutate(`goals/${goalId}/budget/reconcile`,'POST',{
-     reservationId:x.reservationId,finalTokensIn:input,finalTokensOut:output,reviewed:true,reason:x.reason.trim()
+     reservationId:x.reservationId,finalTokensIn:input,finalTokensOut:output,reviewed:true,reason:x.reason.trim(),
+      confirmOverrun:form.elements.confirmOverrun.checked
    });
    await renderGoalBudget(goalId);
   },'Confirm reconciliation');
+ const form=$('modal-form');
+ form.elements.reservationId.addEventListener('change',()=>{
+  const selected=held.find(r=>r.id===form.elements.reservationId.value);
+  const totals=(budget.jobs||[]).find(j=>j.id===selected?.jobId);
+  form.elements.finalTokensIn.value=totals?.tokensIn??0;
+  form.elements.finalTokensOut.value=totals?.tokensOut??0;
+  form.elements.reviewed.checked=false;
+  form.elements.confirmOverrun.checked=false;
+ });
 }
 
 function showInspector(){inspector=true;$('inspector').classList.add('open');$('inspector').setAttribute('aria-hidden','false');$('inspector-backdrop').classList.add('open')}
@@ -689,6 +723,8 @@ function preflightDetails(preflight){
 }
 async function act(action,id,index,revision){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'project-providers':formProjectProviders(id);break;
  case'analysis-run':await startProjectReview();break;case'analysis-goal':createReviewGoal(id);break;case'provider-reconcile':formProviderReconciliation(id);break;
+ case'provider-recover':formProviderHostRecovery(id);break;
+ case'linked-provider-usage':closeInspector();nav('usage');await fetchProviders();break;
  case'project-plans':planProject=id;nav('plans');await loadPlans();break;
  case'open-project-analysis':closeInspector();analysisProject=id;nav('analysis');await loadProjectReview(id);break;case'create-goal':formGoal();break;case'create-job':formJob();break;case'create-worker':formWorker();break;case'worker-edit':formWorker(decodeURIComponent(id));break;case'edit-settings':formSettings();break;case'budget-refresh':await renderGoalBudget(id);break;case'budget-reconcile':await reconcileGoalBudget(id);break;case'quality-refresh':await renderJobQuality(id);break;
  case'queue-run':case'queue-pause':case'queue-resume':case'queue-stop':await runQueue(action.slice(6));break;

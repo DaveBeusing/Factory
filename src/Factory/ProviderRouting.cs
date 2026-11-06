@@ -37,7 +37,7 @@ public sealed class ProviderUsageEntry
     public Guid Id { get; set; } = Guid.NewGuid();
     public Guid ProjectId { get; set; }
     public Guid? GoalId { get; set; }
-    public Guid JobId { get; set; }
+    public Guid? JobId { get; set; }
     public long ExecutionGeneration { get; set; }
     public string ProviderId { get; set; } = "";
     public string Model { get; set; } = "";
@@ -179,12 +179,13 @@ public static class ProviderBudgetLedger
         string role, string model, int reservationTokens)
     {
         var usage = new ProviderUsageEntry { ProjectId = job.ProjectId, GoalId = job.GoalId,
-            JobId = job.Id, ExecutionGeneration = job.ExecutionGeneration,
+            JobId = job.Id == Guid.Empty ? null : job.Id, ExecutionGeneration = job.ExecutionGeneration,
             ProviderId = profile.Id, Model = model, Role = role };
         var projectCap = state.ProviderBudgetLimits.FirstOrDefault(b =>
             b.ProjectId == job.ProjectId && b.ProviderId == profile.Id)?.TokenLimit ?? 0;
         var globalCap = profile.TokenLimit;
-        if (globalCap > 0 || projectCap > 0)
+        var isPlanning = job.Id == Guid.Empty && job.GoalId.HasValue;
+        if (globalCap > 0 || projectCap > 0 || isPlanning)
         {
             long Used(Func<ProviderUsageEntry, bool> filter) =>
                 state.ProviderUsages.Where(filter).Sum(x => checked(x.InputTokens + x.OutputTokens));
@@ -192,6 +193,8 @@ public static class ProviderBudgetLedger
                 state.ProviderBudgetReservations.Where(x => x.State != "released" && filter(x))
                     .Sum(x => Math.Max(0, checked(x.Reserved - x.Consumed)));
             var allowed = (long)reservationTokens;
+            if (isPlanning)
+                allowed = Math.Min(allowed, GoalBudgetLedger.Available(state, job.GoalId!.Value));
             if (globalCap > 0) allowed = Math.Min(allowed,
                 globalCap - Used(x => x.ProviderId == profile.Id) -
                 Pending(x => x.ProviderId == profile.Id));

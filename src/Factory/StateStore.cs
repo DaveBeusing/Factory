@@ -623,11 +623,13 @@ public sealed partial class StateStore
     public T Change<T>(Func<FactoryState, T> mutator) => ChangeCore(mutator, null);
 
     private T ChangeCore<T>(Func<FactoryState, T> mutator,
-        Action<SqliteConnection, SqliteTransaction>? beforeCommit)
+        Action<SqliteConnection, SqliteTransaction>? beforeCommit,
+        Action<SqliteConnection, SqliteTransaction>? beforeMutation = null)
     {
         using var db = Open();
         using var tx = db.BeginTransaction();
         var state = Load(db, tx);
+        beforeMutation?.Invoke(db, tx);
         var before = Entities.Select(map =>
         {
             var snapshot = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -646,6 +648,22 @@ public sealed partial class StateStore
         beforeCommit?.Invoke(db, tx);
         tx.Commit();
         return result;
+    }
+
+    /// <summary>
+    /// Resolve controller-owned project provider policy inside the same SQLite write
+    /// transaction as a worker claim to eliminate route-update/claim races.
+    /// </summary>
+    public T ChangeWithProviderRouteGuard<T>(
+        Func<FactoryState, IReadOnlySet<Guid>, T> mutation)
+    {
+        var routedProjects = new HashSet<Guid>();
+        return ChangeCore(state => mutation(state, routedProjects), null, (db, tx) =>
+        {
+            using var cmd = Command(db, tx, "SELECT DISTINCT project_id FROM project_provider_routes");
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) routedProjects.Add(Guid.Parse(reader.GetString(0)));
+        });
     }
 
     public (long GoalRemaining, long ProviderRemaining) ChangeWithProviderDebit(

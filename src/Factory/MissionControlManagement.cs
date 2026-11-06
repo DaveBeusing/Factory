@@ -32,6 +32,7 @@ public sealed class JobInput
     public List<Guid> DependsOn { get; set; } = [];
     public List<string> ExpectedPaths { get; set; } = [];
     public List<string> RequiredExecutionCapabilities { get; set; } = [];
+    public bool ReviewedExistingWork { get; set; }
 }
 public sealed class ScopeAmendmentInput
 {
@@ -211,11 +212,25 @@ public static class MissionControlManager
         ValidateJob(input);
         Require(store.Read().Projects.Any(p => p.Id == input.ProjectId && p.Status == "active"), "Project not active");
         if (input.GoalId != null) Require(store.Read().Goals.Any(g => g.Id == input.GoalId && g.ProjectId == input.ProjectId && g.State == "active"), "Goal not active");
-        return store.AddJob(new FactoryJob { ProjectId = input.ProjectId, GoalId = input.GoalId,
+        var snapshot = store.Read();
+        var project = snapshot.Projects.Single(p => p.Id == input.ProjectId);
+        WorkPackagePreflight.RequireMaster(project);
+        var preflight = WorkPackagePreflight.InspectDirectJob(snapshot, project, input.Title, input.Description);
+        if (preflight is not null && !input.ReviewedExistingWork)
+            throw new InvalidOperationException(
+                "Inspect existing master code and open work before direct job creation; acknowledge reviewedExistingWork");
+        var job = store.AddJob(new FactoryJob { ProjectId = input.ProjectId, GoalId = input.GoalId,
             Title = input.Title.Trim(), Description = input.Description.Trim(), Priority = input.Priority, Risk = input.Risk,
             Mode = input.Mode, MaxRounds = settings.MaxReviewRounds, DependsOn = input.DependsOn,
             ExpectedPaths = input.ExpectedPaths,
             RequiredExecutionCapabilities = input.RequiredExecutionCapabilities });
+        if (preflight is not null)
+            store.Event(job.Id, "job_preflight", "master " + preflight.BaseCommit +
+                "; source candidates " + preflight.ExistingCode.Count +
+                "; existing work " + preflight.ExistingJobs.Count +
+                "; matching PRs " + preflight.OpenPullRequests.Count +
+                "; PR inventory checked " + preflight.PullRequestsChecked);
+        return job;
     }
     public static FactoryJob UpdateJob(StateStore store, Guid id, JobInput input)
     {

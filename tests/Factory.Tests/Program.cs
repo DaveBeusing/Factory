@@ -87,8 +87,15 @@ Test("Provider budget reservations guard concurrent capacity and preserve unknow
     Assert(ProviderBudgetLedger.Record(state, first.Id, new AgentTokenUsage(150, 100)) == 350);
     ProviderBudgetLedger.Finish(state, first.Id, false);
     Assert(state.ProviderBudgetReservations.Single().State == "held");
+    try
+    {
+        ProviderBudgetLedger.Begin(state, j, provider, "review:code", "", 300);
+        throw new Exception("Held budget liability was released without reconciliation");
+    }
+    catch (TokenBudgetExceededException) { }
+    ProviderBudgetLedger.Finish(state, first.Id, true);
     var second = ProviderBudgetLedger.Begin(state, j, provider, "review:code", "", 300);
-    Assert(state.ProviderBudgetReservations.Last().Reserved == 200 + 0 + 0 + 0 + 0 + 0 + 0 - 0 + 0 + 0 + 0 + 0 - 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 - 0 + 0 + 0 + 0 + 0 + 0 + 0 - 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0 + 0);
+    Assert(state.ProviderBudgetReservations.Last().Reserved == 300);
     ProviderBudgetLedger.Record(state, second.Id, new AgentTokenUsage(50, 25));
     ProviderBudgetLedger.Finish(state, second.Id, true);
     Assert(state.ProviderBudgetReservations.Last().State == "released");

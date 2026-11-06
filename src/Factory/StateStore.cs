@@ -208,7 +208,7 @@ public sealed class StateStore
             CREATE TABLE IF NOT EXISTS provider_usages(
                 position INTEGER NOT NULL, id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE NO ACTION,
-                goal_id TEXT, job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE NO ACTION,
+                goal_id TEXT, job_id TEXT REFERENCES jobs(id) ON DELETE NO ACTION,
                 execution_generation INTEGER NOT NULL,
                 provider_id TEXT NOT NULL, model TEXT NOT NULL, role TEXT NOT NULL,
                 input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,

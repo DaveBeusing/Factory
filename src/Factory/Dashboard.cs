@@ -326,8 +326,16 @@ public static class DashboardHost
         {
             if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
                 return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
-            var claim = WorkerProtocol.Claim(store, settings, req.WorkerId);
+            var claim = WorkerProtocol.Claim(store, settings, req.WorkerId, req.ProtocolVersion);
             return claim is null ? (IResult)Results.NoContent() : Results.Ok(claim);
+        });
+        app.MapPost("/api/executor/turn", async (RemoteExecutorGrant grant, CancellationToken ct) =>
+            Results.Ok(await RemoteProviderExecutor.RunAsync(store, settings, grant, ct)));
+        app.MapPost("/api/worker/turn", async (HttpContext ctx, RemoteProviderTurnRequest req, CancellationToken ct) =>
+        {
+            if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
+                return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
+            return Results.Ok(await RemoteProviderRouting.ExecuteAsync(store, settings, req, ct));
         });
         app.MapPost("/api/worker/heartbeat", (HttpContext ctx, WorkerStatus req) =>
         {

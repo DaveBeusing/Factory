@@ -7,6 +7,13 @@ if (args is ["--verify-windows-package", var windowsPackage])
     return 0;
 }
 
+if (args is ["--verify-remote-provider-leases"])
+{
+    await RemoteProviderLeaseTests.RunAsync();
+    Console.WriteLine("PASS remote provider leases and executor");
+    return 0;
+}
+
 if (args is ["--browser-recovery-fixture", var browserFixtureHome])
 {
     BrowserRecoveryFixture.Seed(browserFixtureHome);
@@ -1560,6 +1567,9 @@ Test("Unknown worker capabilities and foreign grants are rejected", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+await TestAsync("Remote provider leases fence route, model, budget and completion evidence",
+    RemoteProviderLeaseTests.RunAsync);
+
 Test("Remote claims never take local jobs", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-mode-claim-" + Guid.NewGuid().ToString("N"));
@@ -2143,7 +2153,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 9, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 10, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -2648,7 +2658,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 9);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 10);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3148,7 +3158,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 9);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 10);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

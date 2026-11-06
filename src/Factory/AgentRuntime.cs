@@ -10,6 +10,7 @@ public sealed class AgentRunResult
     public bool FinalTextIsFallback { get; set; }
     public string Error { get; set; } = "";
     public string SessionId { get; set; } = "";
+    public string ObservedModel { get; set; } = "";
     public long InputTokens { get; set; }
     public long OutputTokens { get; set; }
     public bool UsageReported { get; set; }
@@ -147,7 +148,7 @@ public sealed class ExecAgentRuntime(string model) : IAgentRuntime
     }
 }
 
-public sealed class AppServerAgentRuntime(string model) : IAgentRuntime
+public sealed class AppServerAgentRuntime(string model, bool verifyModel = false) : IAgentRuntime
 {
     // Local stdio JSON-RPC. No experimental remote websocket transport.
     public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
@@ -210,6 +211,13 @@ public sealed class AppServerAgentRuntime(string model) : IAgentRuntime
             else
                 await SendAsync(new { method = "thread/resume", id = 2, @params = new { threadId = previousSession } });
             var thread = await ResponseAsync(2);
+            run.ObservedModel = thread.TryGetProperty("model", out var actualModel) && actualModel.ValueKind == JsonValueKind.String
+                ? actualModel.GetString() ?? "" : "";
+            if (verifyModel && run.ObservedModel != model)
+            {
+                run.Error = "App-server did not confirm the requested model";
+                return run;
+            }
             run.SessionId = thread.GetProperty("thread").GetProperty("id").GetString() ?? "";
             onSession?.Invoke(run.SessionId);
             await SendAsync(new { method = "turn/start", id = 3, @params = new

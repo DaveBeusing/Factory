@@ -14,7 +14,7 @@ public static class WorkerAuthentication
     private static readonly string[] WorkerEndpoints =
     [
         "/api/worker/register", "/api/worker/claim",
-        "/api/worker/heartbeat", "/api/worker/complete", "/api/worker/budget/extend"
+        "/api/worker/heartbeat", "/api/worker/complete", "/api/worker/budget/extend", "/api/worker/turn"
     ];
 
     private static bool IsAsciiLetterOrDigit(char c) =>
@@ -53,6 +53,9 @@ public static class WorkerAuthentication
     public static bool Authorized(string method, string? path, string? bearer, string? workerId,
         FactorySettings settings)
     {
+        if (string.Equals(path, "/api/executor/turn", StringComparison.OrdinalIgnoreCase))
+            return settings.EnableRemoteProviderExecutor && method.Equals("POST", StringComparison.OrdinalIgnoreCase) &&
+                RemoteProviderRouting.ExecutorCredential(settings) is { } executor && WorkerProtocol.Authorized(bearer, executor);
         if (IsWorkerNamespace(path))
             return IsWorkerEndpoint(method, path) && IsValidWorkerId(workerId) &&
                 IsValidKey(settings.WorkerTokenKey) &&

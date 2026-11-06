@@ -10,7 +10,7 @@ public interface IWorkerResultVerifier
         WorkerStatus status, CancellationToken ct);
 }
 
-public sealed record VerifiedWorkerResult(string EvidenceJson);
+public sealed record VerifiedWorkerResult(string EvidenceJson, string? TreeSha = null);
 
 public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
 {
@@ -53,6 +53,19 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         // Prevent accepting a PR whose head moved while the checks were inspected.
         using var latest = await PullAsync(repository, number, ct);
         ValidatePull(latest, repository, project.BaseBranch, expectedBranch, finished.HeadSha);
+        string? tree = null;
+        if (status.ProviderLeaseId is not null)
+        {
+            var response = await Commands.RunAsync("gh",
+                ["api", $"repos/{repository}/git/commits/{finished.HeadSha}"], Environment.CurrentDirectory, 45, cancellationToken: ct);
+            if (!response.Ok) throw new InvalidOperationException("Cannot independently read the verified commit tree");
+            using var commit = JsonDocument.Parse(response.Output);
+            if (commit.RootElement.GetProperty("sha").GetString() != finished.HeadSha)
+                throw new InvalidOperationException("GitHub returned a different commit");
+            tree = commit.RootElement.GetProperty("tree").GetProperty("sha").GetString();
+            if (tree is null || !IntegrationVerifier.IsCommitSha(tree))
+                throw new InvalidOperationException("GitHub did not return a valid commit tree");
+        }
         return new VerifiedWorkerResult(Json.Stringify(new
         {
             verifiedBy = "controller/github-required-checks",
@@ -63,9 +76,10 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             verifiedAt = DateTimeOffset.UtcNow,
             requiredChecks = checks.OrderBy(n => n, StringComparer.Ordinal).ToArray(),
             verifiedChangedPaths = changed,
+            verifiedTree = tree,
             // Worker data remains explicitly identified as worker-reported evidence.
             workerEvidence = evidence
-        }));
+        }), tree);
     }
 
     public static JsonElement ValidateEvidence(ProjectInfo project, FactoryJob job, WorkerStatus status)

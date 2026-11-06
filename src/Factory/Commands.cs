@@ -12,12 +12,14 @@ public static class Commands
 {
     public static async Task<CommandResult> RunAsync(string executable, IEnumerable<string> arguments,
         string workingDirectory, int timeoutSeconds = 120, string? stdin = null,
-        Action<string>? lineCallback = null, CancellationToken cancellationToken = default)
+        Action<string>? lineCallback = null, CancellationToken cancellationToken = default,
+        Action<ProcessStartInfo>? configure = null)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds)));
         using var proc = new Process();
         proc.StartInfo = StartInfo(executable, arguments, workingDirectory);
+        configure?.Invoke(proc.StartInfo);
         proc.Start();
         var output = new StringBuilder();
         var error = new StringBuilder();
@@ -167,6 +169,7 @@ public static class Commands
         // processes: they must not inherit controller or worker API bearer credentials.
         info.Environment.Remove("FACTORY_TOKEN");
         info.Environment.Remove("FACTORY_WORKER_TOKEN");
+        info.Environment.Remove("FACTORY_REMOTE_EXECUTOR_TOKEN");
         return info;
     }
     private static string QuoteCmd(string argument)

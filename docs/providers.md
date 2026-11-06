@@ -63,7 +63,7 @@ Set `tokenLimit` on a provider profile to cap its lifetime token consumption acr
 
 Factory reserves tokens transactionally before capped turns and goal-specific planning. For a goal-funded job with an uncapped provider, a zero-size provider reservation still tracks the turn for recovery. Final usage releases the unused provider reservation. Interrupted or unreported turns remain held for review. See [Recovery](recovery.md) for same-host and cross-host procedures and settlement order.
 
-Remote claims are refused for projects with explicit provider assignments or project provider caps, and when a provider-wide cap is configured. A missing provider or unsupported role capability blocks the requested action. Factory requires an explicit route change to use another provider.
+Legacy remote claims are refused for projects with explicit provider assignments or project provider caps, and when a provider-wide cap is configured. Mixed remote routes require an explicitly enabled, versioned provider lease and a trusted executor. A missing provider or unsupported role capability blocks the requested action. Factory requires an explicit route change to use another provider.
 
 ### Account windows and reported costs
 

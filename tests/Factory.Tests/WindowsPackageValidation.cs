@@ -37,7 +37,7 @@ internal static class WindowsPackageValidation
                 "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + Path.Combine(scratch.FullName, "no-hooks"),
                 "commit", "-m", "Create fixture");
             await RunFactoryAsync(executable, freshState, "init", repository, "--name", "Preview fixture");
-            Require(ReadSchema(freshState) == 9, "Fresh installation did not create schema 9");
+            Require(ReadSchema(freshState) == 10, "Fresh installation did not create schema 10");
             var settings = File.ReadAllBytes(Path.Combine(freshState, "settings.json"));
             var store = new StateStore(freshState);
             var project = store.Read().Projects.Single();
@@ -67,7 +67,7 @@ internal static class WindowsPackageValidation
 
             await RunFactoryAsync(executable, freshState, "providers");
             VerifyUpgradedState(freshState, project.Id, settings);
-            Console.WriteLine("PASS Windows package upgrade from schema 8 to 9 with project, usage and settings preserved");
+            Console.WriteLine("PASS Windows package upgrade from schema 8 to 10 with project, usage and settings preserved");
 
             Require(ReadSchema(backup) == 8, "Schema of the original backup changed during upgrade");
             var restored = Directory.CreateDirectory(Path.Combine(scratch.FullName, "restored")).FullName;
@@ -92,7 +92,7 @@ internal static class WindowsPackageValidation
     private static void VerifyUpgradedState(string directory, Guid projectId, byte[] settings)
     {
         // Read the pragma before using StateStore so the verifier cannot perform the upgrade itself.
-        Require(ReadSchema(directory) == 9, "The packaged executable did not migrate to schema 9");
+        Require(ReadSchema(directory) == 10, "The packaged executable did not migrate to schema 10");
         var state = new StateStore(directory).Read();
         Require(state.Projects.Single().Id == projectId, "Project identity changed");
         var usage = state.ProviderUsages.Single();

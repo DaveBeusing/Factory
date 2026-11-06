@@ -1,0 +1,234 @@
+using Factory;
+using Microsoft.Data.Sqlite;
+
+internal static class RemoteProviderLeaseTests
+{
+    private static readonly string Base = new('a', 40);
+    private static readonly string Head = new('b', 40);
+    private static readonly string Tree = new('c', 40);
+
+    public static async Task RunAsync()
+    {
+        const string worker = "lease-fixture";
+        const string env = "FACTORY_REMOTE_EXECUTOR_TOKEN";
+        var oldToken = Environment.GetEnvironmentVariable(env);
+        var scratch = Directory.CreateTempSubdirectory("factory-remote-lease-");
+        var token = new string('d', 64);
+        Environment.SetEnvironmentVariable(env, token);
+        try
+        {
+            var store = new StateStore(scratch.FullName);
+            var project = new ProjectInfo { Name = "Lease fixture", Origin = "https://github.com/example/fixture",
+                RequiredExecutionCapabilities = [RemoteProviderRouting.Capability] };
+            var goal = new FactoryGoal { ProjectId = project.Id, State = "active", TokenBudget = 4000 };
+            FactoryJob NewJob() => new() { ProjectId = project.Id, GoalId = goal.Id, Mode = JobExecutionModes.Remote,
+                Title = "Change fixture", ExpectedPaths = ["fixture.txt"] };
+            var job = NewJob();
+            var settings = new FactorySettings { AllowPush = true, EnableRemoteProviderRouting = true,
+                EnableRemoteProviderExecutor = true, RemoteProviderExecutorUrl = "http://127.0.0.1:9999",
+                RemoteProviderTurnTokens = 256, GoalReservationTokens = 700, Runtime = "app-server",
+                Providers = [new() { Model = "fixture-builder", TokenLimit = 1800 },
+                    new() { Id = "review-fixture", Kind = "ollama", Model = "fixture:1", TokenLimit = 600 }] };
+            settings.EnsureCredentials();
+            store.Change(state =>
+            {
+                state.Projects.Add(project); state.Goals.Add(goal); state.Jobs.Add(job);
+                state.Workers.Add(new WorkerInfo { Id = worker });
+                state.WorkerProjectGrants.Add(new() { WorkerId = worker, ProjectId = project.Id });
+                state.WorkerCapabilityProofs.AddRange(new[] { "native-agent", "git-cli", "runtime:app-server",
+                    RemoteProviderRouting.Capability }.Select(capability => new WorkerCapabilityProof
+                    { WorkerId = worker, Capability = capability, Evidence = "fixture", VerifiedAt = DateTimeOffset.UtcNow }));
+                state.ProviderAssignments.Add(new() { ProjectId = project.Id, ProviderId = "review-fixture", Role = "review" });
+            });
+            using (var db = new SqliteConnection(new SqliteConnectionStringBuilder
+                { DataSource = Path.Combine(scratch.FullName, "factory.sqlite3"), Pooling = false }.ToString()))
+            {
+                db.Open();
+                using var command = db.CreateCommand();
+                command.CommandText = "DROP TABLE remote_provider_turns; DROP TABLE remote_provider_leases; PRAGMA user_version=9;";
+                command.ExecuteNonQuery();
+            }
+            store = new StateStore(scratch.FullName);
+            Check(store.Job(job.Id).GoalId == goal.Id, "Schema 9 migration lost the existing job");
+            Check(WorkerProtocol.Claim(store, settings, worker) is null, "Old protocol bypassed routing");
+            settings.EnableRemoteProviderRouting = false;
+            Check(WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion) is null,
+                "Disabled mixed routing accepted a claim");
+            settings.EnableRemoteProviderRouting = true;
+            Check(WorkerAuthentication.Authorized("POST", "/api/executor/turn", "Bearer " + token, null, settings),
+                "Dedicated executor authentication failed");
+            Check(!WorkerAuthentication.Authorized("POST", "/api/executor/turn",
+                "Bearer " + WorkerAuthentication.CreateToken(settings.WorkerTokenKey, worker), worker, settings),
+                "Worker token authorized the executor");
+            Check(!WorkerAuthentication.Authorized("POST", "/api/worker/turn", "Bearer " + token, worker, settings),
+                "Executor credential authorized a worker request");
+
+            var claim = WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion)
+                ?? throw new Exception("Versioned worker could not claim the opted-in job");
+            Check(claim.ProviderRoutes!.Single(r => r.Role == "review:code").ProviderId == "review-fixture",
+                "Review route was not bound to the lease");
+            var status = new WorkerStatus { WorkerId = worker, JobId = job.Id,
+                ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,
+                ProviderLeaseId = claim.ProviderLeaseId, TokensIn = 4000, TokensOut = 4000, UsageComplete = true };
+            Check(WorkerProtocol.Heartbeat(store, status, settings) && store.Job(job.Id).TokensIn == 0,
+                "Worker heartbeat replaced trusted usage");
+
+            RemoteProviderTurnRequest Request(string role, string commit) => new()
+            {
+                WorkerId = worker, JobId = claim.Job.Id, LeaseId = claim.ProviderLeaseId!.Value,
+                TurnId = Guid.NewGuid(), Role = role, Commit = commit,
+                ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken
+            };
+            RemoteExecutorGrant Begin(RemoteProviderTurnRequest request) =>
+                store.Change(state => RemoteProviderRouting.Begin(state, settings, request).Grant);
+            bool Record(RemoteExecutorGrant grant, RemoteExecutorReceipt receipt) =>
+                store.Change(state => RemoteProviderRouting.Record(state, settings, grant, receipt));
+            static RemoteExecutorReceipt Receipt(RemoteExecutorGrant grant, string? model = null) =>
+                new(grant.TurnId, grant.LeaseId, grant.Route.ProviderId, grant.Route.Role, grant.Commit,
+                    model ?? grant.Route.Model, 30, 10, true, true, "VERDICT: PASS", false, grant.Route.Role == "builder" ? Tree : "", []);
+
+            var builderRequest = Request("builder", Base);
+            var builder = Begin(builderRequest);
+            Check(builder.VerifyRemoteBase && builder.Task.Contains(job.Title), "First builder was not bound to controller task");
+            Reject(() => Begin(builderRequest), "duplicate turn dispatch");
+            var receipt = Receipt(builder);
+            Check(Record(builder, receipt) && !Record(builder, receipt), "Receipt was not fenced against replay");
+            var code = Begin(Request("review:code", Head));
+            var architecture = Begin(Request("review:architecture", Head));
+            Reject(() => Begin(Request("review:security", Head)), "oversubscribed concurrent reviews");
+            Check(code.ExpectedInputTree == Tree && code.BaseCommit == Base, "Review was not bound to builder tree and base");
+            Check(Record(code, Receipt(code)) && Record(architecture, Receipt(architecture)), "Reviews did not settle");
+            foreach (var role in new[] { "review:security", "review:ux" })
+            {
+                var grant = Begin(Request(role, Head));
+                Check(Record(grant, Receipt(grant)), "Review did not settle");
+            }
+            Check(store.Read().ProviderUsages.Sum(u => u.InputTokens + u.OutputTokens) == 200 &&
+                store.Job(job.Id).TokensIn == 150 && store.Job(job.Id).TokensOut == 50, "Ledgers diverged");
+            status.Job = new FactoryJob { Id = job.Id, ProjectId = project.Id, Mode = JobExecutionModes.Remote,
+                Attempt = claim.Job.Attempt, State = JobStates.PrReady, HeadSha = Head };
+            var completedSnapshot = store.Read();
+            Check(!RemoteProviderRouting.VerifyCompletion(completedSnapshot, completedSnapshot.RemoteProviderLeases.Single(),
+                Head, Base), "Unverified GitHub tree was accepted");
+            Check(await WorkerProtocol.CompleteAsync(store, status, new FixtureVerifier(), settings: settings) &&
+                store.Job(job.Id).State == JobStates.PrReady, "Trusted mixed-provider completion was rejected");
+
+            var nextJob = NewJob();
+            store.Change(state => state.Jobs.Add(nextJob));
+            claim = WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion)!;
+            var wrong = Begin(Request("builder", Base));
+            Check(!Record(wrong, Receipt(wrong, "different-model")), "Substituted model was accepted");
+            var recovered = new StateStore(scratch.FullName).Read();
+            Check(recovered.Jobs.Single(j => j.Id == nextJob.Id).Stage == "reconcile" &&
+                recovered.RemoteProviderTurns.Single(t => t.Id == wrong.TurnId).State == "held" &&
+                recovered.BudgetReservations.Single(r => r.JobId == nextJob.Id).Consumed == 40,
+                "Model mismatch did not fence the lease and retain observed usage");
+
+            var expiringJob = NewJob();
+            store.Change(state => state.Jobs.Add(expiringJob));
+            claim = WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion)!;
+            var interrupted = Begin(Request("builder", Base));
+            store.Change(state => state.Jobs.Single(j => j.Id == expiringJob.Id).LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+            Check(JobRecovery.QuarantineExpired(store, JobExecutionModes.Remote).Contains(expiringJob.Id) &&
+                !Record(interrupted, Receipt(interrupted)), "Expired lease accepted late executor usage");
+            var expired = store.Read();
+            var heldTurn = expired.RemoteProviderTurns.Single(t => t.Id == interrupted.TurnId);
+            Check(heldTurn.State == "held" && expired.ProviderBudgetReservations.Single(r => r.UsageId == heldTurn.UsageId).State == "held" &&
+                expired.BudgetReservations.Single(r => r.JobId == expiringJob.Id).State == GoalBudgetLedger.Held,
+                "Expiry released an uncertain liability");
+            await VerifyExecutorAsync(store, settings, scratch.FullName, builder, code);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(env, oldToken);
+            if (OperatingSystem.IsWindows())
+                foreach (var file in scratch.EnumerateFiles("*", SearchOption.AllDirectories))
+                    if (file.IsReadOnly) file.IsReadOnly = false;
+            scratch.Delete(recursive: true);
+        }
+    }
+
+    private static async Task VerifyExecutorAsync(StateStore store, FactorySettings settings, string scratch,
+        RemoteExecutorGrant builder, RemoteExecutorGrant reviewer)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(45));
+        var ct = timeout.Token;
+        var repository = Directory.CreateDirectory(Path.Combine(scratch, "repository")).FullName;
+        Task<string> Git(params string[] args) => RemoteProviderExecutor.GitAsync(repository, ct, args);
+        async Task Commit(string message) => await Git("-c", "user.name=Factory Fixture", "-c",
+            "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", message);
+        async Task<byte[]> Bundle()
+        {
+            var path = Path.Combine(scratch, Guid.NewGuid().ToString("N") + ".bundle");
+            await Git("bundle", "create", path, "HEAD");
+            return await File.ReadAllBytesAsync(path, ct);
+        }
+        await Git("init", "-b", "master");
+        await File.WriteAllTextAsync(Path.Combine(repository, "fixture.txt"), "original\n", ct);
+        await Git("add", "fixture.txt");
+        await Commit("Base fixture");
+        var baseCommit = await Git("rev-parse", "HEAD");
+        var builderGrant = builder with
+        {
+            TurnId = Guid.NewGuid(), Commit = baseCommit, BaseCommit = baseCommit, VerifyRemoteBase = false,
+            ExpectedInputTree = await Git("write-tree"), Bundle = await Bundle()
+        };
+        var built = await RemoteProviderExecutor.RunAsync(store, settings, builderGrant, ct,
+            new FixtureAgent(builder.Route.Model, expectReadOnly: false));
+        Check(built.Success && built.Patch.Length != 0 && built.ObservedModel == builder.Route.Model,
+            "Executor did not produce a model-bound patch");
+        var patch = Path.Combine(scratch, "executor.patch");
+        await File.WriteAllBytesAsync(patch, built.Patch, ct);
+        await Git("apply", "--index", "--binary", patch);
+        Check(await Git("write-tree") == built.OutputTree, "Executor patch did not reproduce the output tree");
+        await Commit("Executor change");
+        var reviewGrant = reviewer with
+        {
+            TurnId = Guid.NewGuid(), Commit = await Git("rev-parse", "HEAD"), BaseCommit = baseCommit,
+            ExpectedInputTree = built.OutputTree, Bundle = await Bundle()
+        };
+        var reviewed = await RemoteProviderExecutor.RunAsync(store, settings, reviewGrant, ct,
+            new FixtureAgent(reviewer.Route.Model, expectReadOnly: true));
+        Check(reviewed.Success && reviewed.FinalText == "VERDICT: PASS" && reviewed.Patch.Length == 0,
+            "Executor did not bind the review to the committed patch");
+        try
+        {
+            await RemoteProviderExecutor.RunAsync(store, settings, reviewGrant, ct,
+                new FixtureAgent(reviewer.Route.Model, expectReadOnly: true));
+            throw new Exception("Executor dispatched the same grant twice");
+        }
+        catch (IOException) { }
+    }
+
+    private sealed class FixtureAgent(string model, bool expectReadOnly) : IAgentRuntime
+    {
+        public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+            CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+            Action<AgentTokenUsage>? onUsage = null)
+        {
+            Check(readOnly == expectReadOnly, "Executor did not enforce the role");
+            if (readOnly) Check(prompt.Contains("+changed by executor"), "Review prompt omitted the independently read diff");
+            else await File.WriteAllTextAsync(Path.Combine(directory, "fixture.txt"), "changed by executor\n", cancellation);
+            return new AgentRunResult { ObservedModel = model, InputTokens = 30, OutputTokens = 10,
+                UsageReported = true, Success = true, FinalText = "VERDICT: PASS" };
+        }
+    }
+
+    private sealed class FixtureVerifier : IWorkerResultVerifier
+    {
+        public Task<VerifiedWorkerResult> VerifyAsync(ProjectInfo project, FactoryJob job, WorkerStatus status,
+            CancellationToken ct) => Task.FromResult(new VerifiedWorkerResult("{}", Tree));
+    }
+
+    private static void Reject(Action action, string scenario)
+    {
+        try { action(); }
+        catch (InvalidOperationException) { return; }
+        throw new Exception("Unexpectedly accepted " + scenario);
+    }
+
+    private static void Check(bool result, string message)
+    {
+        if (!result) throw new Exception(message);
+    }
+}

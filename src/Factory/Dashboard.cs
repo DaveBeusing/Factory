@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace Factory;
 
@@ -40,7 +41,8 @@ public static class DashboardHost
             ctx.Response.Headers["Cache-Control"] = "no-store";
             ctx.Response.Headers["Content-Security-Policy"] =
                 "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
-            if (ctx.Request.Path.StartsWithSegments("/api"))
+            var isViewerRequest = ctx.GetEndpoint()?.Metadata.GetMetadata<ProjectViewerEndpoint>() is not null;
+            if (ctx.Request.Path.StartsWithSegments("/api") && !isViewerRequest)
             {
                 var path = ctx.Request.Path.Value;
                 var workerId = ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString();
@@ -59,11 +61,19 @@ public static class DashboardHost
             try { await next(); }
             catch (Exception ex) when (!ctx.Response.HasStarted)
             {
+                if (isViewerRequest)
+                {
+                    app.Logger.LogError(ex, "Project viewer request failed");
+                    ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                    await ctx.Response.WriteAsJsonAsync(new { error = "Unable to read project data." });
+                    return;
+                }
                 ctx.Response.StatusCode = ex is InvalidOperationException or ArgumentException or FileNotFoundException
                     ? StatusCodes.Status400BadRequest : StatusCodes.Status500InternalServerError;
                 await ctx.Response.WriteAsJsonAsync(new { error = ex.Message });
             }
         });
+        ProjectViewerEndpoint.Map(app, store);
         app.MapGet("/api/state", () =>
         {
             var snapshot = store.Read();

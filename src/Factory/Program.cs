@@ -59,6 +59,8 @@ Factory | C# / .NET 10
   release --project NAME --version X.Y.Z
   dashboard [--port 8787] | worker --server HTTPS_URL --workspace DIR --id WORKER_ID
   worker-token --id WORKER_ID
+  viewer create --name NAME | viewer rotate|disable --subject GUID
+  viewer grant|revoke --subject GUID --project NAME
   usage | providers | install-skills [--overwrite]
 Environment: FACTORY_HOME overrides the local state directory.
 """);
@@ -82,6 +84,7 @@ Environment: FACTORY_HOME overrides the local state directory.
             return 0;
         }
         var store = new StateStore(Home);
+        if (args[0] == "viewer") return ManageViewers(store, args);
         var settings = Settings(Home);
         var engine = new FactoryEngine(store, settings, FactoryPlugins.Load(Path.Combine(Home, "plugins.json")));
         switch (args[0])
@@ -273,6 +276,34 @@ Environment: FACTORY_HOME overrides the local state directory.
                 Skills.Install(Flag(args, "overwrite")); return 0;
             default: throw new ArgumentException("Unknown command: " + args[0]);
         }
+    }
+
+    private static int ManageViewers(StateStore store, string[] args)
+    {
+        switch (args.ElementAtOrDefault(1))
+        {
+            case "create":
+                var (id, token) = store.CreateViewer(Required(args, "name"));
+                Print(new { subjectId = id, token });
+                break;
+            case "rotate":
+            case "disable":
+                var subjectId = GuidArg(Required(args, "subject"));
+                var credential = store.SetViewerCredential(subjectId, rotate: args[1] == "rotate");
+                if (credential is null) Print(new { subjectId, disabled = true });
+                else Print(new { subjectId, token = credential });
+                break;
+            case "grant":
+            case "revoke":
+                var subject = GuidArg(Required(args, "subject"));
+                var project = store.Project(Required(args, "project"));
+                var changed = store.SetViewerGrant(subject, project.Id, grant: args[1] == "grant");
+                Print(new { subjectId = subject, projectId = project.Id, changed });
+                break;
+            default:
+                throw new ArgumentException("Expected viewer create, rotate, disable, grant or revoke");
+        }
+        return 0;
     }
 }
 

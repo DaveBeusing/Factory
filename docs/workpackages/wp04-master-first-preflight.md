@@ -15,7 +15,7 @@ Two preexisting unmerged draft PRs (#19 and #20) overlap considerably on provide
 
 ## Outcome
 
-All user-entered and planner-generated Factory work packages must originate from `master`; existing source, jobs and available open PRs must be inspected before new work is proposed. A partial implementation should be completed and tested, not replaced by a duplicate. When source or active work overlaps, adoption requires an explicit review acknowledgement.
+All user-entered and planner-generated Factory work packages must originate from `master`; existing source, jobs and available open PRs must be inspected before new work is proposed. A partial implementation should be completed and tested, not replaced by a duplicate. Every plan adoption requires an explicit review acknowledgement, including when the heuristic finds no overlap. An operator must verify open PRs when automated inventory is unknown.
 
 ## Delivered scope
 
@@ -38,7 +38,7 @@ All user-entered and planner-generated Factory work packages must originate from
 
 - [x] New plan and direct-job paths require master.
 - [x] Master source inspection is independent of a checked-out feature branch.
-- [x] Existing-code candidates are visible and subject to explicit review before adoption.
+- [x] Existing-code candidates are visible and every plan adoption requires explicit review.
 - [x] Advance of master invalidates a saved plan.
 - [x] Existing worktrees are preserved on ancestry/branch mismatch.
 - [x] Existing independent tests cover master/feature checkout distinction and direct intake.

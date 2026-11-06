@@ -35,11 +35,20 @@ async function api(path,method='GET',body){if(!token)throw new Error('Connect yo
 const notify=(message,error=false)=>{const el=document.createElement('div');el.className='toast'+(error?' error':'');el.innerHTML=`<span class="toast-icon">${ico(error?'shield':'check')}</span><span>${esc(message)}</span>`;$('toast-stack').append(el);setTimeout(()=>el.remove(),5500)};
 function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.classList.toggle('hidden',!val)); }
 function nav(v){view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
-function statusFromHealth(){const since=Date.now()-lastHeartbeat;const status=connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
- const label=status==='connected'?'Connected':status==='degraded'?'Degraded':'Offline';$('connection-pill').className='connection-pill '+(status==='connected'?'':status);$('connection-label').textContent=label;$('connection-age').textContent=since<60000&&lastHeartbeat?Math.max(0,Math.round(since/1000))+'s':'';
- for(const id of ['connection-dot','sidebar-dot','footer-dot'])$(id).className='live-dot '+(status==='connected'?'':status);
- $('sidebar-status').textContent=status==='connected'?'System connected':status==='degraded'?'Connection delayed':'Connection offline';$('sidebar-heartbeat').textContent=lastHeartbeat?'Heartbeat '+relative(new Date(lastHeartbeat).toISOString()):'No heartbeat';
- $('footer-status').textContent=status==='connected'?'Realtime stream active':status==='degraded'?'Reconnecting stream':'No active connection';$('status-clock').textContent=new Date().toLocaleTimeString();}
+function statusFromHealth(){
+ const since=lastHeartbeat?Date.now()-lastHeartbeat:Infinity;
+ const status=!token?'offline':!lastHeartbeat?'connecting':connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
+ const label=status==='connected'?'Connected':status==='degraded'?'Connection delayed':status==='connecting'?'Connecting':'Offline';
+ const brand=$('brand-connection'),dot=$('brand-connection-dot');
+ dot.className='brand-connection-dot '+status;
+ brand.title='Connection settings · '+label;
+ brand.setAttribute('aria-label','Connection settings, '+label.toLowerCase());
+ for(const id of ['sidebar-dot','footer-dot'])$(id).className='live-dot '+status;
+ $('sidebar-status').textContent=status==='connected'?'System connected':status==='degraded'?'Connection delayed':status==='connecting'?'Connecting':'Connection offline';
+ $('sidebar-heartbeat').textContent=lastHeartbeat?'Heartbeat '+relative(new Date(lastHeartbeat).toISOString()):'No heartbeat';
+ $('footer-status').textContent=status==='connected'?'Realtime stream active':status==='degraded'?'Reconnecting stream':status==='connecting'?'Connecting to event stream':'No active connection';
+ $('status-clock').textContent=new Date().toLocaleTimeString();
+}
 function updateHealth(h){health=h;lastHeartbeat=Date.now();connected=true;statusFromHealth()}
 async function startStream(){if(streamController)streamController.abort();streamController=new AbortController();const controller=streamController;
  while(!controller.signal.aborted&&token){try{const res=await fetch('/api/events/stream',{headers:{Authorization:'Bearer '+token},cache:'no-store',signal:controller.signal});if(!res.ok)throw Error('Stream '+res.status);
@@ -48,7 +57,7 @@ async function startStream(){if(streamController)streamController.abort();stream
 }
 async function refreshState(){if(!token||loading)return;loading=true;try{state=await api('state');lastStateUpdate=Date.now();connected=true;render();statusFromHealth()}catch(e){connected=false;statusFromHealth();if(!lastStateUpdate)render();}finally{loading=false}}
 async function refreshUsage(){if(!token)return;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render()}
-async function connect(nextToken){if(nextToken!==undefined){token=nextToken;try{token?sessionStorage.setItem('factory-token',token):sessionStorage.removeItem('factory-token')}catch{}}
+async function connect(nextToken){if(nextToken!==undefined){if(nextToken!==token){lastHeartbeat=0;connected=false;health=null;if(streamController)streamController.abort()}token=nextToken;try{token?sessionStorage.setItem('factory-token',token):sessionStorage.removeItem('factory-token')}catch{}}
  if(!token){connected=false;if(streamController)streamController.abort();state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};usage=null;render();statusFromHealth();return}
  try{await refreshState();if(!connected)throw Error('Invalid token or server unreachable');$('connection-modal').close();startStream();refreshUsage();fetchSettings();fetchManagedWorkers();fetchProviders()}catch(e){notify(e.message,true);$('connection-modal').showModal()}}
 async function fetchSettings(){try{settings=await api('settings')}catch{}}
@@ -547,7 +556,7 @@ $('modal-close').addEventListener('click',()=>{$('form-modal').close()});$('moda
 $('connection-form').addEventListener('submit',async e=>{e.preventDefault();await connect($('api-token').value.trim())});
 $('disconnect').addEventListener('click',()=>{$('connection-modal').close();connect('')});
 document.querySelectorAll('[data-close]').forEach(el=>el.addEventListener('click',()=>$(el.dataset.close).close()));
-$('open-connection').addEventListener('click',()=>{$('api-token').value=token;$('connection-modal').showModal()});
+$('brand-connection').addEventListener('click',()=>{$('api-token').value=token;$('connection-modal').showModal()});
 $('inspector-close').addEventListener('click',closeInspector);$('inspector-backdrop').addEventListener('click',closeInspector);
 $('mobile-open').addEventListener('click',()=>{$('sidebar').classList.add('open');$('sidebar-backdrop').classList.add('open')});
 $('mobile-close').addEventListener('click',()=>{$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open')});

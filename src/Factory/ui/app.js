@@ -162,6 +162,13 @@ function renderUsage(){
  body+=card('Provider and model consumption','Observed usage after provider attribution; unreported prior history cannot be reconstructed.',
    rows?table(['Provider','Input tokens','Output tokens','Held / active','Local remaining','Account allowance'],rows):
    empty('gauge','Provider data unavailable','Connect to the controller to load provider utilization.'));
+ const modelRows=(providerData?.usage||[]).flatMap(p=>(p.models||[]).flatMap(m=>
+  (m.roles||[]).map(role=>`<tr><td>${esc(p.id)}</td><td>${esc(m.model)}</td><td>${esc(role.role)}</td>
+  <td>${Number(role.inputTokens||0).toLocaleString()}</td>
+  <td>${Number(role.outputTokens||0).toLocaleString()}</td></tr>`))).join('');
+ if(modelRows)body+=`<div style="margin-top:17px">`+
+  card('Per-model and role consumption','Recorded provider token usage, grouped by model and agent responsibility.',
+  table(['Provider','Model','Role','Input tokens','Output tokens'],modelRows))+`</div>`;
  const projects=(providerData?.usage||[]).flatMap(p=>(p.projects||[]).map(row=>
    `<tr><td>${esc(row.name)}</td><td>${esc(p.id)}</td><td>${Number(row.observedTokens||0).toLocaleString()}</td>
     <td>${Number(row.reservedTokens||0).toLocaleString()}</td>

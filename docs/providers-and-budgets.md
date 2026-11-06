@@ -9,7 +9,7 @@ Factory keeps orchestration and project contracts provider-independent. Provider
 | Codex CLI | Read-only | Read-only | Workspace-write | Read-only | Existing Codex worker path | When the runtime reports it | Weekly/short windows only when authentically reported |
 | Claude Code CLI | Read-only Plan mode | Read-only Plan mode | Not supported | Read-only Plan mode | Not supported | When structured CLI JSON reports it | Not available |
 
-Claude Code is invoked in non-interactive print mode with `--permission-mode plan` and a restrictive tool list (`Read,Glob,Grep`). This is **not** an operating-system sandbox. Factory fails closed for write-enabled Claude jobs or unverified remote provider capabilities. Authentication stays with the respective native CLI; no provider credentials are stored in Factory project routing.
+Claude Code is invoked in non-interactive print mode with `--bare`, `--permission-mode plan`, the restrictive built-in tool list (`Read,Glob,Grep`), and a strict empty MCP configuration. The adapter explicitly denies MCP tool patterns to prevent a local configured plugin/server from expanding its effective tool access. Recent official native Claude Code CLI versions supporting these flags are required. This is **not** an operating-system sandbox. Factory fails closed for write-enabled Claude jobs or unverified remote provider capabilities. Authentication stays with the respective native CLI; no provider credentials are stored in Factory project routing.
 
 Install and authenticate the external CLI separately. For Windows CLI installations that are not discoverable on `PATH`, set `FACTORY_CLAUDE_EXECUTABLE` to a trusted executable or command wrapper. The existing `FACTORY_AGENT_EXECUTABLE` continues to apply only to Codex. No Node.js/npm dependency is added to Factory's build.
 
@@ -41,6 +41,8 @@ The existing goal-budget ledger remains authoritative for total goal allocations
 - A provider limit blocks admission when remaining capacity is below the required minimum and cancels execution when the active reservation is exhausted. Goal and provider usage debits during fenced local execution share an SQLite transaction.
 - The **Capacity** view reports consumed tokens, outstanding liabilities, configured limit and locally available allocation. It also groups usage by model and agent role.
 - Provider-reported USD cost is shown only when available from the provider (currently Claude JSON). Missing pricing/cost and unknown model IDs remain unknown; Factory does not synthesize prices.
+
+**Budget limit semantics:** Factory reserves capacity before starting and cancels further work when observed usage reaches the local reservation. Providers may report usage only at the end of a turn; already-spent tokens can exceed the local cap before Factory receives a final report. Such overruns are recorded rather than erased. Factory budgets are admission/observation controls, not guaranteed provider-side billing limits.
 
 **Do not confuse local budget availability with external quotas.** Codex weekly/short account allowance appears only when the original usage monitor returns real data; cached readings are marked accordingly. No provider API for Claude Code remaining account allowance is implemented. A locally unbounded budget never implies infinite vendor capacity.
 

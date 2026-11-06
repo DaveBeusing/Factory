@@ -1,6 +1,6 @@
 # Factory
 
-**Plan with intent. Execute in isolation. Validate with evidence.**
+**Plan with intent. Execute in dedicated worktrees. Validate with evidence.**
 
 ![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)
 ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4)
@@ -71,12 +71,25 @@ winget install --id Git.Git --exact --source winget
 winget install --id GitHub.cli --exact --source winget
 ```
 
+### Clone the source
+
+Open a **new PowerShell terminal** to pick up the newly installed Git executable, then clone Factory:
+
+```powershell
+git clone https://github.com/DaveBeusing/Factory.git
+Set-Location Factory
+```
+
+Use this repository root for the following commands, including the optional dependency checker. A full Git checkout (not a shallow clone) is required for Git-derived preview versioning.
+
 Install the native agent CLI using its official Windows installer, **only after reviewing the download source and installer content**:
 
 ```powershell
-$installerUrl = 'https://chatgpt.com/codex/install.ps1'
-$installer = (Invoke-WebRequest -UseBasicParsing -Uri $installerUrl).Content
-& ([scriptblock]::Create($installer))
+$installerPath = Join-Path $env:TEMP 'codex-install.ps1'
+Invoke-WebRequest -Uri 'https://chatgpt.com/codex/install.ps1' -OutFile $installerPath
+Get-Content $installerPath  # Inspect the downloaded script before execution.
+# Only after reviewing and trusting the script:
+& $installerPath
 ```
 
 This is the external CLI's installation mechanism, not a Factory dependency on a JavaScript package manager. If the installer is unavailable for your environment, use the official native executable distribution instead.
@@ -111,17 +124,6 @@ gh auth login
 
 > [!NOTE]
 > `gh` is optional for local-only operation. Installation and authentication are separate steps. Factory never authenticates to an external account on your behalf.
-
-### Clone the source
-
-Once Git is installed, create a local checkout and run the remaining commands from that directory:
-
-```powershell
-git clone https://github.com/DaveBeusing/Factory.git
-Set-Location Factory
-```
-
-A full Git checkout (not a shallow clone) is required for Git-derived preview versioning.
 
 ## 3. Build and test
 

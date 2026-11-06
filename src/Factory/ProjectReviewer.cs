@@ -22,6 +22,10 @@ public sealed class ProjectReviewSnapshot
     public int IndexedFiles { get; set; }
     public List<ProjectReviewFinding> Findings { get; set; } = [];
     public string Method { get; set; } = "deterministic_repository_inspection";
+    // Optional read-only provider commentary, never treated as verified evidence or an automatic goal.
+    public string Advisory { get; set; } = "";
+    public string AdvisoryProvider { get; set; } = "";
+    public string AdvisoryModel { get; set; } = "";
 }
 
 public sealed class ReviewGoalInput
@@ -49,7 +53,7 @@ public static class ProjectReviewer
     }
 
     public static async Task<ProjectReviewSnapshot> AnalyzeAsync(StateStore store, Guid projectId,
-        CancellationToken ct)
+        CancellationToken ct, FactorySettings? settings = null)
     {
         var gate = Locks.GetOrAdd(projectId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
@@ -104,7 +108,29 @@ public static class ProjectReviewer
                     "Rerun required checks against the correct commit");
             ct.ThrowIfCancellationRequested();
             // Bounded native index: no untrusted repository scripts or model-generated actions.
-            review.IndexedFiles = KnowledgeGraph.Scan(project).Take(500).Count();
+            var index = KnowledgeGraph.Scan(project).Take(500).ToArray();
+            review.IndexedFiles = index.Length;
+            if (settings != null && state.ProviderAssignments.Any(x =>
+                x.ProjectId == projectId && x.Role == "analysis"))
+            {
+                var choice = ProviderRouter.Select(settings, state, projectId, "analysis", "medium");
+                var profile = ProviderRouter.Resolve(settings, state, projectId, "analysis");
+                var runtime = new ProjectScopedAgentRuntime(choice.Runtime, store, projectId, null,
+                    profile, "analysis", choice.Model, settings.GoalReservationTokens);
+                var boundedIndex = Json.Stringify(index.Take(80).Select(x => new { x.File, x.Symbols, x.Imports }));
+                if (boundedIndex.Length > 24000) boundedIndex = boundedIndex[..24000];
+                var prompt = "READ ONLY: Provide advisory repository review observations based ONLY on the bounded " +
+                    "index and verified deterministic findings provided below. Do not claim direct validation, " +
+                    "execution, security certification or exhaustive coverage. Cite paths where supplied. " +
+                    "State uncertainty plainly. No code changes or external side effects. " +
+                    "Repository index: " + boundedIndex + "\nDeterministic findings: " +
+                    Json.Stringify(review.Findings);
+                var response = await runtime.RunAsync(project.Path, prompt, "", ct, readOnly: true);
+                if (!response.Success) throw new InvalidOperationException("Project analysis provider failed: " + response.Error);
+                review.Advisory = response.FinalText[..Math.Min(12000, response.FinalText.Length)];
+                review.AdvisoryProvider = choice.Id;
+                review.AdvisoryModel = choice.Model;
+            }
             if (GitOperations.Head(root) != commit)
                 throw new InvalidOperationException("Repository advanced during review; rerun against a stable commit");
             var file = FilePath(store, projectId);

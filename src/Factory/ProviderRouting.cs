@@ -319,3 +319,60 @@ public sealed class AttributedAgentRuntime(IAgentRuntime inner, StateStore store
         }
     }
 }
+
+public sealed class ProjectProvidersInput
+{
+    public Dictionary<string, string> Routes { get; set; } = new();
+    // Zero or absent removes the local project ceiling for a provider profile.
+    public Dictionary<string, long> Budgets { get; set; } = new();
+}
+
+public static class ProjectProviderManager
+{
+    public static object Configure(StateStore store, FactorySettings settings, Guid projectId,
+        ProjectProvidersInput input)
+    {
+        if (input.Routes is null || input.Budgets is null)
+            throw new ArgumentException("Provider routing and budgets must be objects");
+        foreach (var (role, providerId) in input.Routes)
+        {
+            if (!ProviderRouter.ValidRole(role))
+                throw new ArgumentException("Unsupported role: " + role);
+            var profile = settings.Providers.SingleOrDefault(x => x.Id == providerId && x.Enabled)
+                ?? throw new ArgumentException("Unknown or disabled provider: " + providerId);
+            ProviderRouter.Validate(profile, role);
+        }
+        foreach (var (id, limit) in input.Budgets)
+        {
+            if (limit < 0 || !settings.Providers.Any(x => x.Id == id && x.Enabled))
+                throw new ArgumentException("Invalid provider budget for " + id);
+        }
+        return store.Change(state =>
+        {
+            var project = state.Projects.Single(p => p.Id == projectId);
+            if (state.Jobs.Any(j => j.ProjectId == projectId && JobStates.Active.Contains(j.State)))
+                throw new InvalidOperationException("Pause and reconcile running project jobs before changing provider assignments");
+            foreach (var (id, cap) in input.Budgets)
+            {
+                if (cap == 0) continue;
+                var used = state.ProviderUsages.Where(u => u.ProjectId == projectId && u.ProviderId == id)
+                    .Sum(u => checked(u.InputTokens + u.OutputTokens));
+                var outstanding = state.ProviderBudgetReservations.Where(x =>
+                    x.ProjectId == projectId && x.ProviderId == id && x.State != "released")
+                    .Sum(x => Math.Max(0, x.Reserved - x.Consumed));
+                if (cap < checked(used + outstanding))
+                    throw new InvalidOperationException("Budget cannot be lower than consumed and reserved capacity");
+            }
+            state.ProviderAssignments.RemoveAll(x => x.ProjectId == projectId);
+            state.ProviderBudgetLimits.RemoveAll(x => x.ProjectId == projectId);
+            state.ProviderAssignments.AddRange(input.Routes.Select(x => new ProviderAssignment
+                { ProjectId = projectId, Role = x.Key, ProviderId = x.Value }));
+            state.ProviderBudgetLimits.AddRange(input.Budgets.Where(x => x.Value > 0)
+                .Select(x => new ProviderBudgetLimit
+                    { ProjectId = projectId, ProviderId = x.Key, TokenLimit = x.Value }));
+            state.Events.Add(new FactoryEvent { Type = "provider_configuration_updated",
+                Message = "Project provider settings changed: " + project.Name });
+            return new { projectId, routes = input.Routes, budgets = input.Budgets };
+        });
+    }
+}

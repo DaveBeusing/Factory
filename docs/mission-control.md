@@ -39,7 +39,7 @@ An icon-only **+** button is immediately left of Search and opens creation short
 
 Start with [Project review and goal planning](project-reviews.md) for the workflow from a repository finding to an adopted plan. Review [master and open work](planning-preflight.md) before adopting packages.
 
-Use **Projects → Inspect → Configure AI providers** to route operations to enabled profiles. In **Capacity**, review attributed usage, Factory-local project limits and any account windows reported by the provider. Follow [provider routing and budgets](providers.md) for configuration and reconciliation.
+Use **Projects → Inspect → Configure AI providers** to route operations to enabled profiles. In **Capacity**, review attributed usage, Factory-local project limits and any account windows reported by the provider. See [Provider routing and budgets](providers.md) for configuration and accounting. Use the [recovery guide](recovery.md) to review interrupted jobs and settle held usage.
 
 ## Browser validation
 

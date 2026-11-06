@@ -7,7 +7,8 @@ Start with the [root README](../README.md) for installation, build and CLI comma
 - [Mission Control](mission-control.md) covers dashboard navigation, connection health and operator controls.
 - [Project review and goal planning](project-reviews.md) follows a repository finding through goal creation and plan adoption.
 - [Master-first preflight](planning-preflight.md) explains how to review source, jobs, pull requests and issues before adoption.
-- [Provider routing and budgets](providers.md) covers adapter capabilities, role assignments, usage reporting and reconciliation.
+- [Provider routing and budgets](providers.md) covers adapter capabilities, role assignments, goal and provider limits, and usage reporting.
+- [Recovery](recovery.md) covers expired leases, same-host and cross-host recovery, and settlement of held provider and goal reservations.
 
 ## Development and release
 

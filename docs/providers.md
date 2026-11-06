@@ -38,17 +38,38 @@ In Mission Control select **Projects → Inspect → Configure AI providers**. C
 
 ## Budget semantics
 
-Provider profiles may specify a `tokenLimit`, a locally enforced lifetime cap for all projects using that profile ID. A project may additionally set a lifetime per-provider cap. Both zero and absence mean that particular local cap is not configured; they **do not** imply unlimited external provider account allowance.
+Factory tracks four separate quantities.
 
-For configured local caps, Factory makes a transactional invocation reservation before dispatch and records attributed usage when the adapter reports it. Concurrent active/held reservations count as liabilities. A final provider usage report releases unused capacity; interrupted, unreported or unknown usage remains held until an administrator explicitly reconciles it with evidence through **Capacity → Held provider reservations**. For a goal-funded job, verified late provider usage updates its linked goal reservation in the same transaction. The operator settles that goal reservation separately after all linked turns are verified. Confirm a verified overrun explicitly to record usage above a reserved amount. The excess counts against the budget and appears in the audit trail. After a controller or local runner exits unexpectedly, run `factory recover` to move its active provider reservations to held. A new planning turn also checks for terminated owners. After restoring a database on a different host, stop the original runner and its provider process, recover any expired job lease, then use **Capacity → Reservations from another host** with evidence of shutdown. The recovery action marks the reservation held and preserves the reserved balance until final usage is verified. Job resumption follows the separate lease recovery workflow. Stop older Factory processes before upgrading a schema 7 database. The migration moves its active provider reservations to held because those rows have no recorded process owner.
+| Quantity | Scope and source |
+| --- | --- |
+| Goal budget | Operator-defined token total shared by planning and execution for one goal |
+| Provider caps | Optional Factory-local lifetime token limits for a provider profile and for a profile within a project |
+| Provider account windows | Weekly or shorter allowance data reported by the authenticated Codex CLI |
+| Provider-reported cost | USD estimates supplied by the adapter for individual turns |
 
-The goal budget remains a separate control: execution runs are still governed by the existing goal ledger, and goal-specific plan generation is accounted for in provider usage and goal-level consumed/reserved totals. Usage from before this migration cannot be reconstructed and is not assigned to an invented provider.
+### Goal budget and job reservations
 
-The CLI command `factory providers` shows configured profile metadata, project role assignments, local budget limits and attributed consumption without exporting credentials. The original `factory usage` command continues to expose account-reported Codex allowance windows.
+Available goal tokens equal the configured total minus observed usage and the unused portion of active or held reservations, with a minimum of zero. Goal-specific planning also counts against the goal's budget. Provider-attributed job usage describes the same usage recorded in the job ledger.
 
-The Capacity page distinguishes input tokens, output tokens, reservations, local token ceilings and account allowances. The project-filtered Goal planner shows project usage and the tighter of the profile and project ceilings. The goal budget inspector also shows attributed input and output tokens by provider, model and role. These historical rows may cover less usage than the full goal ledger. Codex weekly/short-window account percentages are displayed only if reported by the Codex CLI; other providers show unavailable. An account percentage is **never** derived from local usage and is not interchangeable with a local token ceiling.
+On a local or remote claim, Factory reserves up to `goalReservationTokens` in the same SQLite transaction as the claim. The default is 8,192, configurable from 256 to 65,536. Independent jobs with disjoint scopes can reserve separate shares of the same goal. Builder and reviewer turns share the job's allowance and need at least 256 tokens before starting. Factory debits usage under the current execution lease and generation. Extensions are bounded by goal availability and the configured per-job ceiling. Remote extensions require controller authorization.
 
-Capacity and the `factory providers` command show provider-reported USD totals by provider profile and project. They sum the estimates the CLI returned, including structured error results when a cost is present. A missing report stays unknown, and historical records keep a null cost after upgrading to schema 9. Claude Code reports an estimate that can differ from the invoice. Costs remain separate from token ceilings and account quotas. Provider-specific remaining API credits and remote-worker heterogeneous routing are unavailable. Remote claims are therefore refused for projects with explicit provider assignments or provider budgets, or whenever a provider-wide token cap is configured. This is a fail-closed transition until the remote claim protocol can carry and independently verify provider policy and usage provenance. There is no automatic provider fallback: a missing provider or unsupported required capability blocks that action rather than silently switching or relaxing a security policy.
+Factory releases unused job capacity automatically when execution reaches `completed_local` or `pr_ready` with confirmed final usage within the reservation. An interruption, missing final usage or overrun leaves the job reservation held. A delayed provider report can exceed a reservation even when Factory requests cancellation on exhaustion. The ledger records the observed amount. See [Settle held usage](recovery.md#settle-held-usage) for the operator workflow.
+
+Open **Goal planner → Goal & budget** to see consumption, outstanding reservations, available capacity and attributed usage by provider, model and role. `GET /api/goals/{id}/budget` exposes the ledger summary without lease credentials. Older job usage can appear in goal totals without provider attribution.
+
+### Provider caps and turn reservations
+
+Set `tokenLimit` on a provider profile to cap its lifetime token consumption across projects. Set a project cap for the same profile in **Projects → Inspect → Configure AI providers**. A positive cap subtracts observed input and output usage plus unused active and held reservations from its limit. The turn must fit within the remaining allowance under every configured cap. Zero or an omitted cap leaves that local limit unset. Provider account quotas are reported separately.
+
+Factory reserves tokens transactionally before capped turns and goal-specific planning. For a goal-funded job with an uncapped provider, a zero-size provider reservation still tracks the turn for recovery. Final usage releases the unused provider reservation. Interrupted or unreported turns remain held for review. See [Recovery](recovery.md) for same-host and cross-host procedures and settlement order.
+
+Remote claims are refused for projects with explicit provider assignments or project provider caps, and when a provider-wide cap is configured. A missing provider or unsupported role capability blocks the requested action. Factory requires an explicit route change to use another provider.
+
+### Account windows and reported costs
+
+**Capacity** and `factory providers` show attributed consumption, local limits and reported USD totals by profile and project. The project-filtered **Goal planner** shows project consumption and capacity under the applicable profile and project limits. Totals sum the cost estimates actually returned, including structured error results with a cost. Missing values stay unknown, including historical rows upgraded to schema 9. Claude Code estimates can differ from an invoice. Authenticated live verification of those estimates is tracked in [issue #22](https://github.com/DaveBeusing/Factory/issues/22).
+
+`factory usage` and administrator-authenticated `GET /api/usage` expose Codex account windows. Factory queries the authenticated CLI's local app-server endpoint and caches successful observations. When reported, Capacity displays used and remaining percentages, reset times and observation age. Missing account percentages and unsupported provider credit balances are unavailable. Factory does not infer them from local usage.
 
 ## Security
 

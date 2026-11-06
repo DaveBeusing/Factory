@@ -66,6 +66,27 @@ public static class DashboardHost
         });
         app.MapGet("/api/state", () => Results.Ok(store.Read()));
         app.MapGet("/api/usage", async (CancellationToken ct) => Results.Ok(await UsageMonitor.GetAsync(store.Home, ct)));
+        app.MapGet("/api/providers", () =>
+        {
+            var snapshot = store.Read();
+            return Results.Ok(new
+            {
+                profiles = settings.Providers.Select(p => new
+                {
+                    p.Id, p.Kind, p.Model, p.Enabled, p.TokenLimit,
+                    capabilities = p.Kind == "codex"
+                        ? new[] { "read-only", "workspace-write", "token-usage", "session" }
+                        : new[] { "read-only", "text-only", "token-usage" }
+                }),
+                assignments = snapshot.ProviderAssignments,
+                budgets = snapshot.ProviderBudgetLimits,
+                usage = ProviderBudgetLedger.Summary(snapshot, settings),
+                // The separate /api/usage endpoint provides observed Codex account windows.
+                accountAllowances = "Unknown except where explicitly reported by /api/usage"
+            });
+        });
+        app.MapPut("/api/projects/{id:guid}/providers", (Guid id, ProjectProvidersInput input) =>
+            Results.Ok(ProjectProviderManager.Configure(store, settings, id, input)));
         app.MapGet("/api/health", () => Results.Ok(Health(store)));
         app.MapGet("/api/workers/managed", () => Results.Ok(ManagedWorkers.RunningIds()));
         app.MapGet("/api/events/stream", async (HttpContext ctx) =>

@@ -41,6 +41,8 @@ internal static class ProjectViewerTests
                 db.Open();
                 using var cmd = db.CreateCommand();
                 cmd.CommandText = """
+                    DROP TABLE planner_project_grants;
+                    DROP TABLE project_planning_audit;
                     DROP TABLE viewer_project_grants;
                     DROP TABLE viewer_subjects;
                     DROP TABLE viewer_access_audit;

@@ -171,8 +171,7 @@ public static class MissionControlManager
         return store.Change(s =>
         {
             Require(s.Projects.Any(p => p.Id == input.ProjectId && p.Status != "archived"), "Project unavailable");
-            var g = new FactoryGoal { ProjectId = input.ProjectId, Objective = input.Objective.Trim(),
-                AcceptanceCriteria = input.AcceptanceCriteria, TokenBudget = input.TokenBudget };
+            var g = NewDraftGoal(input);
             s.Goals.Add(g); Log(s, null, "goal_created", g.Objective); return g;
         });
     }
@@ -196,10 +195,23 @@ public static class MissionControlManager
     }
     private static void ValidateGoal(GoalInput g)
     {
-        Require(!string.IsNullOrWhiteSpace(g.Objective) && g.Objective.Length <= 5000, "Objective is required (max 5000 characters)");
-        Require(g.TokenBudget > 0, "Token budget must be positive");
-        Require(g.AcceptanceCriteria.Count <= 50, "Too many acceptance criteria");
+        if (GoalValidationError(g) is { } error) throw new InvalidOperationException(error);
     }
+
+    internal static string? GoalValidationError(GoalInput goal)
+    {
+        if (string.IsNullOrWhiteSpace(goal.Objective) || goal.Objective.Length > 5000)
+            return "Objective is required (max 5000 characters)";
+        if (goal.TokenBudget <= 0) return "Token budget must be positive";
+        if (goal.AcceptanceCriteria is not { Count: <= 50 }) return "At most 50 acceptance criteria are allowed";
+        return null;
+    }
+
+    internal static FactoryGoal NewDraftGoal(GoalInput input) => new()
+    {
+        ProjectId = input.ProjectId, Objective = input.Objective.Trim(),
+        AcceptanceCriteria = input.AcceptanceCriteria, TokenBudget = input.TokenBudget
+    };
     public static FactoryGoal SetGoalStatus(StateStore store, Guid id, string action)
         => store.Change(s =>
         {

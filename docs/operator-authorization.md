@@ -58,4 +58,22 @@ Send the viewer token as an `Authorization: Bearer` header on these API requests
 - `GET /api/viewer/projects/{projectId}` returns the project summary, goal and job summaries, and recorded usage aggregated by provider within the project.
 - `GET /api/viewer/projects/{projectId}/jobs/{jobId}/quality` returns quality status and the verification timestamp when available. The projection omits raw reports, free-text findings, check names, and host paths.
 
-Invalid viewer credentials return HTTP 401. A valid viewer outside the project grant, or a request for another project's job, receives HTTP 404. Mission Control integration and project writes are planned for later slices.
+Invalid viewer credentials return HTTP 401. A valid viewer outside the project grant, or a request for another project's job, receives HTTP 404.
+
+## Project planning
+
+Use the same human credential with an explicit Planner grant. Schema 13 preserves Viewer grants and creates no Planner grants during upgrade.
+
+```text
+factory viewer grant-planner --subject SUBJECT_GUID --project PROJECT_NAME
+factory viewer revoke-planner --subject SUBJECT_GUID --project PROJECT_NAME
+```
+
+A Planner grant includes project reads. Revoking it leaves any separate Viewer grant in place.
+
+- `POST /api/viewer/projects/{projectId}/goals` creates a draft with `objective`, optional `acceptanceCriteria` and optional `tokenBudget`.
+- `PUT /api/viewer/projects/{projectId}/goals/{goalId}` replaces the draft objective and criteria. Its existing token budget is preserved. Drafts with work packages and goals outside the draft state cannot be edited here.
+
+The route determines the project. If a body supplies a project ID, it must match the route. Cross-project requests return HTTP 404, and a Viewer attempting a write in a granted project receives HTTP 403. The controller checks the credential, grant and goal in the same SQLite write transaction that records the goal and the audit row. The audit stores the server-resolved subject, project, target, operation and timestamp.
+
+Saved-plan changes, provider-backed planning, reviewed adoption, and Mission Control integration follow in later increments.

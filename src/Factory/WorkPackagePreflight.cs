@@ -15,6 +15,7 @@ public sealed class WorkPackagePreflightReport
     public string BaseCommit { get; set; } = "";
     public DateTimeOffset CapturedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<string> SearchTerms { get; set; } = [];
+    public List<string> MasterFiles { get; set; } = [];
     public List<ExistingCodeCandidate> ExistingCode { get; set; } = [];
     public List<ExistingWorkCandidate> ExistingJobs { get; set; } = [];
     public List<OpenWorkCandidate> OpenPullRequests { get; set; } = [];
@@ -84,6 +85,12 @@ public static class WorkPackagePreflight
             ProjectId = project.Id, GoalId = goal.Id,
             BaseCommit = commit, SearchTerms = terms
         };
+
+        var tree = Commands.Run("git", ["-C", project.Path, "ls-tree", "-r", "--name-only", commit], project.Path, 60);
+        if (!tree.Ok) throw new InvalidOperationException("Cannot inspect master source tree: " + tree.Error);
+        report.MasterFiles = tree.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(file => !file.StartsWith(".git/", StringComparison.Ordinal))
+            .Take(180).ToList();
 
         report.ExistingJobs = state.Jobs
             .Where(j => j.ProjectId == project.Id && terms.Any(term =>

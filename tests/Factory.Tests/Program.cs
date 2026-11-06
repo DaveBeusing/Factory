@@ -102,6 +102,43 @@ Test("Master-first preflight finds existing code and preserves adoption review",
     finally { try { Directory.Delete(root, true); } catch { } }
 });
 
+Test("Direct job intake checks master before allowing new work", () =>
+{
+    var root = Path.Combine(Path.GetTempPath(), "factory-direct-intake-" + Guid.NewGuid().ToString("N"));
+    var repo = Path.Combine(root, "repo");
+    Directory.CreateDirectory(repo);
+    try
+    {
+        void Git(params string[] args) =>
+            Commands.Require(Commands.Run("git", ["-C", repo, ..args], root, 30), "job intake fixture");
+        Git("init", "-b", "master");
+        Git("config", "user.name", "Factory Test");
+        Git("config", "user.email", "test@example.invalid");
+        File.WriteAllText(Path.Combine(repo, "GoalPlanner.cs"), "public class GoalPlanner { }");
+        Git("add", "."); Git("commit", "-m", "Partial implementation");
+        var store = new StateStore(Path.Combine(root, "state"));
+        var project = new ProjectInfo { Name = "intake", Path = repo };
+        store.Change(s => s.Projects.Add(project));
+        var input = new JobInput
+        {
+            ProjectId = project.Id, Title = "Complete GoalPlanner", Description = "Add missing acceptance tests",
+            ExpectedPaths = ["GoalPlanner.cs"]
+        };
+        try
+        {
+            MissionControlManager.CreateJob(store, input, new FactorySettings());
+            throw new Exception("New job bypassed existing-code review");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("acknowledge reviewedExistingWork")) { }
+        input.ReviewedExistingWork = true;
+        var created = MissionControlManager.CreateJob(store, input, new FactorySettings());
+        Assert(created.ProjectId == project.Id);
+        Assert(store.Read().Events.Any(e => e.JobId == created.Id && e.Type == "job_preflight"),
+            "Direct job preflight audit event was not persisted");
+    }
+    finally { try { Directory.Delete(root, true); } catch { } }
+});
+
 Test("Master-first preflight rejects stale master and non-master projects", () =>
 {
     var root = Path.Combine(Path.GetTempPath(), "factory-master-stale-" + Guid.NewGuid().ToString("N"));
@@ -207,6 +244,8 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     var html = Resource("Factory.Ui.Index");
     var script = Resource("Factory.Ui.Script");
     var style = Resource("Factory.Ui.Style");
+    Assert(script.Contains("reviewedExistingWork", StringComparison.Ordinal),
+        "Direct job intake acknowledgement is not exposed in Mission Control");
     Assert(html.Contains("data-view=\"recovery\"", StringComparison.Ordinal));
     Assert(script.Contains("renderRecovery()", StringComparison.Ordinal));
     Assert(script.Contains("renderGoalBudget(goalId)", StringComparison.Ordinal));

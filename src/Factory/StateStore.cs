@@ -12,9 +12,9 @@ namespace Factory;
 /// The public snapshot API is retained so existing orchestrator callers stay unchanged.
 /// Only changed entities are written; collection values live in ordered child tables.
 /// </summary>
-public sealed class StateStore
+public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 11;
+    private const int DatabaseVersion = 12;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -300,11 +300,17 @@ public sealed class StateStore
         using var tx = db.BeginTransaction();
         using var version = Command(db, tx, "PRAGMA user_version;");
         var schemaVersion = Convert.ToInt32(version.ExecuteScalar(), CultureInfo.InvariantCulture);
-        if (schemaVersion == DatabaseVersion)
+        if (schemaVersion != DatabaseVersion)
         {
-            tx.Commit();
-            return;
+            UpgradeToSchema11(db, tx, schemaVersion);
+            UpgradeProjectReaders(db, tx);
         }
+        tx.Commit();
+    }
+
+    private static void UpgradeToSchema11(SqliteConnection db, SqliteTransaction tx, int schemaVersion)
+    {
+        if (schemaVersion == 11) return;
         if (schemaVersion == 10)
         {
             Execute(db, tx, """
@@ -312,13 +318,11 @@ public sealed class StateStore
                 ALTER TABLE remote_provider_turns ADD COLUMN hold_reason TEXT NOT NULL DEFAULT '';
                 PRAGMA user_version=11;
                 """);
-            tx.Commit();
             return;
         }
         if (schemaVersion == 9)
         {
             UpgradeRemoteProviders(db, tx);
-            tx.Commit();
             return;
         }
         if (schemaVersion is 7 or 8)
@@ -336,7 +340,6 @@ public sealed class StateStore
                     """);
             }
             UpgradeRemoteProviders(db, tx);
-            tx.Commit();
             return;
         }
         if (schemaVersion is 2 or 3)
@@ -409,7 +412,6 @@ public sealed class StateStore
             UpgradeWorkerAuthorization(db, tx);
             CreateBudgetExtensionTable(db, tx);
             UpgradeProviders(db, tx);
-            tx.Commit();
             return;
         }
         if (schemaVersion == 4)
@@ -417,20 +419,17 @@ public sealed class StateStore
             UpgradeWorkerAuthorization(db, tx);
             CreateBudgetExtensionTable(db, tx);
             UpgradeProviders(db, tx);
-            tx.Commit();
             return;
         }
         if (schemaVersion == 5)
         {
             CreateBudgetExtensionTable(db, tx);
             UpgradeProviders(db, tx);
-            tx.Commit();
             return;
         }
         if (schemaVersion == 6)
         {
             UpgradeProviders(db, tx);
-            tx.Commit();
             return;
         }
         if (schemaVersion != 0)
@@ -534,7 +533,6 @@ public sealed class StateStore
             """);
         CreateBudgetExtensionTable(db, tx);
         UpgradeProviders(db, tx);
-        tx.Commit();
     }
 
     private static IList Items(FactoryState state, EntityMap map) =>

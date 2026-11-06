@@ -196,7 +196,7 @@ internal static class RemoteRestoreTests
         if (!condition) throw new InvalidOperationException(message);
     }
 
-    private sealed class DashboardProcess(Process process, string address) : IDisposable
+    internal sealed class DashboardProcess(Process process, string address) : IDisposable
     {
         public string Address { get; } = address;
 

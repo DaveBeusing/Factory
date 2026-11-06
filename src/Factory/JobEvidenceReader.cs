@@ -9,9 +9,10 @@ namespace Factory;
 /// </summary>
 public static class JobEvidenceReader
 {
-    public static object? Read(StateStore store, Guid jobId)
+    public static object? Read(StateStore store, Guid jobId) => Read(store, store.Job(jobId), includeDetails: true);
+
+    internal static object? Read(StateStore store, FactoryJob job, bool includeDetails)
     {
-        var job = store.Job(jobId);
         if (string.IsNullOrWhiteSpace(job.EvidenceFile)) return null;
 
         var expectedDirectory = Path.GetFullPath(
@@ -42,19 +43,23 @@ public static class JobEvidenceReader
             string.Equals(commit, job.HeadSha, StringComparison.OrdinalIgnoreCase);
         if (!root.TryGetProperty("report", out var reportElement) ||
             reportElement.ValueKind != JsonValueKind.Object)
-            return new { available = true, current, commit, status = "report_unavailable",
+            return includeDetails
+                ? new { available = true, current, commit, status = "report_unavailable",
                 checks = Array.Empty<object>(), reviews = Array.Empty<object>(),
-                findings = Array.Empty<string>() };
+                findings = Array.Empty<string>() }
+                : new { available = true, current, status = "report_unavailable" };
 
         var report = reportElement.Deserialize<QualityResult>(Json.Options)
             ?? throw new InvalidOperationException("Invalid quality report");
         if (!string.Equals(report.HeadSha, commit, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Quality report commit does not match evidence identity");
 
+        var status = current ? (report.Passed ? "passed" : "changes_required") : "stale";
+        if (!includeDetails) return new { available = true, current, status, verifiedAt = report.At };
+
         return new
         {
-            available = true, current, commit,
-            status = current ? (report.Passed ? "passed" : "changes_required") : "stale",
+            available = true, current, commit, status,
             verifiedAt = report.At,
             checks = report.Checks.Select(c => new { c.Name, c.ExitCode,
                 passed = c.ExitCode == 0 }).ToArray(),

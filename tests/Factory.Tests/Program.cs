@@ -1595,6 +1595,8 @@ await TestAsync("Remote provider verification rejects a force-push during the co
     RemoteProviderLeaseTests.VerifyMovingPullHeadAsync);
 await TestAsync("Remote restore preserves holds, fences replay and accepts only the rotated executor credential",
     RemoteRestoreTests.RunAsync);
+await TestAsync("Project viewers can only read their granted projects and redacted quality evidence",
+    ProjectViewerTests.RunAsync);
 
 Test("Remote claims never take local jobs", () =>
 {
@@ -2179,7 +2181,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 11, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 12, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -2684,7 +2686,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 11);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 12);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3184,7 +3186,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 11);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 12);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

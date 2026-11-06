@@ -38,3 +38,24 @@ Persist the server-derived actor, project, target, operation and timestamp with 
 3. **Mission Control and operational migration.** Switch operator views to the explicit scoped routes. Add project streams only with proven ownership and revocation. Rehearse upgrading an administrator-only installation, recovering administrator access and rotating a human credential.
 
 For every slice, test two projects and at least two operator identities. Include an allowed request for the intended project, the same request for the other project, foreign child IDs in a permitted request, and a revoked credential or grant. Verify that operator tokens cannot call administrative, worker or executor routes. Use Chromium to confirm that allowed actions work and denied actions display a clear result. Direct API tests remain the authority for access control.
+
+## Project read access
+
+Run these commands from a trusted local administrator shell with access to the controller's `FACTORY_HOME`:
+
+```text
+factory viewer create --name "Project reader"
+factory viewer grant --subject SUBJECT_GUID --project PROJECT_NAME
+factory viewer revoke --subject SUBJECT_GUID --project PROJECT_NAME
+factory viewer rotate --subject SUBJECT_GUID
+factory viewer disable --subject SUBJECT_GUID
+```
+
+`create` returns a stable subject ID and the bearer token. It starts without project grants. Keep that token out of command logs and source control. `rotate` replaces the token while keeping the subject and its grants. `disable` invalidates the active token. The controller database stores the verifier and records access changes with the local OS account. The existing local administrator CLI remains available to recover access. After restoring an older controller backup, review grants and rotate affected viewer tokens before reopening the API, since the backup may predate a revocation.
+
+Send the viewer token as an `Authorization: Bearer` header on these API requests.
+
+- `GET /api/viewer/projects/{projectId}` returns the project summary, goal and job summaries, and recorded usage aggregated by provider within the project.
+- `GET /api/viewer/projects/{projectId}/jobs/{jobId}/quality` returns quality status and the verification timestamp when available. The projection omits raw reports, free-text findings, check names, and host paths.
+
+Invalid viewer credentials return HTTP 401. A valid viewer outside the project grant, or a request for another project's job, receives HTTP 404. Mission Control integration and project writes are planned for later slices.

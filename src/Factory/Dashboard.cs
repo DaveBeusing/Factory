@@ -40,7 +40,8 @@ public static class DashboardHost
             ctx.Response.Headers["Cache-Control"] = "no-store";
             ctx.Response.Headers["Content-Security-Policy"] =
                 "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
-            if (ctx.Request.Path.StartsWithSegments("/api"))
+            if (ctx.Request.Path.StartsWithSegments("/api") &&
+                ctx.GetEndpoint()?.Metadata.GetMetadata<ProjectViewerEndpoint>() is null)
             {
                 var path = ctx.Request.Path.Value;
                 var workerId = ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString();
@@ -64,6 +65,7 @@ public static class DashboardHost
                 await ctx.Response.WriteAsJsonAsync(new { error = ex.Message });
             }
         });
+        ProjectViewerEndpoint.Map(app, store);
         app.MapGet("/api/state", () =>
         {
             var snapshot = store.Read();

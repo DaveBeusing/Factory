@@ -6,15 +6,17 @@ Work packages **must be based on current `master`**, never on another open PR or
 
 1. Verify the project uses `master` and record the source commit.
 2. Inspect source and tests already committed to `master`, plus existing Factory work packages.
-3. When a GitHub origin and authenticated `gh` are available, inspect issue titles and PR titles targeting `master`. Missing access remains **unverified**, not “zero PRs”.
+3. Query the configured remote for its live `master` SHA. For GitHub origins, query that specific repository for open issues and PRs targeting `master`. Record each matching PR head SHA. Missing access is shown as unverified.
 4. Determine which parts are complete, partial, defective or missing. Keyword matches alone cannot establish completeness.
 5. Plan the smallest remaining work; avoid duplicate implementations of open PRs. Use separate branches/worktrees all originating from master, with explicit dependency/integration requirements.
-6. Review the preflight and acknowledge existing work before adopting **every** plan, even when keyword matches are absent or the PR inventory is unavailable. If master advances or a previously verified matching PR or issue inventory changes, refresh the plan.
+6. Review the preflight and acknowledge existing work before adopting **every** plan, even when keyword matches are absent or the PR inventory is unavailable. If master advances, a matching PR head changes, or verified remote or inventory evidence can no longer be checked, refresh the plan.
 7. Validate changes, open a PR against master, obtain required reviews and verify integration. Never rewrite existing worktrees or auto-merge.
 
 ## Runtime behavior
 
 `WorkPackagePreflight.Inspect` uses Git commands against a resolved master SHA. It does not use feature-checkout contents to claim existing functionality. Plans retain the base commit and preflight results. Read-only planning requires a **clean master checkout**. Manual plan saves also refresh the source baseline. Git worktree creation starts from master and refuses to silently reuse a stale or mismatched worktree.
+
+Preflight records the local commit separately from the live remote commit. It uses a read-only `git ls-remote` request and leaves local refs and the checkout alone. A confirmed mismatch or missing remote branch blocks plan generation, manual save, adoption, direct job intake and worktree preparation. A project without an origin is local-only. If the remote is unreachable, the report marks it unverified. Previously verified remote evidence must be available again before adopting that plan. The GitHub inventory uses the project’s registered origin when available, then the checkout's `origin` for older registrations without a stored origin.
 
 The Mission Control Plan inspector displays existing source candidates, related Factory jobs and matching PRs and issues. Use **Check master & open work** to fetch the current report before writing packages. These observations are **candidates for investigation**, not a source-code audit or claim of feature completion.
 

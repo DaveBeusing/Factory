@@ -670,10 +670,18 @@ function preflightDetails(preflight){
  const links=items=>(items||[]).map(item=>{
   const label=`#${esc(item.number)} ${esc(item.title)}`;
   const url=safeUrl(item.url);
-  return `<li>${url?`<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">${label}</a>`:label}</li>`;
+  return `<li>${url?`<a href="${esc(url)}" rel="noopener noreferrer" target="_blank">${label}</a>`:label}${item.headCommit?` <code>${esc(item.headCommit.slice(0,12))}</code>`: ''}</li>`;
  }).join('');
  const section=(title,items,note)=>`<h4>${title}</h4>${note?`<p class="subtext">${esc(note)}</p>`:''}${items?`<ul>${items}</ul>`:'<p class="subtext">No matching candidates returned.</p>'}`;
- return `<h3>Master-first preflight</h3><p class="subtext">master · ${esc(preflight.baseCommit)} · ${esc(dateTime(preflight.capturedAt))}</p>
+ const remoteStatus={
+  matched:'Matches local master', mismatch:'Differs from local master. Update the checkout before continuing.',
+  missing:'Configured remote has no master branch.', unavailable:'Remote master could not be verified.',
+  'local-only':'No remote configured.'
+ }[preflight.remoteMasterStatus]||'Remote master was not checked.';
+ return `<h3>Master-first preflight</h3>
+ <p class="subtext">Local master · ${esc(preflight.baseCommit)} · ${esc(dateTime(preflight.capturedAt))}</p>
+ <p class="subtext">Remote master · ${esc(preflight.remoteMasterCommit||'—')} · ${esc(remoteStatus)}</p>
+ ${preflight.githubRepository?`<p class="subtext">GitHub inventory · ${esc(preflight.githubRepository)}</p>`:''}
  <p class="subtext">Inspect matching source, jobs, PRs and issues before adopting. Extend existing work where possible.</p>
  ${section('Existing source on master',source)}${section('Existing Factory work',jobs)}
  ${section('Open pull requests',links(preflight.openPullRequests),preflight.pullRequestsChecked?'Inventory checked':preflight.pullRequestCheckNote||'Inventory unchecked')}

@@ -43,6 +43,7 @@ public static class TestEngineering
                 Risk = "medium", Priority = 70, ExpectedPaths = ["tests/", "test/"], Mode = "local"
             });
             store.Event(job.Id, "job_preflight", "master " + preflight!.BaseCommit +
+                "; remote master " + preflight.RemoteMasterStatus +
                 "; source candidates " + preflight.ExistingCode.Count +
                 "; existing work " + preflight.ExistingJobs.Count +
                 "; matching PRs " + preflight.OpenPullRequests.Count +

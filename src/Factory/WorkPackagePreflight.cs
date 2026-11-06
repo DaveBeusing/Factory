@@ -13,6 +13,9 @@ public sealed class WorkPackagePreflightReport
     public Guid GoalId { get; set; }
     public string BaseBranch { get; set; } = "master";
     public string BaseCommit { get; set; } = "";
+    public string? RemoteMasterCommit { get; set; }
+    public string RemoteMasterStatus { get; set; } = "not-checked";
+    public string? GitHubRepository { get; set; }
     public DateTimeOffset CapturedAt { get; set; } = DateTimeOffset.UtcNow;
     public List<string> SearchTerms { get; set; } = [];
     public List<string> MasterFiles { get; set; } = [];
@@ -45,6 +48,7 @@ public sealed class OpenWorkCandidate
     public int Number { get; set; }
     public string Title { get; set; } = "";
     public string HeadBranch { get; set; } = "";
+    public string HeadCommit { get; set; } = "";
     public string Url { get; set; } = "";
 }
 
@@ -71,7 +75,7 @@ public static class WorkPackagePreflight
         RequireMaster(project);
         // Resolve the actual branch reference, never HEAD from a feature checkout.
         var commit = GitOperations.Git(project.Path, "rev-parse", "--verify", "refs/heads/master^{commit}").Trim();
-        if (!Regex.IsMatch(commit, "^[0-9a-fA-F]{40,64}$"))
+        if (!IntegrationVerifier.IsCommitSha(commit))
             throw new InvalidOperationException("master did not resolve to a commit");
         return commit;
     }
@@ -88,6 +92,9 @@ public static class WorkPackagePreflight
             ProjectId = project.Id, GoalId = goal.Id,
             BaseCommit = commit, SearchTerms = terms
         };
+
+        var origin = ConfiguredOrigin(project);
+        (report.RemoteMasterCommit, report.RemoteMasterStatus) = InspectRemoteMaster(project.Path, origin, commit);
 
         var tree = Commands.Run("git", ["-C", project.Path, "ls-tree", "-r", "--name-only", commit], project.Path, 60);
         if (!tree.Ok) throw new InvalidOperationException("Cannot inspect master source tree: " + tree.Error);
@@ -130,27 +137,66 @@ public static class WorkPackagePreflight
                 .ToList();
         }
 
-        var origin = GitOperations.Origin(project.Path) ?? "";
-        var github = origin.StartsWith("https://github.com/", StringComparison.OrdinalIgnoreCase) ||
-                     origin.StartsWith("git@github.com:", StringComparison.OrdinalIgnoreCase) ||
-                     origin.StartsWith("ssh://git@github.com/", StringComparison.OrdinalIgnoreCase);
+        report.GitHubRepository = GitHubRepository(origin);
         (report.OpenPullRequests, report.PullRequestsChecked, report.PullRequestCheckNote) =
-            InspectOpenWork(project, terms, github, pullRequests: true);
+            InspectOpenWork(project, terms, report.GitHubRepository, pullRequests: true);
         (report.OpenIssues, report.IssuesChecked, report.IssueCheckNote) =
-            InspectOpenWork(project, terms, github, pullRequests: false);
+            InspectOpenWork(project, terms, report.GitHubRepository, pullRequests: false);
         return report;
     }
 
+    internal static string? ConfiguredOrigin(ProjectInfo project, string? repositoryPath = null) =>
+        string.IsNullOrWhiteSpace(project.Origin) ? GitOperations.Origin(repositoryPath ?? project.Path) : project.Origin;
+
+    internal static (string? Commit, string Status) InspectRemoteMaster(string directory, string? origin, string localCommit)
+    {
+        if (string.IsNullOrWhiteSpace(origin)) return (null, "local-only");
+        try
+        {
+            var result = Commands.Run("git", ["-C", directory, "-c", "credential.interactive=false",
+                "ls-remote", "--exit-code", "--", origin, "refs/heads/master"], directory, 12);
+            if (result.Code == 2) return (null, "missing");
+            if (result.Ok)
+            {
+                var fields = result.Output.Trim().Split('\t');
+                if (fields is [var remote, "refs/heads/master"] && IntegrationVerifier.IsCommitSha(remote))
+                    return (remote, string.Equals(remote, localCommit, StringComparison.OrdinalIgnoreCase)
+                        ? "matched" : "mismatch");
+            }
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or OperationCanceledException or IOException) { }
+        return (null, "unavailable");
+    }
+
+    internal static void RequireCurrentMaster(string status)
+    {
+        if (status == "mismatch")
+            throw new InvalidOperationException("Local master differs from configured remote master; update the checkout and refresh preflight");
+        if (status == "missing")
+            throw new InvalidOperationException("Configured remote has no master branch; check the project origin before continuing");
+    }
+
+    private static string? GitHubRepository(string? origin)
+    {
+        if (origin is null) return null;
+        try { return GitHubWorkerResultVerifier.GitHubRepository(origin); }
+        catch (InvalidOperationException) { return null; }
+    }
+
+    internal static IEnumerable<(int Number, string HeadCommit)> PullRequestRevisions(WorkPackagePreflightReport report) =>
+        report.OpenPullRequests.OrderBy(p => p.Number).Select(p => (p.Number, p.HeadCommit));
+
     private static (List<OpenWorkCandidate> Matches, bool Checked, string Note) InspectOpenWork(
-        ProjectInfo project, List<string> terms, bool github, bool pullRequests)
+        ProjectInfo project, List<string> terms, string? repository, bool pullRequests)
     {
         var label = pullRequests ? "Open PR" : "Open issue";
-        if (!github) return ([], false, label + " inventory not applicable or origin unavailable.");
+        if (repository is null) return ([], false, label + " inventory not applicable or origin unavailable.");
         const int limit = 100;
+        var qualifiedRepository = "github.com/" + repository;
         var args = pullRequests
-            ? new[] { "pr", "list", "--state", "open", "--base", "master",
-                "--json", "number,title,headRefName,url", "--limit", limit.ToString() }
-            : new[] { "issue", "list", "--state", "open",
+            ? new[] { "pr", "list", "--repo", qualifiedRepository, "--state", "open", "--base", "master",
+                "--json", "number,title,headRefName,headRefOid,url", "--limit", limit.ToString() }
+            : new[] { "issue", "list", "--repo", qualifiedRepository, "--state", "open",
                 "--json", "number,title,url", "--limit", limit.ToString() };
         try
         {
@@ -166,6 +212,7 @@ public static class WorkPackagePreflight
                         Number = item.GetProperty("number").GetInt32(),
                         Title = item.GetProperty("title").GetString() ?? "",
                         HeadBranch = pullRequests ? item.GetProperty("headRefName").GetString() ?? "" : "",
+                        HeadCommit = pullRequests ? ReadPullRequestHead(item) : "",
                         Url = item.GetProperty("url").GetString() ?? ""
                     })
                     .Where(item => terms.Any(term => item.Title.Contains(term, StringComparison.OrdinalIgnoreCase)))
@@ -177,6 +224,13 @@ public static class WorkPackagePreflight
         return ([], false, label + " inventory unavailable; inspect the hosting service before adoption.");
     }
 
+    private static string ReadPullRequestHead(JsonElement item)
+    {
+        var commit = item.GetProperty("headRefOid").GetString() ?? "";
+        if (!IntegrationVerifier.IsCommitSha(commit)) throw new JsonException("Missing or invalid pull request head");
+        return commit.ToLowerInvariant();
+    }
+
     public static WorkPackagePreflightReport? InspectDirectJob(
         FactoryState state, ProjectInfo project, string title, string description)
     {
@@ -184,11 +238,13 @@ public static class WorkPackagePreflight
         // Old test fixtures may construct an incomplete ProjectInfo without a path.
         // Real registered projects always have a validated Git root.
         if (string.IsNullOrWhiteSpace(project.Path)) return null;
-        return Inspect(state, project, new FactoryGoal
+        var report = Inspect(state, project, new FactoryGoal
         {
             ProjectId = project.Id, Objective = title,
             AcceptanceCriteria = [description]
         });
+        RequireCurrentMaster(report.RemoteMasterStatus);
+        return report;
     }
 
     private static ExistingCodeCandidate? ParseMatch(string commit, string line)

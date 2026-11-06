@@ -35,6 +35,9 @@ public sealed class GitOperations
         var repo = rootOverride ?? project.Path;
         var masterCommit = WorkPackagePreflight.MasterCommit(
             new ProjectInfo { Path = repo, BaseBranch = "master" });
+        var origin = WorkPackagePreflight.ConfiguredOrigin(project, repo);
+        var (_, remoteStatus) = WorkPackagePreflight.InspectRemoteMaster(repo, origin, masterCommit);
+        WorkPackagePreflight.RequireCurrentMaster(remoteStatus);
         var path = Path.Combine(_workspace, job.Id.ToString("N"));
         var branch = string.IsNullOrEmpty(job.Branch) ? $"factory/{job.Id:N}" : job.Branch;
         if (Directory.Exists(path) && (File.Exists(Path.Combine(path, ".git")) || Directory.Exists(Path.Combine(path, ".git"))))

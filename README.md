@@ -313,7 +313,7 @@ To inspect the registered repositories and current jobs:
 .\dist\Factory.exe plan --goal '<goal-guid>'
 ```
 
-Factory inspects the exact current `master` commit before planning, checking existing source, recorded jobs and accessible open PRs. The planner requires a **clean master checkout**. Existing or partially implemented functionality should be finished and verified rather than reimplemented. Open PR data is explicitly marked unverified if GitHub CLI access is unavailable.
+Factory inspects the local `master` commit before planning and checks it against the configured remote when reachable. Preflight also checks existing source, recorded jobs and matching issues and PR heads in the configured GitHub repository. The planner requires a **clean master checkout**. Existing or partially implemented functionality should be finished and verified rather than reimplemented. Open PR data is explicitly marked unverified if GitHub CLI access is unavailable.
 
 Review the proposed scope, already existing implementations, related PRs, priorities, dependencies and affected paths. **Plan generation does not authorize execution.** After independently confirming that overlapping work will not be duplicated, explicitly acknowledge that review and adopt the plan:
 

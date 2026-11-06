@@ -13,7 +13,7 @@
 <div class="app">
   <aside class="sidebar" id="sidebar">
     <div class="brand">
-      <div class="brand-symbol"><span>F</span><i></i></div>
+      <button class="brand-symbol" type="button" id="brand-connection" title="Connection settings" aria-label="Connection settings, disconnected"><span>F</span><i id="brand-connection-dot" class="brand-connection-dot offline" aria-hidden="true"></i></button>
       <div class="brand-copy"><strong>FACTORY</strong><small>MISSION CONTROL</small></div>
       <button id="mobile-close" class="icon-button mobile-only" aria-label="Close navigation">×</button>
     </div>
@@ -48,10 +48,8 @@
         <div class="crumb"><span>Factory</span><span class="crumb-separator">/</span><strong id="breadcrumb">Overview</strong></div>
       </div>
       <div class="topbar-right">
+        <button class="button button-primary top-create-button" id="top-create" aria-label="Create new" title="Create new"><span data-icon="plus"></span></button>
         <button class="search-trigger" id="open-search" title="Command palette (Ctrl+K)"><span data-icon="search"></span><span>Search anything...</span><kbd>⌘ K</kbd></button>
-        <div class="connection-pill offline" id="connection-pill" role="status"><span class="live-dot" id="connection-dot"></span><span id="connection-label">Offline</span><small id="connection-age"></small></div>
-        <button class="button button-primary" id="top-create"><span data-icon="plus"></span> Create <span class="hide-small">new</span></button>
-        <button class="avatar" id="open-connection" title="Connection settings" aria-label="Connection settings">FC</button>
       </div>
     </header>
     <main id="main" tabindex="-1"><div class="loading-screen"><div class="spinner"></div> Connecting to Mission Control...</div></main>

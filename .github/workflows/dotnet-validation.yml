@@ -39,6 +39,19 @@ jobs:
       - name: Restore, build, test and publish
         shell: powershell
         run: .\Build.ps1
+      - name: Set up Node.js for browser tests
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Test Mission Control in Chromium
+        working-directory: tests/mission-control
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx playwright install chromium --only-shell
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
       - name: Verify published assets and provenance
         shell: powershell
         run: |

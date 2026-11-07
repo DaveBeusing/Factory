@@ -56,6 +56,17 @@ internal static class ProjectPlanningTests
             await Request(alice.Token, HttpMethod.Post, firstGoals, HttpStatusCode.Forbidden, draft);
             store.SetViewerGrant(alice.SubjectId, first.Id, grant: true, planner: true);
             store.SetViewerGrant(bob.SubjectId, second.Id, grant: true, planner: true);
+            // The requests must finish while the fixture still owns the writer lock.
+            using (db.BeginTransaction(deferred: false))
+            using (var lockDeadline = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token))
+            {
+                lockDeadline.CancelAfter(TimeSpan.FromSeconds(10));
+                var unknownToken = "factory-viewer-" + new string('0', 64);
+                await Request(unknownToken, HttpMethod.Post, firstGoals, HttpStatusCode.Unauthorized, draft, lockDeadline.Token);
+                await Request(bob.Token, HttpMethod.Post, firstGoals, HttpStatusCode.Forbidden, draft, lockDeadline.Token);
+                await Request(alice.Token, HttpMethod.Post, secondUrl + "/goals", HttpStatusCode.NotFound, draft, lockDeadline.Token);
+                await Request(alice.Token, HttpMethod.Put, firstGoals + $"/{foreign.Id}", HttpStatusCode.NotFound, draft, lockDeadline.Token);
+            }
             await Request(bob.Token, HttpMethod.Get, secondUrl, HttpStatusCode.OK);
             await Request(bob.Token, HttpMethod.Post, firstGoals, HttpStatusCode.Forbidden, draft);
             await Request(alice.Token, HttpMethod.Post, secondUrl + "/goals", HttpStatusCode.NotFound, draft);
@@ -107,14 +118,16 @@ internal static class ProjectPlanningTests
             store.SetViewerCredential(alice.SubjectId, rotate: false);
             await Request(alice.Token, HttpMethod.Post, firstGoals, HttpStatusCode.Unauthorized, draft);
 
-            async Task<string> Request(string token, HttpMethod method, string path, HttpStatusCode expected, object? body = null)
+            async Task<string> Request(string token, HttpMethod method, string path, HttpStatusCode expected,
+                object? body = null, CancellationToken? deadline = null)
             {
                 using var request = new HttpRequestMessage(method, path);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 if (body is not null) request.Content = JsonContent.Create(body);
-                using var response = await client.SendAsync(request, timeout.Token);
+                var cancellation = deadline ?? timeout.Token;
+                using var response = await client.SendAsync(request, cancellation);
                 Require(response.StatusCode == expected, $"{method} {path}: expected {expected}, got {response.StatusCode}");
-                return await response.Content.ReadAsStringAsync(timeout.Token);
+                return await response.Content.ReadAsStringAsync(cancellation);
             }
 
             void Execute(string sql)

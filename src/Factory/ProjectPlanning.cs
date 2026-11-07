@@ -37,17 +37,22 @@ public sealed partial class StateStore
         if (verifier is null) return new(DraftGoalStatus.Unauthorized);
 
         using var db = Open();
+        // Reject denied requests on a read snapshot before competing for the writer lock.
+        using (var read = db.BeginTransaction(deferred: true))
+        {
+            if (CheckDraftAccess(db, read, verifier, projectId, goalId, draft.ProjectId, out _) is { } denied)
+                return new(denied);
+        }
+
+        // The credential, grant and target can change before the write transaction starts.
         using var tx = db.BeginTransaction();
-        var access = ReadProjectAccess(db, tx, verifier, projectId);
-        if (access.SubjectId is not { } subjectId) return new(DraftGoalStatus.Unauthorized);
-        if (!access.CanRead || (draft.ProjectId is { } requested && requested != projectId))
-            return new(DraftGoalStatus.NotFound);
+        if (CheckDraftAccess(db, tx, verifier, projectId, goalId, draft.ProjectId, out var subjectId) is { } denial)
+            return new(denial);
 
         using var project = Command(db, tx, "SELECT status FROM projects WHERE id=$project;", ("$project", projectId));
         if (project.ExecuteScalar() is not string projectStatus) return new(DraftGoalStatus.NotFound);
         var existing = goalId is { } id ? ReadDraftTarget(db, tx, projectId, id) : null;
         if (goalId.HasValue && existing is null) return new(DraftGoalStatus.NotFound);
-        if (!access.CanPlan) return new(DraftGoalStatus.Forbidden);
         if (projectStatus == "archived" || (existing is not null && existing.Value.State != "draft"))
             return new(DraftGoalStatus.Conflict, Error: "Only drafts in non-archived projects can be changed.");
         if (existing is not null && existing.Value.HasJobs)
@@ -84,6 +89,23 @@ public sealed partial class StateStore
             ("$operation", goalId.HasValue ? "goal_draft_updated" : "goal_draft_created"), ("$at", DateTimeOffset.UtcNow));
         tx.Commit();
         return new(DraftGoalStatus.Saved, goal);
+    }
+
+    private static DraftGoalStatus? CheckDraftAccess(SqliteConnection db, SqliteTransaction tx, string verifier,
+        Guid projectId, Guid? goalId, Guid? requestedProjectId, out Guid subjectId)
+    {
+        var access = ReadProjectAccess(db, tx, verifier, projectId);
+        subjectId = access.SubjectId.GetValueOrDefault();
+        if (access.SubjectId is null) return DraftGoalStatus.Unauthorized;
+        if (!access.CanRead || (requestedProjectId.HasValue && requestedProjectId != projectId))
+            return DraftGoalStatus.NotFound;
+        if (goalId is { } id)
+        {
+            using var target = Command(db, tx, "SELECT 1 FROM goals WHERE project_id=$project AND id=$id;",
+                ("$project", projectId), ("$id", id));
+            if (target.ExecuteScalar() is null) return DraftGoalStatus.NotFound;
+        }
+        return access.CanPlan ? null : DraftGoalStatus.Forbidden;
     }
 
     private static (Guid Id, int Position, string State, long Budget, DateTimeOffset CreatedAt, bool HasJobs)? ReadDraftTarget(

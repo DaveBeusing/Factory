@@ -72,6 +72,9 @@ public sealed class ControlInput
 
 public static class LocalJobControl
 {
+    internal const string ProjectPauseRequest = "project:paused";
+    internal const string ProjectStopRequest = "project:stopped";
+    internal static bool IsProjectRequest(string? state) => state is ProjectPauseRequest or ProjectStopRequest;
     private static readonly ConcurrentDictionary<Guid, CancellationTokenSource> Active = new();
     public static void Register(Guid id, CancellationTokenSource cts) => Active[id] = cts;
     public static void Unregister(Guid id) => Active.TryRemove(id, out _);
@@ -338,12 +341,26 @@ public static class MissionControlManager
             var updated = store.Change(s =>
             {
                 var j = s.Jobs.Single(j => j.Id == id);
+                Require(IsActive(j) && j.Mode == active.Mode && j.ExecutionGeneration == active.ExecutionGeneration &&
+                    j.LeaseOwner == active.LeaseOwner && j.LeaseToken == active.LeaseToken,
+                    "The execution lease changed; refresh the job before retrying");
+                Require(!LocalJobControl.IsProjectRequest(j.RequestedState),
+                    "The current lease already has a project control request");
                 j.RequestedState = action == "pause" ? JobStates.Paused : JobStates.Stopped;
                 Log(s, id, "job_control_requested", action + " " + input.Reason); return j;
             });
             if (!LocalJobControl.Request(id))
             {
-                store.UpdateJob(id, j => j.RequestedState = "");
+                store.Change(s =>
+                {
+                    var j = s.Jobs.Single(j => j.Id == id);
+                    if (j.ExecutionGeneration == updated.ExecutionGeneration && j.LeaseOwner == updated.LeaseOwner &&
+                        j.LeaseToken == updated.LeaseToken && j.RequestedState == updated.RequestedState)
+                    {
+                        j.RequestedState = "";
+                        j.UpdatedAt = DateTimeOffset.UtcNow;
+                    }
+                });
                 throw new InvalidOperationException("Job is not executing in this dashboard process");
             }
             return updated;
@@ -351,6 +368,8 @@ public static class MissionControlManager
         return store.Change(s =>
         {
             var j = s.Jobs.Single(j => j.Id == id);
+            Require(!IsActive(j) && (string.IsNullOrEmpty(j.LeaseOwner) || !LocalJobControl.IsProjectRequest(j.RequestedState)),
+                "The job is executing or already has a project control request");
             ApplyInactiveJobControl(j, input);
             Log(s, id, "job_control", action + " " + input.Reason);
             return j;

@@ -59,8 +59,13 @@ public sealed class FactoryEngine
         });
     }
 
-    private void EnsureOwned(Guid id, ExecutionFence fence) =>
-        JobRecovery.Require(_store.Job(id), fence);
+    private void EnsureOwned(Guid id, ExecutionFence fence)
+    {
+        var job = _store.Job(id);
+        JobRecovery.Require(job, fence);
+        if (_executionMode == JobExecutionModes.Local && LocalJobControl.IsProjectRequest(job.RequestedState))
+            throw new OperationCanceledException("Project operator requested interruption");
+    }
 
     private void Stage(Guid id, ExecutionFence fence, string state, string stage, string? error = null)
         => _store.SetFencedStage(id, fence, state, stage, error);
@@ -131,8 +136,8 @@ public sealed class FactoryEngine
                         heartbeatCancel.Token);
                 }
                 catch (OperationCanceledException) { break; }
-                var renewed = _store.RenewLease(id, fence, _settings.LeaseSeconds);
-                if (!renewed)
+                var renewed = _store.RenewLease(id, fence, _settings.LeaseSeconds, out var requestedState);
+                if (!renewed || (_executionMode == JobExecutionModes.Local && LocalJobControl.IsProjectRequest(requestedState)))
                 {
                     executionCancel.Cancel();
                     break;
@@ -167,7 +172,8 @@ public sealed class FactoryEngine
                         "Git side effects interrupted; reconcile before retry");
                 else
                     Stage(id, fence,
-                        interrupted.RequestedState == JobStates.Stopped ? JobStates.Stopped : JobStates.Paused,
+                        interrupted.RequestedState is JobStates.Stopped or LocalJobControl.ProjectStopRequest
+                            ? JobStates.Stopped : JobStates.Paused,
                         "interrupted", "Execution interrupted; inspect worktree before resuming");
             }
         }

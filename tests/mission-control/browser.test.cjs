@@ -363,6 +363,44 @@ browserTest('recovers a held executor receipt without exposing lease credentials
   assert.equal((await api('state')).jobs[0].state, 'blocked');
 }, seedProviderEvidence);
 
+browserTest('ignores an older admin login after connecting with a project token', async ({ page, connection, fixture }) => {
+  let finishAdminRequest;
+  const finishAdmin = new Promise((resolve) => { finishAdminRequest = resolve; });
+  const delayedAdmin = await page.evaluate(() => sessionStorage.getItem('factory-token'));
+  const isDelayedAdminRequest = (request) =>
+    request.url().endsWith('/api/state') && request.headers().authorization === 'Bearer ' + delayedAdmin;
+  await page.route('**/api/state', async (route) => {
+    if (!isDelayedAdminRequest(route.request())) return route.continue();
+    await finishAdmin;
+    await route.fulfill({ status: 401, json: { error: 'Invalid administrator token' } });
+  });
+
+  try {
+    await Promise.all([page.waitForRequest(isDelayedAdminRequest), page.reload({ waitUntil: 'domcontentloaded' })]);
+    await page.locator('#brand-connection').click();
+    await connection.getByLabel('API token').fill(fixture.access.reconciler);
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await connection.waitFor({ state: 'hidden' });
+    await page.getByRole('heading', { name: 'Project recovery' }).waitFor();
+
+    const adminResponse = page.waitForResponse((response) => isDelayedAdminRequest(response.request()));
+    const wrongStream = page.waitForRequest((request) =>
+      request.url().endsWith('/api/events/stream') &&
+      request.headers().authorization === 'Bearer ' + fixture.access.reconciler,
+    { timeout: 1500 }).catch((error) => {
+      if (error.name !== 'TimeoutError') throw error;
+      return null;
+    });
+    finishAdminRequest();
+    assert.equal((await adminResponse).status(), 401);
+    assert.ok(!(await wrongStream), 'A stale admin login started the event stream with the project token');
+    await page.getByRole('button', { name: 'Connection settings, connected' }).waitFor();
+    await page.getByRole('button', { name: 'Settle goal reservation' }).waitFor();
+  } finally {
+    finishAdminRequest();
+  }
+}, (home) => seedProviderEvidence(home, true));
+
 async function seedProviderEvidence(home, scoped = false) {
   const token = 'b'.repeat(64);
   const fixture = { env: { FACTORY_REMOTE_EXECUTOR_TOKEN: token }, receipt: null, receiptRequests: 0 };

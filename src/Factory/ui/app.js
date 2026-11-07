@@ -33,7 +33,8 @@ let token=readToken(), state={projects:[],goals:[],jobs:[],workers:[],events:[],
 let planProject="";
 const generatingPlans=new Set();
 const number=value=>Number(value||0).toLocaleString();
-let settings={}, usage=null, providerData=null, projectReview=null, analysisProject='', health=null, view='overview', search='', filter='all', streamController=null,lastHeartbeat=0, connected=false, lastStateUpdate=0, modalHandler=null, inspector=null, planDraft=null, planGoal=null, loading=false;
+let settings={}, usage=null, providerData=null, projectReview=null, analysisProject='', health=null, view='overview', search='', filter='all', streamController=null,lastHeartbeat=0, connected=false, lastStateUpdate=0, modalHandler=null, inspector=null, planDraft=null, planGoal=null;
+let connectionRevision=0, loadingStateRevision=null;
 const projectAccess=()=>token.startsWith('factory-viewer-');
 let recoveryRequest=0, projectRecovery={projects:[],selected:'',loading:false};
 async function api(path,method='GET',body){if(!token)throw new Error('Connect your API token first');if(projectAccess()&&!path.startsWith('viewer/'))throw new Error('This action requires an administrator connection');const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});if(!res.ok){let msg='Request failed ('+res.status+')';try{let obj=await res.json();msg=obj.error||obj.title||msg}catch{}const error=new Error(msg);error.status=res.status;throw error}if(res.status===204||res.status===202)return null;return res.json()}
@@ -55,14 +56,29 @@ function statusFromHealth(){
  $('status-clock').textContent=new Date().toLocaleTimeString();
 }
 function updateHealth(h){health=h;lastHeartbeat=Date.now();connected=true;statusFromHealth()}
-async function startStream(){if(streamController)streamController.abort();streamController=new AbortController();const controller=streamController;
- while(!controller.signal.aborted&&token){try{const res=await fetch('/api/events/stream',{headers:{Authorization:'Bearer '+token},cache:'no-store',signal:controller.signal});if(!res.ok)throw Error('Stream '+res.status);
- const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='';while(!controller.signal.aborted){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let pos;while((pos=buffer.indexOf('\n\n'))>=0){const message=buffer.slice(0,pos);buffer=buffer.slice(pos+2);const data=message.split('\n').find(l=>l.startsWith('data: '));if(data){try{updateHealth(JSON.parse(data.slice(6)));if(Date.now()-lastStateUpdate>2200)await refreshState()}catch(e){console.warn('Heartbeat message:',e)}}}}
+async function startStream(){if(!token||projectAccess())return;if(streamController)streamController.abort();streamController=new AbortController();const controller=streamController,credential=token;
+ while(!controller.signal.aborted){try{const res=await fetch('/api/events/stream',{headers:{Authorization:'Bearer '+credential},cache:'no-store',signal:controller.signal});if(!res.ok)throw Error('Stream '+res.status);
+ const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='';while(!controller.signal.aborted){const {done,value}=await reader.read();if(done||controller.signal.aborted)break;buffer+=decoder.decode(value,{stream:true});let pos;while(!controller.signal.aborted&&(pos=buffer.indexOf('\n\n'))>=0){const message=buffer.slice(0,pos);buffer=buffer.slice(pos+2);const data=message.split('\n').find(l=>l.startsWith('data: '));if(data){try{updateHealth(JSON.parse(data.slice(6)));if(Date.now()-lastStateUpdate>2200)await refreshState()}catch(e){console.warn('Heartbeat message:',e)}}}}
  }catch(e){if(controller.signal.aborted)break;connected=false;statusFromHealth()}await new Promise(r=>setTimeout(r,2800))}
 }
-async function refreshState(){if(!token||projectAccess()||loading)return;const credential=token;loading=true;try{const snapshot=await api('state');if(credential!==token)return;state=snapshot;lastStateUpdate=Date.now();connected=true;render();statusFromHealth()}catch(e){if(credential!==token)return;connected=false;statusFromHealth();if(!lastStateUpdate)render();}finally{loading=false}}
+async function refreshState(){
+ const revision=connectionRevision;
+ if(!token||projectAccess()||loadingStateRevision===revision)return;
+ loadingStateRevision=revision;
+ try{
+  const snapshot=await api('state');
+  if(revision!==connectionRevision)return;
+  state=snapshot;lastStateUpdate=Date.now();connected=true;render();statusFromHealth();
+ }catch{
+  if(revision!==connectionRevision)return;
+  connected=false;statusFromHealth();if(!lastStateUpdate)render();
+ }finally{
+  if(loadingStateRevision===revision)loadingStateRevision=null;
+ }
+}
 async function refreshUsage(){if(!token||projectAccess())return;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render();refreshInspectorProviderCapacity()}
 async function connect(nextToken){
+ const revision=++connectionRevision;
  if(nextToken!==undefined){
   if(nextToken!==token){
    lastHeartbeat=0;
@@ -85,9 +101,8 @@ async function connect(nextToken){
  if(!token){connected=false;if(streamController)streamController.abort();state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};usage=null;render();statusFromHealth();return}
  if(projectAccess()){
   nav('recovery');
-  const credential=token;
   await loadProjectRecovery();
-  if(credential!==token)return;
+  if(revision!==connectionRevision)return;
   if(connected)$('connection-modal').close();
   else{
    notify(projectRecovery.error||'Unable to connect with this project token.',true);
@@ -95,7 +110,16 @@ async function connect(nextToken){
   }
   return;
  }
- try{await refreshState();if(!connected)throw Error('Invalid token or server unreachable');$('connection-modal').close();startStream();refreshUsage();fetchSettings();fetchManagedWorkers();fetchProviders()}catch(e){notify(e.message,true);$('connection-modal').showModal()}}
+ await refreshState();
+ if(revision!==connectionRevision)return;
+ if(!connected){
+  notify('Invalid token or server unreachable',true);
+  if(!$('connection-modal').open)$('connection-modal').showModal();
+  return;
+ }
+ $('connection-modal').close();
+ startStream();refreshUsage();fetchSettings();fetchManagedWorkers();fetchProviders();
+}
 async function fetchSettings(){try{settings=await api('settings')}catch{}}
 async function fetchProviders(){try{providerData=await api('providers')}catch{providerData=null}condition('#usage-nav',!!usage||!!providerData);render();refreshInspectorProviderCapacity()}
 async function fetchManagedWorkers(){try{managedWorkers=await api('workers/managed')}catch{managedWorkers=[]}}

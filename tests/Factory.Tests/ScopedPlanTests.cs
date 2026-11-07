@@ -316,11 +316,16 @@ internal static class ScopedPlanTests
                 recovery.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1);
             });
             Require(JobRecovery.QuarantineExpired(store).Contains(recovery.Id), "Recovery fixture was not quarantined");
-            var review = new { reviewed = true, reason = "Verified runner and clean worktree" };
+            var operationsJson = await Request(bob.Token, HttpMethod.Get, project + "/jobs/operations", HttpStatusCode.OK);
+            var operationsView = JsonSerializer.Deserialize<List<ProjectJobOperation>>(operationsJson, Json.Options)!;
+            var recoveryRevision = operationsView.Single(job => job.Id == recovery.Id).RecoveryRevision;
+            Require(recoveryRevision is not null, "Missing recovery checkpoint revision");
+            var review = new { reviewed = true, reason = "Verified runner and clean worktree", recoveryRevision };
             var recoveryUrl = project + $"/jobs/{recovery.Id}/reconcile";
             await Request(bob.Token, HttpMethod.Post, project + $"/jobs/{foreignJob.Id}/reconcile",
                 HttpStatusCode.NotFound, review);
             await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.BadRequest, new { reviewed = false });
+            await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.BadRequest, new { review.reviewed, review.reason });
             await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.Conflict, review);
             // The live fixture PID now represents a reused PID, not the old runner.
             store.UpdateJob(recovery.Id, job => job.WorkerProcessStartedAt = job.WorkerProcessStartedAt!.Value.AddDays(-1));
@@ -328,6 +333,12 @@ internal static class ScopedPlanTests
             File.WriteAllText(dirty, "untracked");
             await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.Conflict, review);
             File.Delete(dirty);
+            store.UpdateJob(recovery.Id, job => job.ExecutionGeneration++);
+            await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.Conflict, review);
+            Require(store.Job(recovery.Id).State == JobStates.Blocked, "A newer execution accepted an older checkpoint review");
+            operationsJson = await Request(bob.Token, HttpMethod.Get, project + "/jobs/operations", HttpStatusCode.OK);
+            operationsView = JsonSerializer.Deserialize<List<ProjectJobOperation>>(operationsJson, Json.Options)!;
+            review = review with { recoveryRevision = operationsView.Single(job => job.Id == recovery.Id).RecoveryRevision };
             RejectOperationAudit();
             await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.InternalServerError, review);
             Require(store.Job(recovery.Id).State == JobStates.Blocked, "Recovery escaped audit rollback");

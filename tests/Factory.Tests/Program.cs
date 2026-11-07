@@ -46,6 +46,16 @@ if (args is ["--browser-project-jobs-fixture", var projectJobsHome, var projectJ
     return 0;
 }
 
+if (args is ["--browser-advance-job-checkpoint", var checkpointHome, var checkpointJob, var nextCheckpoint])
+{
+    new StateStore(checkpointHome).UpdateJob(Guid.Parse(checkpointJob), job =>
+    {
+        job.ExecutionGeneration++;
+        JobRecovery.Checkpoint(job, "agent", nextCheckpoint);
+    });
+    return 0;
+}
+
 if (args is ["--provider-crash-fixture", var fixtureHome, var projectArg, var goalArg])
 {
     var store = new StateStore(fixtureHome);

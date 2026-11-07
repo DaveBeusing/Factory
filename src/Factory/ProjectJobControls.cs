@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Data.Sqlite;
 
 namespace Factory;
@@ -9,12 +11,13 @@ public sealed class ProjectJobControlInput
     public string Action { get; set; } = "";
     public bool Reviewed { get; set; }
     public string Reason { get; set; } = "";
+    public string? RecoveryRevision { get; set; }
 }
 
 internal sealed record ProjectJobControlResult(Guid Id, Guid ProjectId, string State, DateTimeOffset UpdatedAt,
     string? RequestedState = null);
 internal sealed record ProjectJobOperation(Guid Id, string Title, string State, string Mode, string[] Actions,
-    bool ReviewBeforeResume, string? RequestedState, string? CheckpointCommit);
+    bool ReviewBeforeResume, string? RequestedState, string? CheckpointCommit, string? RecoveryRevision);
 
 public sealed partial class StateStore
 {
@@ -45,7 +48,7 @@ public sealed partial class StateStore
         var now = DateTimeOffset.UtcNow;
         return ReadViewerRows(db, tx, projectId, """
             SELECT j.id,j.title,j.state,j.mode,j.stage,j.started_at,j.lease_owner,j.lease_until,
-                LENGTH(j.lease_token)>0,j.requested_state,j.checkpoint_stage,j.checkpoint_commit,p.status
+                LENGTH(j.lease_token)>0,j.requested_state,j.checkpoint_stage,j.checkpoint_commit,p.status,j.execution_generation
             FROM jobs j JOIN projects p ON p.id=j.project_id WHERE j.project_id=$project
             ORDER BY j.position,j.id;
             """, row =>
@@ -80,15 +83,20 @@ public sealed partial class StateStore
                     }
                 }
             }
-            return new ProjectJobOperation(Guid.Parse(row.GetString(0)), row.GetString(1), state, mode, actions.ToArray(),
+            var id = Guid.Parse(row.GetString(0));
+            return new ProjectJobOperation(id, row.GetString(1), state, mode, actions.ToArray(),
                 actions.Contains("resume") && !row.IsDBNull(5), (active ? requested : "") switch
                 {
                     LocalJobControl.ProjectPauseRequest => JobStates.Paused,
                     LocalJobControl.ProjectStopRequest => JobStates.Stopped,
                     _ => null
-                }, checkpoint);
+                }, checkpoint, checkpoint is null ? null : JobRecoveryRevision(id, row.GetInt64(13), row.GetString(10), checkpoint));
         });
     }
+
+    private static string JobRecoveryRevision(Guid jobId, long generation, string stage, string commit) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+            FormattableString.Invariant($"{jobId:D}\n{generation}\n{stage}\n{commit}"))));
 
     private static bool HasCurrentLocalLease(string mode, string owner, bool hasToken,
         DateTimeOffset? expires, DateTimeOffset now) =>
@@ -212,6 +220,11 @@ public sealed partial class StateStore
         var reason = request.Reason?.Trim() ?? "";
         if (!request.Reviewed || reason.Length is < 10 or > 1000)
             throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Confirm the process and worktree review with a reason of 10 to 1000 characters.");
+        if (string.IsNullOrWhiteSpace(request.RecoveryRevision))
+            throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Include the revision of the reviewed recovery checkpoint.");
+        if (request.RecoveryRevision != JobRecoveryRevision(snapshot.Id, snapshot.ExecutionGeneration,
+            snapshot.CheckpointStage, snapshot.CheckpointCommit))
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The recovery checkpoint changed. Refresh and review the job again.");
         VerifyEvidence(snapshot);
 
         using (var read = db.BeginTransaction(deferred: true))

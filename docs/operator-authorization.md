@@ -105,7 +105,7 @@ factory viewer revoke-operator --subject SUBJECT_GUID --project PROJECT_NAME
 
 The same action endpoint accepts `pause` and `stop` for a running local job with a current lease. It returns HTTP 202 and the requested state. The local runner observes the request at its next lease heartbeat or execution checkpoint. A run that has already finished can retain its final state. Interruptions during Git side effects use the existing quarantine path.
 
-`POST /api/viewer/projects/{projectId}/jobs/{jobId}/reconcile` accepts `reviewed: true` and a reason of 10 to 1000 characters for an expired local execution quarantined for reconciliation. The controller verifies the previous process and a clean worktree at a safe checkpoint, then rechecks the original Operator grant, job ownership and outstanding provider reservations before requeueing and auditing the decision. Goal-budget holds continue to block new claims until settled. Remote execution remains under its existing worker controls.
+`GET /api/viewer/projects/{projectId}/jobs/operations` provides the checkpoint commit and its `recoveryRevision` for jobs eligible for local recovery. Send that revision with `reviewed: true` and a reason of 10 to 1000 characters to `POST /api/viewer/projects/{projectId}/jobs/{jobId}/reconcile`. A different checkpoint or execution generation returns HTTP 409 and requires a fresh review. The controller verifies the previous process and a clean worktree at a safe checkpoint, then rechecks the original Operator grant, job ownership and outstanding provider reservations before requeueing and auditing the decision. Goal-budget holds continue to block new claims until settled. Remote execution remains under its existing worker controls.
 
 ## Project provider budget reconciliation
 

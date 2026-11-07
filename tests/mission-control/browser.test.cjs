@@ -524,6 +524,25 @@ browserTest('controls and reconciles only jobs in the selected Operator project'
   await form.getByRole('button', { name: 'Review and requeue' }).click();
   await page.getByText('Recovery requires a stopped local runner and a clean, matching checkpoint.').waitFor();
   await rm(dirtyFile);
+  const oldJob = (await api('state')).jobs.find((job) => job.title === 'Interrupted local work package');
+  const git = (...args) => execFileSync('git', args, { cwd: fixture.worktree, encoding: 'utf8', timeout: 10_000 }).trim();
+  git('-c', 'user.name=Factory Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+    '-c', 'core.hooksPath=' + path.join(fixture.home, 'no-hooks'), 'commit', '--allow-empty', '-m', 'New recovery checkpoint');
+  const newCheckpoint = git('rev-parse', 'HEAD');
+  const dll = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
+  execFileSync('dotnet', [dll, '--browser-advance-job-checkpoint', fixture.home, oldJob.id, newCheckpoint], { timeout: 15_000 });
+  const staleResponse = page.waitForResponse((response) => response.url().endsWith('/jobs/' + oldJob.id + '/reconcile') &&
+    response.request().method() === 'POST');
+  await form.getByRole('button', { name: 'Review and requeue' }).click();
+  assert.equal((await staleResponse).status(), 409);
+  await page.getByText('The recovery checkpoint changed. Refresh and review the job again.').waitFor();
+  assert.equal((await api('state')).jobs.find((job) => job.id === oldJob.id).state, 'blocked');
+  await form.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Refresh projects' }).click();
+  await interrupted.getByRole('button', { name: 'Review and requeue' }).click();
+  await form.getByText(newCheckpoint, { exact: true }).waitFor();
+  await form.getByLabel('Evidence and review justification').fill('Verified stopped runner and replacement checkpoint');
+  await form.getByLabel('I reviewed the stopped process and clean worktree checkpoint').check();
   await form.getByRole('button', { name: 'Review and requeue' }).click();
   await form.waitFor({ state: 'hidden' });
   await interrupted.getByText('queued', { exact: true }).waitFor();
@@ -541,7 +560,7 @@ browserTest('controls and reconciles only jobs in the selected Operator project'
   const dll = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
   const fixture = JSON.parse(execFileSync('dotnet',
     [dll, '--browser-project-jobs-fixture', home, worktree, git('rev-parse', 'HEAD')], { encoding: 'utf8', timeout: 15_000 }));
-  return { ...fixture, worktree };
+  return { ...fixture, worktree, home };
 });
 
 async function seedProviderEvidence(home, scoped = false) {

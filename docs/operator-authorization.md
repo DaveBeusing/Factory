@@ -106,3 +106,16 @@ factory viewer revoke-operator --subject SUBJECT_GUID --project PROJECT_NAME
 The same action endpoint accepts `pause` and `stop` for a running local job with a current lease. It returns HTTP 202 and the requested state. The local runner observes the request at its next lease heartbeat or execution checkpoint. A run that has already finished can retain its final state. Interruptions during Git side effects use the existing quarantine path.
 
 `POST /api/viewer/projects/{projectId}/jobs/{jobId}/reconcile` accepts `reviewed: true` and a reason of 10 to 1000 characters for an expired local execution quarantined for reconciliation. The controller verifies the previous process and a clean worktree at a safe checkpoint, then rechecks the original Operator grant, job ownership and outstanding provider reservations before requeueing and auditing the decision. Goal-budget holds continue to block new claims until settled. Remote execution remains under its existing worker controls.
+
+## Project provider budget reconciliation
+
+Schema 16 adds an independent Budget Reconciler role that includes project reads.
+
+```text
+factory viewer grant-budget-reconciler --subject SUBJECT_GUID --project PROJECT_NAME
+factory viewer revoke-budget-reconciler --subject SUBJECT_GUID --project PROJECT_NAME
+```
+
+`GET /api/viewer/projects/{projectId}/provider-reservations` lists held provider reservations available for scoped settlement. Send verified final totals to `POST /api/viewer/projects/{projectId}/provider-reservations/{reservationId}/reconcile` with `finalInputTokens`, `finalOutputTokens`, `reviewed: true`, and `reason`. Set `confirmOverrun: true` when verified usage exceeds the reservation.
+
+The controller checks the grant and reservation ownership again in the write transaction. It settles the provider reservation, posts any linked job and goal usage delta, and records the actor, totals, evidence and overrun confirmation in the same transaction. Separate goal-hold settlement and executor receipt recovery use the administrator workflows.

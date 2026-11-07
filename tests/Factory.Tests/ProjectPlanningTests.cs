@@ -41,6 +41,8 @@ internal static class ProjectPlanningTests
                 DROP TABLE project_planning_audit;
                 DROP TABLE operator_project_grants;
                 DROP TABLE project_operation_audit;
+                DROP TABLE budget_reconciler_project_grants;
+                DROP TABLE project_budget_audit;
                 PRAGMA user_version=12;
                 """);
             store = new StateStore(home);
@@ -214,6 +216,69 @@ internal static class ProjectPlanningTests
                 HttpStatusCode.BadRequest, new { action = "pause" });
             Require(store.Job(running.Id).RequestedState == LocalJobControl.ProjectStopRequest,
                 "A failed administrator pause cleared the accepted operator stop");
+
+            var budgetJob = new FactoryJob { ProjectId = first.Id, GoalId = active.Id, State = JobStates.Stopped,
+                ExecutionGeneration = 1, TokensIn = 30 };
+            var budgetUsage = new ProviderUsageEntry { ProjectId = first.Id, GoalId = active.Id,
+                JobId = budgetJob.Id, ExecutionGeneration = 1, ProviderId = "codex", InputTokens = 30 };
+            var held = new ProviderBudgetReservation { ProjectId = first.Id, UsageId = budgetUsage.Id,
+                ProviderId = "codex", Reserved = 40, Consumed = 30, State = "held" };
+            var foreignUsage = new ProviderUsageEntry { ProjectId = second.Id, JobId = foreignJob.Id, ProviderId = "codex" };
+            var foreignHold = new ProviderBudgetReservation { ProjectId = second.Id, UsageId = foreignUsage.Id,
+                ProviderId = "codex", Reserved = 512, State = "held" };
+            var goalHold = new GoalBudgetReservation { GoalId = active.Id, JobId = budgetJob.Id,
+                ExecutionGeneration = 1, Reserved = 512, Consumed = 30, State = "held" };
+            store.Change(state =>
+            {
+                state.Jobs.Add(budgetJob);
+                state.ProviderUsages.AddRange([budgetUsage, foreignUsage]);
+                state.ProviderBudgetReservations.AddRange([held, foreignHold]);
+                state.BudgetReservations.Add(goalHold);
+            });
+            var holdsUrl = firstUrl + "/provider-reservations";
+            var settleUrl = holdsUrl + $"/{held.Id}/reconcile";
+            var settlement = new { finalInputTokens = 45, reviewed = true, confirmOverrun = true,
+                reason = "Verified provider totals", subjectId = alice.SubjectId };
+            await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.Forbidden, settlement);
+            store.SetBudgetReconcilerGrant(bob.SubjectId, first.Id, grant: true);
+            var holds = JsonSerializer.Deserialize<List<ProjectProviderHold>>(
+                await Request(bob.Token, HttpMethod.Get, holdsUrl, HttpStatusCode.OK), Json.Options)!;
+            Require(holds.Single().Id == held.Id, "Held reservations crossed project boundaries");
+            await Request(bob.Token, HttpMethod.Post, holdsUrl + $"/{foreignHold.Id}/reconcile", HttpStatusCode.NotFound, settlement);
+            await Request(bob.Token, HttpMethod.Post, secondUrl + $"/provider-reservations/{foreignHold.Id}/reconcile",
+                HttpStatusCode.Forbidden, settlement);
+            await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.Conflict,
+                new { finalInputTokens = 45, reviewed = true, reason = "Verified provider totals" });
+            Execute("""
+                CREATE TRIGGER reject_budget_audit BEFORE INSERT ON project_budget_audit
+                BEGIN SELECT RAISE(ABORT, 'Fixture budget audit failure'); END;
+                """);
+            await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.InternalServerError, settlement);
+            Require(store.Job(budgetJob.Id).TokensIn == 30 &&
+                store.Read().ProviderBudgetReservations.Single(item => item.Id == held.Id).State == "held",
+                "Budget audit failure did not roll back usage and hold");
+            Execute("DROP TRIGGER reject_budget_audit;");
+            await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.OK, settlement);
+            await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.Conflict, settlement);
+            store.SetBudgetReconcilerGrant(bob.SubjectId, first.Id, grant: false);
+            await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.Forbidden, settlement);
+            var budgetState = store.Read();
+            Require(store.Job(budgetJob.Id).TokensIn == 45 && budgetState.BudgetReservations.Single().Consumed == 45 &&
+                budgetState.BudgetReservations.Single().State == "held" &&
+                budgetState.ProviderBudgetReservations.Single(item => item.Id == held.Id).State == "released" &&
+                budgetState.ProviderBudgetReservations.Single(item => item.Id == foreignHold.Id).State == "held",
+                "Provider reconciliation did not settle only the requested hold and linked goal usage");
+            using (var audit = db.CreateCommand())
+            {
+                audit.CommandText = """
+                    SELECT subject_id,project_id,reservation_id,input_tokens,confirm_overrun,reason FROM project_budget_audit;
+                    """;
+                using var row = audit.ExecuteReader();
+                Require(row.Read() && Guid.Parse(row.GetString(0)) == bob.SubjectId &&
+                    Guid.Parse(row.GetString(1)) == first.Id && Guid.Parse(row.GetString(2)) == held.Id &&
+                    row.GetInt64(3) == 45 && row.GetBoolean(4) && row.GetString(5) == settlement.reason && !row.Read(),
+                    "Budget audit did not bind the actor, reservation and confirmed overrun");
+            }
 
             async Task<string> Request(string token, HttpMethod method, string path, HttpStatusCode expected,
                 object? body = null, CancellationToken? deadline = null)

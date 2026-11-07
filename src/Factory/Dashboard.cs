@@ -75,7 +75,7 @@ public static class DashboardHost
                 await ctx.Response.WriteAsJsonAsync(new { error = ex.Message });
             }
         });
-        ProjectViewerEndpoint.Map(app, store);
+        ProjectViewerEndpoint.Map(app, store, settings);
         app.MapGet("/api/state", () =>
         {
             var snapshot = store.Read();

@@ -6,7 +6,7 @@ namespace Factory;
 
 internal sealed class ProjectViewerEndpoint
 {
-    internal static void Map(WebApplication app, StateStore store)
+    internal static void Map(WebApplication app, StateStore store, FactorySettings settings)
     {
         var viewer = new ProjectViewerEndpoint();
         const string planRoute = "/api/viewer/projects/{projectId:guid}/plans/{goalId:guid}";
@@ -19,6 +19,16 @@ internal sealed class ProjectViewerEndpoint
         app.MapPost(planRoute + "/adopt", (HttpContext context, Guid projectId, Guid goalId, PlanAdoptInput input) =>
             PlanResponse(() => store.AdoptScopedPlan(context.Request.Headers.Authorization.ToString(), projectId, goalId, input)))
             .WithMetadata(viewer);
+        app.MapPost(planRoute + "/generate", async (HttpContext context, Guid projectId, Guid goalId,
+            ScopedPlanGenerationInput input, CancellationToken cancellation) =>
+        {
+            try
+            {
+                return Results.Ok(await store.GenerateScopedPlanAsync(context.Request.Headers.Authorization.ToString(),
+                    projectId, goalId, input, settings, cancellation));
+            }
+            catch (Exception ex) when (IsPlanFailure(ex)) { return PlanFailure(ex); }
+        }).WithMetadata(viewer);
         app.MapPost("/api/viewer/projects/{projectId:guid}/goals",
             (HttpContext context, Guid projectId, ProjectDraftGoalInput input) =>
                 WriteDraft(store, context, projectId, null, input)).WithMetadata(viewer);
@@ -72,7 +82,14 @@ internal sealed class ProjectViewerEndpoint
     private static IResult PlanResponse(Func<object> operation)
     {
         try { return Results.Ok(operation()); }
-        catch (ScopedPlanRejected ex)
+        catch (Exception ex) when (IsPlanFailure(ex)) { return PlanFailure(ex); }
+    }
+
+    private static bool IsPlanFailure(Exception ex) => ex is ScopedPlanRejected or ArgumentException or InvalidOperationException;
+
+    private static IResult PlanFailure(Exception failure)
+    {
+        if (failure is ScopedPlanRejected ex)
         {
             return ex.Status switch
             {
@@ -83,13 +100,10 @@ internal sealed class ProjectViewerEndpoint
                 _ => Results.Conflict(new { error = ex.Message })
             };
         }
-        catch (ArgumentException)
-        {
+        if (failure is ArgumentException)
             return Results.BadRequest(new { error = "Invalid plan or adoption input." });
-        }
-        catch (InvalidOperationException)
-        {
-            return Results.Conflict(new { error = "Plan verification failed. Refresh the plan and review master before retrying." });
-        }
+        if (failure is TokenBudgetExceededException)
+            return Results.Conflict(new { error = "The planning provider budget could not cover or settle the invocation." });
+        return Results.Conflict(new { error = "Plan verification failed. Refresh the plan and review master before retrying." });
     }
 }

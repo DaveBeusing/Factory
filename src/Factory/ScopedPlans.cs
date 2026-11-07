@@ -9,6 +9,12 @@ internal sealed class ScopedPlanRejected(DraftGoalStatus status, string? message
 
 internal sealed record ScopedPlanView(string GoalRevision, FactoryPlan? Plan);
 
+public sealed class ScopedPlanGenerationInput
+{
+    public string GoalRevision { get; set; } = "";
+    public Guid? Revision { get; set; }
+}
+
 public sealed partial class StateStore
 {
     private sealed record PlanScope(Guid SubjectId, ProjectInfo Project, FactoryGoal Goal,
@@ -40,14 +46,78 @@ public sealed partial class StateStore
         draft.Preflight = WorkPackagePreflight.Inspect(snapshot, scope.Project, scope.Goal);
         WorkPackagePreflight.RequireCurrentMaster(draft.Preflight.RemoteMasterStatus);
         draft.BaseCommit = draft.Preflight.BaseCommit;
+        return CommitScopedPlan(db, verifier, scope, draft, "plan_revision_saved");
+    }
 
+    internal async Task<FactoryPlan> GenerateScopedPlanAsync(string authorization, Guid projectId, Guid goalId,
+        ScopedPlanGenerationInput input, FactorySettings settings, CancellationToken cancellation)
+    {
+        var verifier = RequirePlanVerifier(authorization);
+        using var db = Open();
+        var (scope, snapshot) = ReadPlanPreflight(db, verifier, projectId, goalId);
+        var expected = new FactoryPlan { GoalRevision = input.GoalRevision, Revision = input.Revision };
+        VerifyGenerationTarget(scope);
+        using (var read = db.BeginTransaction(deferred: true))
+        {
+            snapshot.ProviderAssignments = ReadViewerRows(db, read, projectId, """
+                SELECT provider_id FROM provider_assignments WHERE project_id=$project AND role='planner';
+                """, row => new ProviderAssignment { ProjectId = projectId, Role = "planner", ProviderId = row.GetString(0) });
+        }
+
+        var preflight = Planning.PrepareDraft(snapshot, scope.Project, scope.Goal);
+        var route = ProviderRouter.Select(settings, snapshot, projectId, "planner", "medium", (profile, model, adapter) =>
+            new ProjectScopedAgentRuntime(adapter, this, projectId, goalId, profile, "planner", model,
+                settings.GoalReservationTokens,
+                beforeReserve: () =>
+                {
+                    using (var read = db.BeginTransaction(deferred: true))
+                        VerifyGenerationTarget(ReadPlanScope(db, read, verifier, projectId, goalId));
+                    Planning.RequirePlanningCheckout(scope.Project, preflight.BaseCommit);
+                },
+                authorize: (connection, tx, state) =>
+                {
+                    VerifyGenerationTarget(ReadPlanScope(connection, tx, verifier, projectId, goalId));
+                    var currentProfile = ProviderRouter.Resolve(settings, state, projectId, "planner");
+                    if (currentProfile != profile || ProviderRouter.EffectiveModel(settings, currentProfile, "medium") != model)
+                        throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "The project provider route changed. Retry planning.");
+                },
+                auditReservation: (connection, tx, usageId) => Execute(connection, tx, """
+                    INSERT INTO project_planning_audit(subject_id,project_id,target_id,operation,at)
+                    VALUES($subject,$project,$usage,'plan_generation_reserved',$at);
+                    """, ("$subject", scope.SubjectId), ("$project", projectId), ("$usage", usageId), ("$at", DateTimeOffset.UtcNow))));
+
+        var plan = await Planning.GenerateDraftAsync(scope.Project, scope.Goal, preflight, route.Runtime,
+            cancellation, input.Revision);
+        cancellation.ThrowIfCancellationRequested();
+        using (var read = db.BeginTransaction(deferred: true))
+            VerifyGenerationTarget(ReadPlanScope(db, read, verifier, projectId, goalId));
+        Planning.RequirePlanningCheckout(scope.Project, preflight.BaseCommit);
+        return CommitScopedPlan(db, verifier, scope, plan, "plan_revision_generated", requireActive: true, cancellation);
+
+        void VerifyGenerationTarget(PlanScope current)
+        {
+            VerifyPlanSave(current, expected);
+            if (current.Project.Status != "active")
+                throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Provider planning requires an active project.");
+            if (current.Project.Path != scope.Project.Path || current.Project.Origin != scope.Project.Origin ||
+                current.Project.BaseBranch != scope.Project.BaseBranch)
+                throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "The project checkout changed. Retry planning.");
+        }
+    }
+
+    private FactoryPlan CommitScopedPlan(SqliteConnection db, string verifier, PlanScope scope, FactoryPlan draft,
+        string operation, bool requireActive = false, CancellationToken cancellation = default)
+    {
         using var tx = db.BeginTransaction();
-        var current = ReadPlanScope(db, tx, verifier, projectId, goalId);
+        var current = ReadPlanScope(db, tx, verifier, scope.Project.Id, scope.Goal.Id);
         VerifyPlanSave(current, draft);
+        if (requireActive && current.Project.Status != "active")
+            throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Provider planning requires an active project.");
         VerifyPlanCheckout(scope.Project, current.Project, draft.BaseCommit);
+        cancellation.ThrowIfCancellationRequested();
         InsertPlanRevision(db, tx, draft);
-        AuditPlan(db, tx, current, draft, "plan_revision_saved", reviewed: null);
-        AppendEvent(db, tx, null, "plan_saved", goalId.ToString());
+        AuditPlan(db, tx, current, draft, operation, reviewed: null);
+        AppendEvent(db, tx, null, "plan_saved", scope.Goal.Id.ToString());
         tx.Commit();
         return draft;
     }

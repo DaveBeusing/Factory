@@ -92,4 +92,33 @@ internal static class BrowserRecoveryFixture
         });
         JobRecovery.QuarantineExpired(store);
     }
+
+    public static object SeedProjectJobs(string home, string worktree, string checkpoint)
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "Operator project", Path = worktree };
+        var other = new ProjectInfo { Name = "Viewer project" };
+        var local = new FactoryJob { ProjectId = project.Id, Title = "Local work package", StartedAt = DateTimeOffset.UtcNow };
+        var running = new FactoryJob { ProjectId = project.Id, Title = "Running local work package" };
+        var remote = new FactoryJob { ProjectId = project.Id, Title = "Running remote work package", Mode = JobExecutionModes.Remote };
+        var interrupted = new FactoryJob { ProjectId = project.Id, Title = "Interrupted local work package",
+            Worktree = worktree, State = JobStates.Blocked, Stage = "reconcile", CheckpointStage = "agent", CheckpointCommit = checkpoint,
+            WorkerProcessId = Environment.ProcessId, WorkerProcessStartedAt = DateTimeOffset.UnixEpoch,
+            WorkerMachineName = Environment.MachineName };
+        var foreign = new FactoryJob { ProjectId = other.Id, Title = "Foreign work package" };
+        store.Change(state =>
+        {
+            state.Projects.AddRange([project, other]);
+            state.Jobs.AddRange([local, running, remote, interrupted, foreign]);
+            JobRecovery.Assign(running, "local-fixture", 300, local: true);
+            JobRecovery.Assign(remote, "remote:fixture", 300, local: false);
+        });
+        var operatorAccess = store.CreateViewer("Browser project operator");
+        var budgetAccess = store.CreateViewer("Browser budget reconciler");
+        store.SetOperatorGrant(operatorAccess.SubjectId, project.Id, grant: true);
+        store.SetViewerGrant(operatorAccess.SubjectId, other.Id, grant: true);
+        store.SetBudgetReconcilerGrant(budgetAccess.SubjectId, project.Id, grant: true);
+        return new { operatorToken = operatorAccess.Token, budgetToken = budgetAccess.Token, projectId = project.Id,
+            otherId = other.Id, foreignJobId = foreign.Id, checkpoint };
+    }
 }

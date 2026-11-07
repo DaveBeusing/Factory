@@ -40,6 +40,22 @@ if (args is ["--browser-project-recovery-fixture", var projectRecoveryHome, var 
     return 0;
 }
 
+if (args is ["--browser-project-jobs-fixture", var projectJobsHome, var projectJobsWorktree, var projectJobsCheckpoint])
+{
+    Console.WriteLine(Json.Stringify(BrowserRecoveryFixture.SeedProjectJobs(projectJobsHome, projectJobsWorktree, projectJobsCheckpoint)));
+    return 0;
+}
+
+if (args is ["--browser-advance-job-checkpoint", var checkpointHome, var checkpointJob, var nextCheckpoint])
+{
+    new StateStore(checkpointHome).UpdateJob(Guid.Parse(checkpointJob), job =>
+    {
+        job.ExecutionGeneration++;
+        JobRecovery.Checkpoint(job, "agent", nextCheckpoint);
+    });
+    return 0;
+}
+
 if (args is ["--provider-crash-fixture", var fixtureHome, var projectArg, var goalArg])
 {
     var store = new StateStore(fixtureHome);

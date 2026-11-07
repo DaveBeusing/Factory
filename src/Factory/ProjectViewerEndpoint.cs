@@ -42,6 +42,9 @@ internal sealed class ProjectViewerEndpoint
                 }
                 catch (Exception ex) when (IsPlanFailure(ex)) { return PlanFailure(ex); }
             }).WithMetadata(viewer);
+        app.MapGet(projectRoute + "/jobs/operations", (HttpContext context, Guid projectId) =>
+            PlanResponse(() => store.ReadProjectJobOperations(context.Request.Headers.Authorization.ToString(), projectId)))
+            .WithMetadata(viewer);
         app.MapPost("/api/viewer/projects/{projectId:guid}/jobs/{jobId:guid}/action",
             (HttpContext context, Guid projectId, Guid jobId, ProjectJobControlInput input) =>
             {

@@ -41,9 +41,13 @@ Start with [Project review and goal planning](project-reviews.md) for the workfl
 
 Use **Projects → Inspect → Configure AI providers** to route operations to enabled profiles. **Capacity** shows attributed usage, Factory-local limits and any account windows reported by the provider. The **Goal Planner** also shows the shared controller Codex allowance next to local project capacity. See [Provider routing and budgets](providers.md) for configuration and accounting. Use the [recovery guide](recovery.md) to review interrupted jobs and settle held usage.
 
-## Project budget recovery
+## Project recovery
 
-Connect through the sidebar connection control with a project token issued by `factory viewer create`. Mission Control opens **Project recovery** and lists only projects granted to that identity. A Budget Reconciler grant is required in the selected project to see held reservations and submit recovery decisions.
+Connect through the sidebar connection control with a project token issued by `factory viewer create`. Mission Control opens **Project recovery** and lists only projects granted to that identity.
+
+An **Operator** grant enables job actions in the selected project. Pause and stop requests for running local jobs show as pending until the runner handles them. Resuming a previously started job requires a review acknowledgment and evidence. Use **Review and requeue** to confirm an interrupted local job's checkpoint. The controller verifies the stopped runner and clean worktree before requeueing it.
+
+A **Budget Reconciler** grant is required in the selected project to see held reservations and submit budget recovery decisions.
 
 - **Recover executor receipt** records an independent review and evidence reason. The controller fetches the receipt from its configured executor and posts verified final usage. A missing receipt leaves the hold open so the operator can retry.
 - **Settle provider reservation** records independently verified final provider totals for a held reservation. Review the observed totals, enter both verified totals and an evidence reason, and explicitly confirm any overrun. Executor-backed reservations use receipt recovery.

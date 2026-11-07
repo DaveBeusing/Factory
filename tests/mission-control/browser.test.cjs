@@ -454,6 +454,115 @@ browserTest('identifies otherwise identical provider holds in the list and settl
   }
 }, (home) => seedProviderEvidence(home, true));
 
+browserTest('controls and reconciles only jobs in the selected Operator project', async ({ page, form, connection, api, fixture }) => {
+  async function connect(token) {
+    await page.locator('#brand-connection').click();
+    await connection.getByLabel('API token').fill(token);
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await connection.waitFor({ state: 'hidden' });
+  }
+  const operations = page.getByRole('heading', { name: 'Project job operations' });
+  const projectRoute = (id) => new URL('/api/viewer/projects/' + id, page.url()).href;
+  const request = (token, resource, options = {}) => page.request.fetch(resource,
+    { ...options, headers: { Authorization: 'Bearer ' + token } });
+  await connect(fixture.budgetToken);
+  assert.equal(await operations.count(), 0);
+  assert.equal((await request(fixture.budgetToken, projectRoute(fixture.projectId) + '/jobs/operations')).status(), 403);
+
+  await connect(fixture.operatorToken);
+  await operations.waitFor();
+  const select = page.getByLabel('Project', { exact: true });
+  await select.selectOption(fixture.otherId);
+  await page.getByRole('heading', { name: 'Budget Reconciler access required' }).waitFor();
+  assert.equal(await operations.count(), 0);
+  assert.equal((await request(fixture.operatorToken, projectRoute(fixture.otherId) + '/jobs/operations')).status(), 403);
+  await select.selectOption(fixture.projectId);
+  await operations.waitFor();
+  assert.equal(await page.getByText('Foreign work package', { exact: true }).count(), 0);
+  const projection = await request(fixture.operatorToken, projectRoute(fixture.projectId) + '/jobs/operations');
+  assert.equal(projection.status(), 200);
+  assert.doesNotMatch(await projection.text(), /leaseToken|leaseOwner|local-fixture|checkpoint-worktree|Foreign work package/);
+  const foreign = projectRoute(fixture.projectId) + '/jobs/' + fixture.foreignJobId;
+  assert.equal((await request(fixture.operatorToken, foreign + '/action', { method: 'POST', data: { action: 'pause' } })).status(), 404);
+  assert.equal((await request(fixture.operatorToken, foreign + '/reconcile',
+    { method: 'POST', data: { reviewed: true, reason: 'Verified the fixture checkpoint' } })).status(), 404);
+
+  const row = (title) => page.getByRole('row').filter({ has: page.getByText(title, { exact: true }) });
+  const local = row('Local work package');
+  const running = row('Running local work package');
+  const remote = row('Running remote work package');
+  const interrupted = row('Interrupted local work package');
+  async function action(target, label) {
+    await target.getByRole('button', { name: label, exact: true }).click();
+    await form.getByRole('button', { name: label, exact: true }).click();
+    await form.waitFor({ state: 'hidden' });
+  }
+  assert.equal(await remote.getByRole('button').count(), 0);
+  await action(running, 'Stop job');
+  await running.getByText('Requested: stopped · waiting for the runner').waitFor();
+  await running.getByText('preparing', { exact: true }).waitFor();
+  assert.equal(await running.getByRole('button').count(), 0);
+  await action(local, 'Pause job');
+  await local.getByText('paused', { exact: true }).waitFor();
+  await action(local, 'Stop job');
+  await local.getByText('stopped', { exact: true }).waitFor();
+  await local.getByRole('button', { name: 'Resume job' }).click();
+  await form.getByRole('button', { name: 'Resume job' }).click();
+  await page.getByText('Confirm the review and record what you inspected.').waitFor();
+  await form.getByLabel('Evidence and review justification').fill('Reviewed the prior worktree');
+  await form.getByLabel('I reviewed the worktree and any external changes').check();
+  await form.getByRole('button', { name: 'Resume job' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await local.getByText('queued', { exact: true }).waitFor();
+
+  await interrupted.getByRole('button', { name: 'Review and requeue' }).click();
+  await form.getByText(fixture.checkpoint, { exact: true }).waitFor();
+  await form.getByLabel('Evidence and review justification').fill('Verified stopped runner and durable checkpoint');
+  await form.getByLabel('I reviewed the stopped process and clean worktree checkpoint').check();
+  const dirtyFile = path.join(fixture.worktree, 'untracked.txt');
+  await writeFile(dirtyFile, 'Untracked fixture');
+  await form.getByRole('button', { name: 'Review and requeue' }).click();
+  await page.getByText('Recovery requires a stopped local runner and a clean, matching checkpoint.').waitFor();
+  await rm(dirtyFile);
+  const oldJob = (await api('state')).jobs.find((job) => job.title === 'Interrupted local work package');
+  const git = (...args) => execFileSync('git', args, { cwd: fixture.worktree, encoding: 'utf8', timeout: 10_000 }).trim();
+  git('-c', 'user.name=Factory Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+    '-c', 'core.hooksPath=' + path.join(fixture.home, 'no-hooks'), 'commit', '--allow-empty', '-m', 'New recovery checkpoint');
+  const newCheckpoint = git('rev-parse', 'HEAD');
+  const dll = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
+  execFileSync('dotnet', [dll, '--browser-advance-job-checkpoint', fixture.home, oldJob.id, newCheckpoint], { timeout: 15_000 });
+  const staleResponse = page.waitForResponse((response) => response.url().endsWith('/jobs/' + oldJob.id + '/reconcile') &&
+    response.request().method() === 'POST');
+  await form.getByRole('button', { name: 'Review and requeue' }).click();
+  assert.equal((await staleResponse).status(), 409);
+  await page.getByText('The recovery checkpoint changed. Refresh and review the job again.').waitFor();
+  assert.equal((await api('state')).jobs.find((job) => job.id === oldJob.id).state, 'blocked');
+  await form.getByRole('button', { name: 'Cancel' }).click();
+  await page.getByRole('button', { name: 'Refresh projects' }).click();
+  await interrupted.getByRole('button', { name: 'Review and requeue' }).click();
+  await form.getByText(newCheckpoint, { exact: true }).waitFor();
+  await form.getByLabel('Evidence and review justification').fill('Verified stopped runner and replacement checkpoint');
+  await form.getByLabel('I reviewed the stopped process and clean worktree checkpoint').check();
+  await form.getByRole('button', { name: 'Review and requeue' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await interrupted.getByText('queued', { exact: true }).waitFor();
+  const { jobs } = await api('state');
+  assert.equal(jobs.find((job) => job.title === 'Interrupted local work package').stage, 'reconciled');
+  assert.equal(jobs.find((job) => job.title === 'Running local work package').requestedState, 'project:stopped');
+  assert.equal(jobs.find((job) => job.id === fixture.foreignJobId).state, 'queued');
+}, async (home) => {
+  const worktree = path.join(home, 'checkpoint-worktree');
+  await mkdir(worktree);
+  const git = (...args) => execFileSync('git', args, { cwd: worktree, encoding: 'utf8', timeout: 10_000 }).trim();
+  git('init', '-b', 'master');
+  git('-c', 'user.name=Factory Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+    '-c', 'core.hooksPath=' + path.join(home, 'no-hooks'), 'commit', '--allow-empty', '-m', 'Fixture checkpoint');
+  const dll = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
+  const fixture = JSON.parse(execFileSync('dotnet',
+    [dll, '--browser-project-jobs-fixture', home, worktree, git('rev-parse', 'HEAD')], { encoding: 'utf8', timeout: 15_000 }));
+  return { ...fixture, worktree, home };
+});
+
 async function seedProviderEvidence(home, scoped = false) {
   const token = 'b'.repeat(64);
   const fixture = { env: { FACTORY_REMOTE_EXECUTOR_TOKEN: token }, receipt: null, receiptRequests: 0 };

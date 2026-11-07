@@ -41,6 +41,15 @@ Start with [Project review and goal planning](project-reviews.md) for the workfl
 
 Use **Projects → Inspect → Configure AI providers** to route operations to enabled profiles. **Capacity** shows attributed usage, Factory-local limits and any account windows reported by the provider. The **Goal Planner** also shows the shared controller Codex allowance next to local project capacity. See [Provider routing and budgets](providers.md) for configuration and accounting. Use the [recovery guide](recovery.md) to review interrupted jobs and settle held usage.
 
+## Project budget recovery
+
+Connect through the sidebar connection control with a project token issued by `factory viewer create`. Mission Control opens **Project recovery** and lists only projects granted to that identity. A Budget Reconciler grant is required in the selected project to see held reservations and submit recovery decisions.
+
+- **Recover executor receipt** records an independent review and evidence reason. The controller fetches the receipt from its configured executor and posts verified final usage. A missing receipt leaves the hold open so the operator can retry.
+- **Settle goal reservation** takes verified final input and output totals and an evidence reason. Resolve any linked provider holds first. Confirm an overrun explicitly when verified usage exceeds the reservation.
+
+The controller rechecks project access and writes the decision to the audit trail together with the ledger update. See [operator authorization](operator-authorization.md#project-goal-budget-settlement-and-executor-receipt-recovery) for grant commands and API details.
+
 ## Browser validation
 
 GitHub Actions runs the [Chromium browser suite](../tests/mission-control/README.md) against a local Factory controller. It covers sidebar authentication and navigation, project review through plan adoption, rejection of a stale plan, account allowances in the Planner, reconciliation after a host change and remote receipt recovery with a simulated executor.

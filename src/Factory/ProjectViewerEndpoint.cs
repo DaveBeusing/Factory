@@ -18,6 +18,9 @@ internal sealed class ProjectViewerEndpoint
                 PlanResponse(() => store.ReconcileProjectProviderHold(context.Request.Headers.Authorization.ToString(),
                     projectId, reservationId, input))).WithMetadata(viewer);
         const string projectRoute = "/api/viewer/projects/{projectId:guid}";
+        app.MapGet("/api/viewer/projects", (HttpContext context) =>
+            PlanResponse(() => store.ReadViewerProjects(context.Request.Headers.Authorization.ToString())))
+            .WithMetadata(viewer);
         app.MapGet(projectRoute + "/goal-reservations", (HttpContext context, Guid projectId) =>
             PlanResponse(() => store.ReadProjectGoalHolds(context.Request.Headers.Authorization.ToString(), projectId)))
             .WithMetadata(viewer);

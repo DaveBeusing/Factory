@@ -34,13 +34,15 @@ let planProject="";
 const generatingPlans=new Set();
 const number=value=>Number(value||0).toLocaleString();
 let settings={}, usage=null, providerData=null, projectReview=null, analysisProject='', health=null, view='overview', search='', filter='all', streamController=null,lastHeartbeat=0, connected=false, lastStateUpdate=0, modalHandler=null, inspector=null, planDraft=null, planGoal=null, loading=false;
-async function api(path,method='GET',body){if(!token)throw new Error('Connect your API token first');const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});if(!res.ok){let msg='Request failed ('+res.status+')';try{let obj=await res.json();msg=obj.error||obj.title||msg}catch{}throw new Error(msg)}if(res.status===204||res.status===202)return null;return res.json()}
+const projectAccess=()=>token.startsWith('factory-viewer-');
+let recoveryRequest=0, projectRecovery={projects:[],selected:'',loading:false};
+async function api(path,method='GET',body){if(!token)throw new Error('Connect your API token first');if(projectAccess()&&!path.startsWith('viewer/'))throw new Error('This action requires an administrator connection');const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});if(!res.ok){let msg='Request failed ('+res.status+')';try{let obj=await res.json();msg=obj.error||obj.title||msg}catch{}const error=new Error(msg);error.status=res.status;throw error}if(res.status===204||res.status===202)return null;return res.json()}
 const notify=(message,error=false)=>{const el=document.createElement('div');el.className='toast'+(error?' error':'');el.innerHTML=`<span class="toast-icon">${ico(error?'shield':'check')}</span><span>${esc(message)}</span>`;$('toast-stack').append(el);setTimeout(()=>el.remove(),5500)};
 function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.classList.toggle('hidden',!val)); }
 function nav(v){view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=({plans:'Goal planner',analysis:'Project review'})[v]||v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
 function statusFromHealth(){
  const since=lastHeartbeat?Date.now()-lastHeartbeat:Infinity;
- const status=!token?'offline':!lastHeartbeat?(connected?'connecting':'offline'):connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
+ const status=projectAccess()?(connected?'connected':'offline'):!token?'offline':!lastHeartbeat?(connected?'connecting':'offline'):connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
  const label=status==='connected'?'Connected':status==='degraded'?'Connection delayed':status==='connecting'?'Connecting':'Offline';
  const brand=$('brand-connection'),dot=$('brand-connection-dot');
  dot.className='brand-connection-dot '+status;
@@ -49,7 +51,7 @@ function statusFromHealth(){
  for(const id of ['sidebar-dot','footer-dot'])$(id).className='live-dot '+status;
  $('sidebar-status').textContent=status==='connected'?'System connected':status==='degraded'?'Connection delayed':status==='connecting'?'Connecting':'Connection offline';
  $('sidebar-heartbeat').textContent=lastHeartbeat?'Heartbeat '+relative(new Date(lastHeartbeat).toISOString()):'No heartbeat';
- $('footer-status').textContent=status==='connected'?'Realtime stream active':status==='degraded'?'Reconnecting stream':status==='connecting'?'Connecting to event stream':'No active connection';
+ $('footer-status').textContent=status==='connected'?(projectAccess()?'Project connection':'Realtime stream active'):status==='degraded'?'Reconnecting stream':status==='connecting'?'Connecting to event stream':'No active connection';
  $('status-clock').textContent=new Date().toLocaleTimeString();
 }
 function updateHealth(h){health=h;lastHeartbeat=Date.now();connected=true;statusFromHealth()}
@@ -58,10 +60,41 @@ async function startStream(){if(streamController)streamController.abort();stream
  const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='';while(!controller.signal.aborted){const {done,value}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});let pos;while((pos=buffer.indexOf('\n\n'))>=0){const message=buffer.slice(0,pos);buffer=buffer.slice(pos+2);const data=message.split('\n').find(l=>l.startsWith('data: '));if(data){try{updateHealth(JSON.parse(data.slice(6)));if(Date.now()-lastStateUpdate>2200)await refreshState()}catch(e){console.warn('Heartbeat message:',e)}}}}
  }catch(e){if(controller.signal.aborted)break;connected=false;statusFromHealth()}await new Promise(r=>setTimeout(r,2800))}
 }
-async function refreshState(){if(!token||loading)return;loading=true;try{state=await api('state');lastStateUpdate=Date.now();connected=true;render();statusFromHealth()}catch(e){connected=false;statusFromHealth();if(!lastStateUpdate)render();}finally{loading=false}}
-async function refreshUsage(){if(!token)return;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render();refreshInspectorProviderCapacity()}
-async function connect(nextToken){if(nextToken!==undefined){if(nextToken!==token){lastHeartbeat=0;connected=false;health=null;if(streamController)streamController.abort()}token=nextToken;try{token?sessionStorage.setItem('factory-token',token):sessionStorage.removeItem('factory-token')}catch{}}
+async function refreshState(){if(!token||projectAccess()||loading)return;const credential=token;loading=true;try{const snapshot=await api('state');if(credential!==token)return;state=snapshot;lastStateUpdate=Date.now();connected=true;render();statusFromHealth()}catch(e){if(credential!==token)return;connected=false;statusFromHealth();if(!lastStateUpdate)render();}finally{loading=false}}
+async function refreshUsage(){if(!token||projectAccess())return;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render();refreshInspectorProviderCapacity()}
+async function connect(nextToken){
+ if(nextToken!==undefined){
+  if(nextToken!==token){
+   lastHeartbeat=0;
+   connected=false;
+   health=null;
+   recoveryRequest++;
+   projectRecovery={projects:[],selected:'',loading:false};
+   streamController?.abort();
+   closeInspector();
+   $('inspector-body').replaceChildren();
+   $('form-modal').close();
+   $('modal-fields').replaceChildren();
+   $('palette').close();
+   modalHandler=null;
+   $('toast-stack').replaceChildren();
+  }
+  token=nextToken;
+  try{token?sessionStorage.setItem('factory-token',token):sessionStorage.removeItem('factory-token')}catch{}
+ }
  if(!token){connected=false;if(streamController)streamController.abort();state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};usage=null;render();statusFromHealth();return}
+ if(projectAccess()){
+  nav('recovery');
+  const credential=token;
+  await loadProjectRecovery();
+  if(credential!==token)return;
+  if(connected)$('connection-modal').close();
+  else{
+   notify(projectRecovery.error||'Unable to connect with this project token.',true);
+   if(!$('connection-modal').open)$('connection-modal').showModal();
+  }
+  return;
+ }
  try{await refreshState();if(!connected)throw Error('Invalid token or server unreachable');$('connection-modal').close();startStream();refreshUsage();fetchSettings();fetchManagedWorkers();fetchProviders()}catch(e){notify(e.message,true);$('connection-modal').showModal()}}
 async function fetchSettings(){try{settings=await api('settings')}catch{}}
 async function fetchProviders(){try{providerData=await api('providers')}catch{providerData=null}condition('#usage-nav',!!usage||!!providerData);render();refreshInspectorProviderCapacity()}
@@ -290,6 +323,103 @@ function recoveryExplanation(j){
  const note=j.error||((j.state==='paused'||j.state==='stopped')?'Inspect the worktree and prior execution before resuming':'No failure detail reported');
  return {hold,git,lease,note};
 }
+async function loadProjectRecovery(selected=projectRecovery.selected){
+ const request=++recoveryRequest;
+ projectRecovery={projects:projectRecovery.projects,selected,loading:true};
+ render();
+ try{
+  const projects=await api('viewer/projects');
+  if(request!==recoveryRequest)return;
+  connected=true;
+  const project=projects.find(item=>item.id===selected)||projects[0];
+  projectRecovery={projects,selected:project?.id||'',loading:true};
+  if(project?.canReconcileBudget){
+   const path='viewer/projects/'+encodeURIComponent(project.id);
+   const [summary,goals,receipts]=await Promise.all([api(path),api(path+'/goal-reservations'),api(path+'/executor-receipts')]);
+   if(request!==recoveryRequest)return;
+   Object.assign(projectRecovery,{summary,goals,receipts});
+  }
+ }catch(error){
+  if(request!==recoveryRequest)return;
+  if(error.status===401){connected=false;projectRecovery={projects:[],selected:''};}
+  projectRecovery.error=error.status===403||error.status===404
+   ?'Project access changed. Refresh to load your current grants.' : error.message;
+ }finally{
+  if(request===recoveryRequest){projectRecovery.loading=false;render();statusFromHealth();}
+ }
+}
+function renderProjectRecovery(){
+ const {projects,selected,loading,error,summary,goals,receipts}=projectRecovery;
+ const project=projects.find(item=>item.id===selected);
+ const picker=projects.length?'<label for="recovery-project">Project</label> <select id="recovery-project">'+projects.map(item=>
+  `<option value="${esc(item.id)}" ${item.id===selected?'selected':''}>${esc(item.name)}</option>`).join('')+'</select>':'';
+ let result=header('Project recovery','Review held budgets and recover verified executor usage for a project.');
+ result+=card('Project access','Recovery actions require the Budget Reconciler role for the selected project.',
+  `<div class="field">${picker}</div>`,null,'<button class="button button-muted" data-act="refresh-project-recovery">Refresh projects</button>');
+ if(loading)return result+'<p role="status">Loading project recovery…</p>';
+ if(error)return result+`<p role="alert">${esc(error)}</p>`;
+ if(!project)return result+empty('folder','No granted projects','Ask an administrator for project access.');
+ if(!project.canReconcileBudget)return result+empty('shield','Budget Reconciler access required','Your grant for this project does not include budget recovery.');
+ const goalRows=goals.map(hold=>{
+  const goal=summary.goals.find(item=>item.id===hold.goalId);
+  const job=summary.jobs.find(item=>item.id===hold.jobId);
+  return `<tr><td>${esc(goal?.objective||hold.goalId)}</td><td>${esc(job?.title||hold.jobId)}</td>
+   <td>${number(hold.reserved)}</td><td>${number(hold.consumed)}</td><td><button class="tiny-button"
+   data-act="settle-project-goal" data-id="${esc(hold.id)}">Settle goal reservation</button></td></tr>`;
+ }).join('');
+ const receiptRows=receipts.map(hold=>{
+  const job=summary.jobs.find(item=>item.id===hold.jobId);
+  return `<tr><td>${esc(job?.title||hold.jobId)}</td><td>${esc(hold.providerId)}</td><td>${esc(hold.model)}</td>
+   <td><button class="tiny-button" data-act="recover-project-receipt" data-id="${esc(hold.turnId)}">Recover executor receipt</button></td></tr>`;
+ }).join('');
+ return result+`<div class="content-grid">${card('Held goal reservations','Settle linked provider usage before closing a goal reservation.',
+  goalRows?table(['Goal','Work package','Reserved','Consumed',''],goalRows):empty('check','No held goal reservations','No goal reservations require settlement.'))}
+  ${card('Held executor turns','Recover final usage from the configured executor.',
+  receiptRows?table(['Work package','Provider','Model',''],receiptRows):empty('check','No held executor turns','No executor receipts require recovery.'))}</div>`;
+}
+function formProjectRecovery(action,id){
+ const context=projectRecovery;
+ const project=context.projects.find(item=>item.id===context.selected&&item.canReconcileBudget);
+ if(!project||context.loading||context.error)return;
+ const goal=action==='settle-project-goal';
+ const hold=goal?context.goals.find(item=>item.id===id):context.receipts.find(item=>item.turnId===id);
+ if(!hold)return;
+ const path='viewer/projects/'+encodeURIComponent(project.id)+(goal
+  ?'/goals/'+encodeURIComponent(hold.goalId)+'/budget/reconcile'
+  :'/jobs/'+encodeURIComponent(hold.jobId)+'/provider-turns/'+encodeURIComponent(hold.turnId)+'/recover');
+ const job=context.summary.jobs.find(item=>item.id===hold.jobId);
+ const title=goal?'Settle goal reservation':'Recover executor receipt';
+ const tokens=goal?field('input','Verified input tokens','','number')+field('output','Verified output tokens','','number'):'';
+ openForm(title,project.name+' · '+(job?.title||hold.jobId),tokens+
+  field('reason','Evidence and review justification','','textarea')+
+  field('reviewed','I independently reviewed the evidence',false,'checkbox')+
+  field('confirmOverrun','I verified usage above the reserved tokens, if applicable',false,'checkbox'),
+  async form=>{
+   if(projectRecovery!==context)throw new Error('Project recovery changed. Review the selected project again.');
+   const data=values(form), reason=data.reason.trim();
+   if(!form.elements.reviewed.checked||reason.length<10||reason.length>1000)
+    throw new Error('Confirm your review and enter an evidence reason of 10 to 1000 characters.');
+   const body={reviewed:true,reason,confirmOverrun:form.elements.confirmOverrun.checked};
+   if(goal){
+    const totals=[data.input,data.output].map(value=>value===''?NaN:Number(value));
+    if(totals.some(value=>!Number.isSafeInteger(value)||value<0))
+     throw new Error('Enter both verified token totals as nonnegative whole numbers.');
+    Object.assign(body,{reservationId:hold.id,finalTokensIn:totals[0],finalTokensOut:totals[1]});
+   }
+   try{await api(path,'POST',body);}
+   catch(error){
+    if(projectRecovery===context&&[401,403,404].includes(error.status)){
+     $('form-modal').close();
+     await loadProjectRecovery(project.id);
+    }
+    throw error;
+   }
+   if(projectRecovery===context){
+    notify(goal?'Goal reservation settled':'Executor receipt recovered');
+    await loadProjectRecovery(project.id);
+   }
+  },title);
+}
 function renderRecovery(){
  const jobs=recoveryCandidates();
  const held=(state.budgetReservations||[]).filter(r=>r.state==='held');
@@ -327,7 +457,22 @@ function renderOperationalPulse(){
 const JobStatesActiveUi=['preparing','building','gating','reviewing','reworking','awaiting_approval'];
 
 let renderedMain;
-function render(){if(!token){renderedMain=null;$('main').innerHTML=`<div class="loading-screen"><div style="text-align:center">${ico('shield')}<h2>Connect to Mission Control</h2><p class="muted">Enter the API token to manage your Factory workspace.</p><button class="button button-primary" data-act="open-connection">Connect</button></div></div>`;return}
+function render(){
+ const scoped=projectAccess();
+ document.body.classList.toggle('project-access',scoped);
+ if(!token){renderedMain=null;$('main').innerHTML=`<div class="loading-screen"><div style="text-align:center">${ico('shield')}<h2>Connect to Mission Control</h2><p class="muted">Enter the API token to manage your Factory workspace.</p><button class="button button-primary" data-act="open-connection">Connect</button></div></div>`;return}
+ if(scoped){
+  const next=renderProjectRecovery();
+  if(next!==renderedMain){
+   const restoreFocus=document.activeElement===$('recovery-project');
+   $('main').innerHTML=next;
+   renderedMain=next;
+   $('recovery-project')?.addEventListener('change',event=>loadProjectRecovery(event.target.value));
+   if(restoreFocus)$('recovery-project')?.focus();
+  }
+  document.querySelectorAll('[data-count]').forEach(el=>el.textContent='');
+  return;
+ }
 const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals,analysis:renderAnalysis,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings};const next=(renders[view]||renderOverview)();
  const mainChanged=next!==renderedMain;
  if(mainChanged){$('main').innerHTML=next;renderedMain=next;}
@@ -832,13 +977,21 @@ async function act(action,id,index,revision){switch(action){case'open-connection
  break;}
  }}
 function showPalette(){const commands=[['Overview','overview','overview'],['Projects','projects','folder'],['Goals','goals','target'],['Project review','analysis','eye'],['Goal planner','plans','route'],['Jobs','jobs','layers'],['Queue','queue','queue'],['Recovery','recovery','shield'],['Workers','workers','cpu'],['Activity','events','activity'],['Settings','settings','settings']];const q=$('palette-input').value.toLowerCase();$('palette-results').innerHTML=commands.filter(([a])=>a.toLowerCase().includes(q)).map(([title,to,i])=>`<button class="palette-entry" data-view="${to}">${ico(i)}${title}<small>Navigate</small></button>`).join('')||`<div class="empty">No matching commands</div>`}
-document.addEventListener('click',async e=>{const btn=e.target.closest('[data-view],[data-act],[data-inspect],[data-edit],[data-control]');if(!btn)return;try{if(btn.dataset.view){nav(btn.dataset.view);if($('palette').open)$('palette').close();if(view==='plans')loadPlans();if(view==='analysis')loadProjectReview();return}
+document.addEventListener('click',async e=>{const btn=e.target.closest('[data-view],[data-act],[data-inspect],[data-edit],[data-control]');if(!btn)return;try{
+ if(projectAccess()){
+  const action=btn.dataset.act;
+  if(btn.dataset.view==='recovery'){nav('recovery');await loadProjectRecovery();}
+  if(action==='refresh-project-recovery')await loadProjectRecovery();
+  if(action==='settle-project-goal'||action==='recover-project-receipt')formProjectRecovery(action,btn.dataset.id);
+  return;
+ }
+ if(btn.dataset.view){nav(btn.dataset.view);if($('palette').open)$('palette').close();if(view==='plans')loadPlans();if(view==='analysis')loadProjectReview();return}
  if(btn.dataset.inspect){const [type,id]=btn.dataset.inspect.split(':');inspect(type,decodeURIComponent(id));return}
  if(btn.dataset.edit){const [type,id]=btn.dataset.edit.split(':');if(type==='project')formProject(id);else if(type==='goal')formGoal(id);else if(type==='job')formJob(id);return}
  if(btn.dataset.control){const bits=btn.dataset.control.split(':');await confirmControl(bits[0],decodeURIComponent(bits[1]),bits[2]);return}
  if(btn.dataset.act)await act(btn.dataset.act,btn.dataset.id,btn.dataset.index,btn.dataset.revision)
  }catch(error){notify(error.message,true)}});
-$('modal-form').addEventListener('submit',async e=>{e.preventDefault();const btn=$('modal-submit');btn.disabled=true;try{if(modalHandler)await modalHandler(e.target);$('form-modal').close()}catch(error){notify(error.message,true)}finally{btn.disabled=false}});
+$('modal-form').addEventListener('submit',async e=>{e.preventDefault();const btn=$('modal-submit'),handler=modalHandler;btn.disabled=true;try{if(handler)await handler(e.target);if(handler===modalHandler)$('form-modal').close()}catch(error){if(handler===modalHandler)notify(error.message,true)}finally{btn.disabled=false}});
 $('modal-close').addEventListener('click',()=>{$('form-modal').close()});$('modal-cancel').addEventListener('click',()=>$('form-modal').close());
 $('connection-form').addEventListener('submit',async e=>{e.preventDefault();await connect($('api-token').value.trim())});
 $('disconnect').addEventListener('click',()=>{$('connection-modal').close();connect('')});
@@ -849,7 +1002,7 @@ $('mobile-open').addEventListener('click',()=>{$('sidebar').classList.add('open'
 $('mobile-close').addEventListener('click',()=>{$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open')});
 $('sidebar-backdrop').addEventListener('click',()=>{$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open')});
 $('top-create').addEventListener('click',()=>{const actions=[['Project','create-project'],['Goal','create-goal'],['Job','create-job'],['Worker','create-worker']];openForm('Create new','Choose the object to add to your Factory workspace.',`<div class="list-stack">${actions.map(([name,action])=>`<button type="button" class="palette-entry" data-act="${action}">${ico('plus')} New ${name}</button>`).join('')}</div>`,async()=>{},'Done')});
-$('open-search').addEventListener('click',()=>{$('palette-input').value='';showPalette();$('palette').showModal();$('palette-input').focus()});
+$('open-search').addEventListener('click',()=>{if(projectAccess())return;$('palette-input').value='';showPalette();$('palette').showModal();$('palette-input').focus()});
 $('palette-input').addEventListener('input',showPalette);
 document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('open-search').click()}if(e.key==='Escape'&&inspector)closeInspector()});
 setInterval(statusFromHealth,1100);

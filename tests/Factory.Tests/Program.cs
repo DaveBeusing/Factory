@@ -34,6 +34,12 @@ if (args is ["--browser-provider-evidence-fixture", var providerEvidenceFixtureH
     return 0;
 }
 
+if (args is ["--browser-project-recovery-fixture", var projectRecoveryHome, var projectRecoveryExecutorUrl])
+{
+    Console.WriteLine(Json.Stringify(BrowserRecoveryFixture.SeedProjectRecovery(projectRecoveryHome, projectRecoveryExecutorUrl)));
+    return 0;
+}
+
 if (args is ["--provider-crash-fixture", var fixtureHome, var projectArg, var goalArg])
 {
     var store = new StateStore(fixtureHome);

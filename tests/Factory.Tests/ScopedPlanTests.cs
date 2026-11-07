@@ -39,6 +39,8 @@ internal static class ScopedPlanTests
             var calls = 0;
             var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var enteredRegrant = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseRegrant = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
             builder.Logging.ClearProviders();
             await using var provider = builder.Build();
@@ -49,10 +51,16 @@ internal static class ScopedPlanTests
                 Require(body.RootElement.GetProperty("model").GetString() == "fixture-model", "Wrong planner model");
                 Require(!body.RootElement.GetProperty("prompt").GetString()!.Contains(foreign.Objective,
                     StringComparison.Ordinal), "Foreign objective reached the provider");
-                if (Interlocked.Increment(ref calls) == 2)
+                var call = Interlocked.Increment(ref calls);
+                if (call == 2)
                 {
                     entered.TrySetResult();
                     await release.Task.WaitAsync(timeout.Token);
+                }
+                if (call == 3)
+                {
+                    enteredRegrant.TrySetResult();
+                    await releaseRegrant.Task.WaitAsync(timeout.Token);
                 }
                 return new
                 {
@@ -227,13 +235,34 @@ internal static class ScopedPlanTests
                 "Confirmed provider and goal usage must settle even after revocation");
             Require(MissionControlManager.ReadPlan(store, fundedGoal.Id)?.Revision == generated.Revision && AuditCount() == 8,
                 "Revoked output escaped the publication fence");
+
+            store.SetViewerGrant(alice.SubjectId, first.Id, grant: true, planner: true);
+            var regranted = Request(alice.Token, HttpMethod.Post, generate, HttpStatusCode.Conflict, generation);
+            try
+            {
+                await enteredRegrant.Task.WaitAsync(timeout.Token);
+                store.SetViewerGrant(alice.SubjectId, first.Id, grant: false, planner: true);
+                store.SetViewerGrant(alice.SubjectId, first.Id, grant: true, planner: true);
+            }
+            finally { releaseRegrant.TrySetResult(); }
+            await regranted;
+            var afterRegrant = store.Read();
+            Require(MissionControlManager.ReadPlan(store, fundedGoal.Id)?.Revision == generated.Revision && AuditCount() == 9 &&
+                afterRegrant.ProviderUsages.Count == 3 && afterRegrant.ProviderUsages.All(usage => usage.FinalUsageReported) &&
+                afterRegrant.ProviderBudgetReservations.All(reservation => reservation.State == "released") &&
+                GoalBudgetLedger.Available(afterRegrant, fundedGoal.Id) == 3976,
+                "Regrant must fence the old output and preserve its confirmed usage");
+            var fresh = JsonSerializer.Deserialize<FactoryPlan>(
+                await Request(alice.Token, HttpMethod.Post, generate, HttpStatusCode.OK, generation), Json.Options)!;
+            Require(calls == 4 && fresh.Revision != generated.Revision && AuditCount() == 11,
+                "The new grant must authorize a fresh request");
             using var reservationAudit = db.CreateCommand();
             reservationAudit.CommandText = """
                 SELECT COUNT(*) FROM project_planning_audit a JOIN provider_usages u ON u.id=a.target_id
                 WHERE a.operation='plan_generation_reserved' AND a.subject_id=$actor AND a.project_id=u.project_id;
                 """;
             reservationAudit.Parameters.AddWithValue("$actor", alice.SubjectId.ToString("D"));
-            Require((long)reservationAudit.ExecuteScalar()! == 2, "Reservation audit is not bound to its actor and usage");
+            Require((long)reservationAudit.ExecuteScalar()! == 4, "Reservation audit is not bound to its actor and usage");
 
             async Task<FactoryPlan> Save() => JsonSerializer.Deserialize<FactoryPlan>(
                 await Request(alice.Token, HttpMethod.Put, path, HttpStatusCode.OK, draft), Json.Options)!;

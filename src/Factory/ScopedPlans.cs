@@ -54,11 +54,16 @@ public sealed partial class StateStore
     {
         var verifier = RequirePlanVerifier(authorization);
         using var db = Open();
-        var (scope, snapshot) = ReadPlanPreflight(db, verifier, projectId, goalId);
+        PlanScope scope;
+        FactoryState snapshot;
+        long grantRevision;
         var expected = new FactoryPlan { GoalRevision = input.GoalRevision, Revision = input.Revision };
-        VerifyGenerationTarget(scope);
         using (var read = db.BeginTransaction(deferred: true))
         {
+            (scope, snapshot) = ReadPlanPreflight(db, read, verifier, projectId, goalId);
+            grantRevision = ReadPlannerGrantRevision(db, read, scope)
+                ?? throw new ScopedPlanRejected(DraftGoalStatus.Forbidden);
+            VerifyGenerationTarget(db, read, scope);
             snapshot.ProviderAssignments = ReadViewerRows(db, read, projectId, """
                 SELECT provider_id FROM provider_assignments WHERE project_id=$project AND role='planner';
                 """, row => new ProviderAssignment { ProjectId = projectId, Role = "planner", ProviderId = row.GetString(0) });
@@ -71,12 +76,12 @@ public sealed partial class StateStore
                 beforeReserve: () =>
                 {
                     using (var read = db.BeginTransaction(deferred: true))
-                        VerifyGenerationTarget(ReadPlanScope(db, read, verifier, projectId, goalId));
+                        VerifyGenerationTarget(db, read, ReadPlanScope(db, read, verifier, projectId, goalId));
                     Planning.RequirePlanningCheckout(scope.Project, preflight.BaseCommit);
                 },
                 authorize: (connection, tx, state) =>
                 {
-                    VerifyGenerationTarget(ReadPlanScope(connection, tx, verifier, projectId, goalId));
+                    VerifyGenerationTarget(connection, tx, ReadPlanScope(connection, tx, verifier, projectId, goalId));
                     var currentProfile = ProviderRouter.Resolve(settings, state, projectId, "planner");
                     if (currentProfile != profile || ProviderRouter.EffectiveModel(settings, currentProfile, "medium") != model)
                         throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "The project provider route changed. Retry planning.");
@@ -90,12 +95,14 @@ public sealed partial class StateStore
             cancellation, input.Revision);
         cancellation.ThrowIfCancellationRequested();
         using (var read = db.BeginTransaction(deferred: true))
-            VerifyGenerationTarget(ReadPlanScope(db, read, verifier, projectId, goalId));
+            VerifyGenerationTarget(db, read, ReadPlanScope(db, read, verifier, projectId, goalId));
         Planning.RequirePlanningCheckout(scope.Project, preflight.BaseCommit);
-        return CommitScopedPlan(db, verifier, scope, plan, "plan_revision_generated", requireActive: true, cancellation);
+        return CommitScopedPlan(db, verifier, scope, plan, "plan_revision_generated", VerifyGenerationTarget, cancellation);
 
-        void VerifyGenerationTarget(PlanScope current)
+        void VerifyGenerationTarget(SqliteConnection connection, SqliteTransaction tx, PlanScope current)
         {
+            if (current.SubjectId != scope.SubjectId || ReadPlannerGrantRevision(connection, tx, current) != grantRevision)
+                throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "The Planner grant changed. Start a new planning request.");
             VerifyPlanSave(current, expected);
             if (current.Project.Status != "active")
                 throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Provider planning requires an active project.");
@@ -105,14 +112,25 @@ public sealed partial class StateStore
         }
     }
 
+    private static long? ReadPlannerGrantRevision(SqliteConnection db, SqliteTransaction tx, PlanScope scope)
+    {
+        // Each successful grant writes a new audit row in the same transaction.
+        using var query = Command(db, tx, """
+            SELECT id FROM viewer_access_audit
+            WHERE subject_id=$subject AND project_id=$project AND operation='grant_planner'
+            ORDER BY id DESC LIMIT 1;
+            """, ("$subject", scope.SubjectId), ("$project", scope.Project.Id));
+        return query.ExecuteScalar() as long?;
+    }
+
     private FactoryPlan CommitScopedPlan(SqliteConnection db, string verifier, PlanScope scope, FactoryPlan draft,
-        string operation, bool requireActive = false, CancellationToken cancellation = default)
+        string operation, Action<SqliteConnection, SqliteTransaction, PlanScope>? verify = null,
+        CancellationToken cancellation = default)
     {
         using var tx = db.BeginTransaction();
         var current = ReadPlanScope(db, tx, verifier, scope.Project.Id, scope.Goal.Id);
         VerifyPlanSave(current, draft);
-        if (requireActive && current.Project.Status != "active")
-            throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Provider planning requires an active project.");
+        verify?.Invoke(db, tx, current);
         VerifyPlanCheckout(scope.Project, current.Project, draft.BaseCommit);
         cancellation.ThrowIfCancellationRequested();
         InsertPlanRevision(db, tx, draft);
@@ -160,6 +178,12 @@ public sealed partial class StateStore
         Guid projectId, Guid goalId, Guid? requestedProjectId = null)
     {
         using var tx = db.BeginTransaction(deferred: true);
+        return ReadPlanPreflight(db, tx, verifier, projectId, goalId, requestedProjectId);
+    }
+
+    private (PlanScope Scope, FactoryState Snapshot) ReadPlanPreflight(SqliteConnection db, SqliteTransaction tx,
+        string verifier, Guid projectId, Guid goalId, Guid? requestedProjectId = null)
+    {
         var scope = ReadPlanScope(db, tx, verifier, projectId, goalId, requestedProjectId);
         var jobs = ReadViewerRows(db, tx, projectId, """
             SELECT id, title, description, state, integrated, updated_at FROM jobs WHERE project_id=$project;

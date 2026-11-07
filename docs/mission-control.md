@@ -46,6 +46,7 @@ Use **Projects → Inspect → Configure AI providers** to route operations to e
 Connect through the sidebar connection control with a project token issued by `factory viewer create`. Mission Control opens **Project recovery** and lists only projects granted to that identity. A Budget Reconciler grant is required in the selected project to see held reservations and submit recovery decisions.
 
 - **Recover executor receipt** records an independent review and evidence reason. The controller fetches the receipt from its configured executor and posts verified final usage. A missing receipt leaves the hold open so the operator can retry.
+- **Settle provider reservation** records independently verified final provider totals for a held reservation. Review the observed totals, enter both verified totals and an evidence reason, and explicitly confirm any overrun. Executor-backed reservations use receipt recovery.
 - **Settle goal reservation** takes verified final input and output totals and an evidence reason. Resolve any linked provider holds first. Confirm an overrun explicitly when verified usage exceeds the reservation.
 
 The controller rechecks project access and writes the decision to the audit trail together with the ledger update. See [operator authorization](operator-authorization.md#project-goal-budget-settlement-and-executor-receipt-recovery) for grant commands and API details.

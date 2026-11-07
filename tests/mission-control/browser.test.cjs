@@ -248,6 +248,7 @@ browserTest('limits recovery to Budget Reconciler grants and the selected projec
   const turn = snapshot.remoteProviderTurns[0];
   const foreignGoal = snapshot.goals.find((goal) => goal.projectId === otherId);
   const foreignHold = snapshot.budgetReservations.find((hold) => hold.goalId === foreignGoal.id);
+  const foreignProviderHold = snapshot.providerBudgetReservations.find((hold) => hold.projectId === otherId);
   const unauthorizedPaths = [];
   page.on('request', (request) => {
     const pathname = new URL(request.url()).pathname;
@@ -264,22 +265,28 @@ browserTest('limits recovery to Budget Reconciler grants and the selected projec
   const roleNotice = main.getByRole('heading', { name: 'Budget Reconciler access required' });
   const select = main.getByLabel('Project', { exact: true });
   const settle = main.getByRole('button', { name: 'Settle goal reservation' });
+  const settleProvider = main.getByRole('button', { name: 'Settle provider reservation' });
   const recover = main.getByRole('button', { name: 'Recover executor receipt' });
   await connect(operatorToken);
   await roleNotice.waitFor();
   assert.deepEqual(await select.locator('option').allTextContents(), ['Provider evidence fixture']);
   assert.equal(await settle.count(), 0);
+  assert.equal(await settleProvider.count(), 0);
   assert.equal(await recover.count(), 0);
   assert.equal(await page.locator('#top-create').isVisible(), false);
 
   await connect(reconciler);
   await settle.waitFor();
+  await settleProvider.waitFor();
   await recover.waitFor();
   assert.deepEqual(await select.locator('option').allTextContents(), ['Provider evidence fixture', 'Read-only project']);
   assert.doesNotMatch(await main.innerText(), /Read-only project goal|Unrelated project|fixture-lease-secret|A{64}/);
+  assert.doesNotMatch(await main.innerText(), /foreign-provider/);
+  assert.equal(await settleProvider.count(), 1);
   await select.selectOption(otherId);
   await roleNotice.waitFor();
   assert.equal(await settle.count(), 0);
+  assert.equal(await settleProvider.count(), 0);
   assert.equal(await recover.count(), 0);
   await select.selectOption(projectId);
   await settle.waitFor();
@@ -290,6 +297,9 @@ browserTest('limits recovery to Budget Reconciler grants and the selected projec
   const foreignSettlement = await scopedPost(route(projectId) + '/goals/' + foreignGoal.id + '/budget/reconcile',
     { ...decision, reservationId: foreignHold.id, finalTokensIn: 20, finalTokensOut: 0 });
   assert.equal(foreignSettlement.status(), 404);
+  const foreignProviderSettlement = await scopedPost(route(projectId) + '/provider-reservations/' + foreignProviderHold.id + '/reconcile',
+    { ...decision, finalInputTokens: 20, finalOutputTokens: 0 });
+  assert.equal(foreignProviderSettlement.status(), 404);
   const foreignReceipt = await scopedPost(route(otherId) + '/jobs/' + providerJob.id + '/provider-turns/' + turn.id + '/recover', decision);
   assert.equal(foreignReceipt.status(), 403);
   assert.equal(fixture.receiptRequests, 0);
@@ -309,17 +319,36 @@ browserTest('limits recovery to Budget Reconciler grants and the selected projec
   await form.waitFor({ state: 'hidden' });
   await main.getByRole('heading', { name: 'No held executor turns' }).waitFor();
 
+  async function enterTotals(input, output) {
+    await form.getByLabel('Verified input tokens').fill(input);
+    await form.getByLabel('Verified output tokens').fill(output);
+    await form.getByLabel('Evidence and review justification').fill(decision.reason);
+    await form.getByLabel('I independently reviewed the evidence').check();
+  }
   await settle.click();
-  await form.getByLabel('Verified input tokens').fill('25');
-  await form.getByLabel('Verified output tokens').fill('5');
-  await form.getByLabel('Evidence and review justification').fill(decision.reason);
-  await form.getByLabel('I independently reviewed the evidence').check();
+  await enterTotals('20', '0');
+  await form.getByRole('button', { name: 'Settle goal reservation' }).click();
+  await page.getByText('Reconcile outstanding provider turns before settling their goal reservation').waitFor();
+  await form.getByRole('button', { name: 'Cancel' }).click();
+
+  await settleProvider.click();
+  await enterTotals('25', '5');
+  await form.getByRole('button', { name: 'Settle provider reservation' }).click();
+  await page.getByText(/explicitly confirm the verified overrun/i).waitFor();
+  await form.getByLabel(/I verified usage above the reserved tokens/).check();
+  await form.getByRole('button', { name: 'Settle provider reservation' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await main.getByRole('heading', { name: 'No held provider reservations' }).waitFor();
+
+  await settle.click();
+  await enterTotals('25', '5');
   await form.getByRole('button', { name: 'Settle goal reservation' }).click();
   await form.waitFor({ state: 'hidden' });
   await main.getByRole('heading', { name: 'No held goal reservations' }).waitFor();
   const settled = await api('state');
   assert.equal(settled.remoteProviderTurns[0].state, 'reconciled');
   assert.equal(settled.budgetReservations.find((hold) => hold.id === foreignHold.id).state, 'held');
+  assert.equal(settled.providerBudgetReservations.find((hold) => hold.id === foreignProviderHold.id).state, 'held');
   assert.equal(settled.budgetReservations.find((hold) =>
     settled.goals.some((goal) => goal.id === hold.goalId && goal.projectId === projectId)).consumed, 30);
   assert.deepEqual(unauthorizedPaths, []);
@@ -398,6 +427,30 @@ browserTest('ignores an older admin login after connecting with a project token'
     await page.getByRole('button', { name: 'Settle goal reservation' }).waitFor();
   } finally {
     finishAdminRequest();
+  }
+}, (home) => seedProviderEvidence(home, true));
+
+browserTest('identifies otherwise identical provider holds in the list and settlement dialog', async ({ page, form, connection, fixture }) => {
+  const secondId = '12345678-1234-1234-1234-123456789abc';
+  let firstId;
+  await page.route('**/api/viewer/projects/*/provider-reservations', async (route) => {
+    const response = await route.fetch();
+    const [hold] = await response.json();
+    firstId = hold.id;
+    await route.fulfill({ response, json: [hold, { ...hold, id: secondId }] });
+  });
+  await page.locator('#brand-connection').click();
+  await connection.getByLabel('API token').fill(fixture.access.reconciler);
+  await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+  await connection.waitFor({ state: 'hidden' });
+  const holds = page.getByRole('row').filter({ hasText: 'manual-provider' });
+  assert.equal(await holds.count(), 2);
+  for (const id of [firstId, secondId]) {
+    const row = holds.filter({ hasText: 'Hold ID: ' + id });
+    await row.getByRole('button', { name: 'Settle provider reservation' }).click();
+    const subtitle = form.locator('#modal-subtitle');
+    assert.ok((await subtitle.innerText()).includes('Hold ID: ' + id));
+    await form.getByRole('button', { name: 'Cancel' }).click();
   }
 }, (home) => seedProviderEvidence(home, true));
 

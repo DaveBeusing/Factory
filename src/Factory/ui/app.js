@@ -359,9 +359,11 @@ async function loadProjectRecovery(selected=projectRecovery.selected){
   projectRecovery={projects,selected:project?.id||'',loading:true};
   if(project?.canReconcileBudget){
    const path='viewer/projects/'+encodeURIComponent(project.id);
-   const [summary,goals,receipts]=await Promise.all([api(path),api(path+'/goal-reservations'),api(path+'/executor-receipts')]);
+   const [summary,goals,providers,receipts]=await Promise.all([
+    api(path),api(path+'/goal-reservations'),api(path+'/provider-reservations'),api(path+'/executor-receipts')
+   ]);
    if(request!==recoveryRequest)return;
-   Object.assign(projectRecovery,{summary,goals,receipts});
+   Object.assign(projectRecovery,{summary,goals,providers,receipts});
   }
  }catch(error){
   if(request!==recoveryRequest)return;
@@ -373,7 +375,7 @@ async function loadProjectRecovery(selected=projectRecovery.selected){
  }
 }
 function renderProjectRecovery(){
- const {projects,selected,loading,error,summary,goals,receipts}=projectRecovery;
+ const {projects,selected,loading,error,summary,goals,providers,receipts}=projectRecovery;
  const project=projects.find(item=>item.id===selected);
  const picker=projects.length?'<label for="recovery-project">Project</label> <select id="recovery-project">'+projects.map(item=>
   `<option value="${esc(item.id)}" ${item.id===selected?'selected':''}>${esc(item.name)}</option>`).join('')+'</select>':'';
@@ -396,7 +398,17 @@ function renderProjectRecovery(){
   return `<tr><td>${esc(job?.title||hold.jobId)}</td><td>${esc(hold.providerId)}</td><td>${esc(hold.model)}</td>
    <td><button class="tiny-button" data-act="recover-project-receipt" data-id="${esc(hold.turnId)}">Recover executor receipt</button></td></tr>`;
  }).join('');
- return result+`<div class="content-grid">${card('Held goal reservations','Settle linked provider usage before closing a goal reservation.',
+ const providerRows=providers.map(hold=>{
+  const job=summary.jobs.find(item=>item.id===hold.jobId);
+  const goal=summary.goals.find(item=>item.id===hold.goalId);
+  const target=job?.title||hold.jobId||goal?.objective||hold.goalId||'Project usage';
+  return `<tr><td>${esc(target)}<small class="mono">Hold ID: ${esc(hold.id)}</small></td><td>${esc(hold.providerId)}<small>${esc(hold.model||'Model unavailable')}</small></td>
+   <td>${number(hold.reserved)}</td><td>${number(hold.inputTokens)} / ${number(hold.outputTokens)}</td>
+   <td><button class="tiny-button" data-act="settle-project-provider" data-id="${esc(hold.id)}">Settle provider reservation</button></td></tr>`;
+ }).join('');
+ return result+`${card('Held provider reservations','Record independently verified final provider usage.',
+  providerRows?table(['Target','Provider','Reserved','Observed input / output',''],providerRows):empty('check','No held provider reservations','No provider reservations require manual settlement.'))}
+  <div class="content-grid">${card('Held goal reservations','Settle linked provider usage before closing a goal reservation.',
   goalRows?table(['Goal','Work package','Reserved','Consumed',''],goalRows):empty('check','No held goal reservations','No goal reservations require settlement.'))}
   ${card('Held executor turns','Recover final usage from the configured executor.',
   receiptRows?table(['Work package','Provider','Model',''],receiptRows):empty('check','No held executor turns','No executor receipts require recovery.'))}</div>`;
@@ -406,15 +418,21 @@ function formProjectRecovery(action,id){
  const project=context.projects.find(item=>item.id===context.selected&&item.canReconcileBudget);
  if(!project||context.loading||context.error)return;
  const goal=action==='settle-project-goal';
- const hold=goal?context.goals.find(item=>item.id===id):context.receipts.find(item=>item.turnId===id);
+ const provider=action==='settle-project-provider';
+ const holds=goal?context.goals:provider?context.providers:context.receipts;
+ const hold=holds.find(item=>(goal||provider?item.id:item.turnId)===id);
  if(!hold)return;
  const path='viewer/projects/'+encodeURIComponent(project.id)+(goal
   ?'/goals/'+encodeURIComponent(hold.goalId)+'/budget/reconcile'
+  :provider?'/provider-reservations/'+encodeURIComponent(hold.id)+'/reconcile'
   :'/jobs/'+encodeURIComponent(hold.jobId)+'/provider-turns/'+encodeURIComponent(hold.turnId)+'/recover');
  const job=context.summary.jobs.find(item=>item.id===hold.jobId);
- const title=goal?'Settle goal reservation':'Recover executor receipt';
- const tokens=goal?field('input','Verified input tokens','','number')+field('output','Verified output tokens','','number'):'';
- openForm(title,project.name+' · '+(job?.title||hold.jobId),tokens+
+ const linkedGoal=context.summary.goals.find(item=>item.id===hold.goalId);
+ const target=job?.title||hold.jobId||linkedGoal?.objective||hold.goalId||'Project usage';
+ const title=goal?'Settle goal reservation':provider?'Settle provider reservation':'Recover executor receipt';
+ const tokens=goal||provider?field('input','Verified input tokens','','number')+field('output','Verified output tokens','','number'):'';
+ const providerContext=provider?' · '+hold.providerId+(hold.model?' / '+hold.model:'')+' · Hold ID: '+hold.id:'';
+ openForm(title,project.name+' · '+target+providerContext,tokens+
   field('reason','Evidence and review justification','','textarea')+
   field('reviewed','I independently reviewed the evidence',false,'checkbox')+
   field('confirmOverrun','I verified usage above the reserved tokens, if applicable',false,'checkbox'),
@@ -424,11 +442,12 @@ function formProjectRecovery(action,id){
    if(!form.elements.reviewed.checked||reason.length<10||reason.length>1000)
     throw new Error('Confirm your review and enter an evidence reason of 10 to 1000 characters.');
    const body={reviewed:true,reason,confirmOverrun:form.elements.confirmOverrun.checked};
-   if(goal){
+   if(goal||provider){
     const totals=[data.input,data.output].map(value=>value===''?NaN:Number(value));
     if(totals.some(value=>!Number.isSafeInteger(value)||value<0))
      throw new Error('Enter both verified token totals as nonnegative whole numbers.');
-    Object.assign(body,{reservationId:hold.id,finalTokensIn:totals[0],finalTokensOut:totals[1]});
+    if(goal)Object.assign(body,{reservationId:hold.id,finalTokensIn:totals[0],finalTokensOut:totals[1]});
+    else Object.assign(body,{finalInputTokens:totals[0],finalOutputTokens:totals[1]});
    }
    try{await api(path,'POST',body);}
    catch(error){
@@ -439,7 +458,7 @@ function formProjectRecovery(action,id){
     throw error;
    }
    if(projectRecovery===context){
-    notify(goal?'Goal reservation settled':'Executor receipt recovered');
+    notify(goal?'Goal reservation settled':provider?'Provider reservation settled':'Executor receipt recovered');
     await loadProjectRecovery(project.id);
    }
   },title);
@@ -1006,7 +1025,8 @@ document.addEventListener('click',async e=>{const btn=e.target.closest('[data-vi
   const action=btn.dataset.act;
   if(btn.dataset.view==='recovery'){nav('recovery');await loadProjectRecovery();}
   if(action==='refresh-project-recovery')await loadProjectRecovery();
-  if(action==='settle-project-goal'||action==='recover-project-receipt')formProjectRecovery(action,btn.dataset.id);
+  if(action==='settle-project-goal'||action==='settle-project-provider'||action==='recover-project-receipt')
+   formProjectRecovery(action,btn.dataset.id);
   return;
  }
  if(btn.dataset.view){nav(btn.dataset.view);if($('palette').open)$('palette').close();if(view==='plans')loadPlans();if(view==='analysis')loadProjectReview();return}

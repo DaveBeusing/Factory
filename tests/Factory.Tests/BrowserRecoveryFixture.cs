@@ -56,6 +56,12 @@ internal static class BrowserRecoveryFixture
                 state.Jobs.Add(job);
                 state.BudgetReservations.Add(new GoalBudgetReservation { GoalId = goal.Id, JobId = job.Id,
                     State = GoalBudgetLedger.Held, Reserved = 100, Consumed = 20, ExecutionGeneration = 1 });
+                var usage = new ProviderUsageEntry { ProjectId = owner.Id, GoalId = goal.Id, JobId = job.Id,
+                    ProviderId = owner.Id == project.Id ? "manual-provider" : "foreign-provider",
+                    Model = "fixture-model", InputTokens = 20, ExecutionGeneration = 1 };
+                state.ProviderUsages.Add(usage);
+                state.ProviderBudgetReservations.Add(new ProviderBudgetReservation { ProjectId = owner.Id,
+                    UsageId = usage.Id, ProviderId = usage.ProviderId, Reserved = 28, Consumed = 20, State = "held" });
             }
         });
         store.SetBudgetReconcilerGrant(reconciler.SubjectId, project.Id, grant: true);

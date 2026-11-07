@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 
 namespace Factory;
 
@@ -135,7 +136,10 @@ public static class ProviderRouter
             : profile.Model;
 
     public static ProviderSelection Select(FactorySettings settings, FactoryState state,
-        Guid projectId, string role, string risk)
+        Guid projectId, string role, string risk) => Select(settings, state, projectId, role, risk, null);
+
+    internal static ProviderSelection Select(FactorySettings settings, FactoryState state,
+        Guid projectId, string role, string risk, Func<ProviderProfile, string, IAgentRuntime, IAgentRuntime>? decorate)
     {
         var profile = Resolve(settings, state, projectId, role);
         var model = EffectiveModel(settings, profile, risk);
@@ -148,7 +152,8 @@ public static class ProviderRouter
             _ => throw new InvalidOperationException("Unknown provider adapter")
         };
         return new(profile.Id, model, role,
-            new SlottedAgentRuntime(adapter, Math.Max(1, settings.MaxAgentSessions)));
+            new SlottedAgentRuntime(decorate?.Invoke(profile, model, adapter) ?? adapter,
+                Math.Max(1, settings.MaxAgentSessions)));
     }
 }
 
@@ -512,15 +517,37 @@ public static class ProviderBudgetReconciliation
 public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore store, Guid projectId,
     Guid? goalId, ProviderProfile profile, string role, string model, int reservationTokens) : IAgentRuntime
 {
+    private readonly Action<SqliteConnection, SqliteTransaction, FactoryState>? authorize;
+    private readonly Action<SqliteConnection, SqliteTransaction, Guid>? auditReservation;
+    private readonly Action? beforeReserve;
+
+    internal ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore store, Guid projectId, Guid goalId,
+        ProviderProfile profile, string role, string model, int reservationTokens,
+        Action beforeReserve, Action<SqliteConnection, SqliteTransaction, FactoryState> authorize,
+        Action<SqliteConnection, SqliteTransaction, Guid> auditReservation)
+        : this(inner, store, projectId, goalId, profile, role, model, reservationTokens)
+    {
+        this.authorize = authorize;
+        this.auditReservation = auditReservation;
+        this.beforeReserve = beforeReserve;
+    }
+
     public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
         CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
         Action<AgentTokenUsage>? onUsage = null)
     {
         if (!readOnly)
             throw new InvalidOperationException("Project-scoped analysis and planning must be read-only");
-        store.Change(ProviderBudgetLedger.HoldOrphans);
-        var usageId = store.Change(state =>
+        cancellation.ThrowIfCancellationRequested();
+        beforeReserve?.Invoke();
+        if (authorize is null) store.Change(ProviderBudgetLedger.HoldOrphans);
+        var usageId = store.Change((state, db, tx) =>
         {
+            if (authorize is not null)
+            {
+                authorize(db, tx, state);
+                ProviderBudgetLedger.HoldOrphans(state);
+            }
             if (!state.Projects.Any(p => p.Id == projectId && p.Status == "active"))
                 throw new InvalidOperationException("Project is unavailable");
             if (goalId.HasValue && !state.Goals.Any(g => g.Id == goalId && g.ProjectId == projectId && g.State == "draft"))
@@ -528,9 +555,11 @@ public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore st
             if (goalId.HasValue && state.ProviderBudgetReservations.Any(r => r.State == "active" &&
                 state.ProviderUsages.Any(u => u.Id == r.UsageId && u.GoalId == goalId && !u.JobId.HasValue)))
                 throw new InvalidOperationException("A planning turn is already active for this goal");
-            return ProviderBudgetLedger.Begin(state,
+            var id = ProviderBudgetLedger.Begin(state,
                 new FactoryJob { Id = Guid.Empty, ProjectId = projectId, GoalId = goalId },
                 profile, role, model, reservationTokens).Id;
+            auditReservation?.Invoke(db, tx, id);
+            return id;
         });
         using var scope = CancellationTokenSource.CreateLinkedTokenSource(cancellation);
         bool finalUsage = false;
@@ -547,6 +576,11 @@ public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore st
         }
         try
         {
+            if (cancellation.IsCancellationRequested)
+            {
+                finalUsage = true; // No provider call was made.
+                cancellation.ThrowIfCancellationRequested();
+            }
             var result = await inner.RunAsync(directory, prompt, previousSession, scope.Token,
                 onSession, readOnly: true, onUsage: Observe);
             reportedCostMicros = result.ProviderReportedCostMicros;

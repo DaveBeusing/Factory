@@ -3,7 +3,10 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 using Factory;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 
 internal static class ScopedPlanTests
 {
@@ -33,9 +36,51 @@ internal static class ScopedPlanTests
             store.SetViewerGrant(alice.SubjectId, first.Id, grant: true, planner: true);
             store.SetViewerGrant(bob.SubjectId, first.Id, grant: true);
             store.SetViewerGrant(bob.SubjectId, second.Id, grant: true, planner: true);
-            var settings = new FactorySettings();
+            var calls = 0;
+            var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var enteredRegrant = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseRegrant = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
+            builder.Logging.ClearProviders();
+            await using var provider = builder.Build();
+            provider.Urls.Add("http://127.0.0.1:0");
+            provider.MapPost("/api/generate", async (HttpRequest request) =>
+            {
+                using var body = await JsonDocument.ParseAsync(request.Body, cancellationToken: timeout.Token);
+                Require(body.RootElement.GetProperty("model").GetString() == "fixture-model", "Wrong planner model");
+                Require(!body.RootElement.GetProperty("prompt").GetString()!.Contains(foreign.Objective,
+                    StringComparison.Ordinal), "Foreign objective reached the provider");
+                var call = Interlocked.Increment(ref calls);
+                if (call == 2)
+                {
+                    entered.TrySetResult();
+                    await release.Task.WaitAsync(timeout.Token);
+                }
+                if (call == 3)
+                {
+                    enteredRegrant.TrySetResult();
+                    await releaseRegrant.Task.WaitAsync(timeout.Token);
+                }
+                return new
+                {
+                    model = "fixture-model", done = true,
+                    response = """{"packages":[{"title":"Provider package","description":"Fixture","files":["README.md"]}]}""",
+                    prompt_eval_count = 30, eval_count = 10
+                };
+            });
+            await provider.StartAsync(timeout.Token);
+            var profile = new ProviderProfile
+            {
+                Id = "fixture-planner", Kind = "ollama", Model = "fixture-model", Endpoint = provider.Urls.Single()
+            };
+            var settings = new FactorySettings { Providers = [profile], GoalReservationTokens = 512 };
             settings.EnsureCredentials();
             File.WriteAllText(Path.Combine(home, "settings.json"), Json.Stringify(settings));
+            store.Change(state => state.ProviderAssignments.Add(new()
+            {
+                ProjectId = first.Id, Role = "planner", ProviderId = profile.Id
+            }));
             using var dashboard = await RemoteRestoreTests.DashboardProcess.StartAsync(
                 home, "unused-executor-test-token", "http://127.0.0.1:0", timeout.Token);
             using var client = new HttpClient(new HttpClientHandler { UseProxy = false })
@@ -148,6 +193,76 @@ internal static class ScopedPlanTests
                 Guid.Parse(row.GetString(1)) == first.Id && Guid.Parse(row.GetString(2)) == goal.Id &&
                 Guid.Parse(row.GetString(3)) == current.Revision && row.GetBoolean(4) && !row.Read(),
                 "Adoption audit did not bind the server-resolved actor and reviewed revision");
+            row.Close();
+
+            var fundedGoal = new FactoryGoal { ProjectId = first.Id, Objective = "Provider draft fixture", TokenBudget = 1 };
+            store.Change(state => state.Goals.Add(fundedGoal));
+            var generate = project + $"/plans/{fundedGoal.Id}/generate";
+            var generation = new ScopedPlanGenerationInput { GoalRevision = Planning.GoalRevision(fundedGoal) };
+            await Request(bob.Token, HttpMethod.Post, generate, HttpStatusCode.Forbidden, generation);
+            await Request(alice.Token, HttpMethod.Post, foreignPath + "/generate", HttpStatusCode.NotFound, generation);
+            await Request(alice.Token, HttpMethod.Post, otherPath + "/generate", HttpStatusCode.NotFound, generation);
+            await Request(alice.Token, HttpMethod.Post, generate, HttpStatusCode.Conflict, generation);
+            Require(calls == 0 && store.Read().ProviderUsages.Count == 0 && AuditCount() == 5,
+                "Denied generation called the provider, charged usage or wrote audit");
+            store.Change(state => state.Goals.Single(item => item.Id == fundedGoal.Id).TokenBudget = 4096);
+            RejectAudit();
+            await Request(alice.Token, HttpMethod.Post, generate, HttpStatusCode.InternalServerError, generation);
+            Require(calls == 0 && store.Read().ProviderUsages.Count == 0, "Audit failure left a reservation or invoked the provider");
+            Execute("DROP TRIGGER reject_plan_audit;");
+            var generated = JsonSerializer.Deserialize<FactoryPlan>(
+                await Request(alice.Token, HttpMethod.Post, generate, HttpStatusCode.OK, generation), Json.Options)!;
+            Require(generated.Packages.Single().Title == "Provider package" && generated.ProjectId == first.Id &&
+                generated.GoalId == fundedGoal.Id && AuditCount() == 7, "Generation did not commit the scoped plan and audit");
+            generation.Revision = generated.Revision;
+            var running = Request(alice.Token, HttpMethod.Post, generate, HttpStatusCode.NotFound, generation);
+            try
+            {
+                await entered.Task.WaitAsync(timeout.Token);
+                store.SetViewerGrant(alice.SubjectId, first.Id, grant: false, planner: true);
+            }
+            finally { release.TrySetResult(); }
+            await running;
+            await Request(alice.Token, HttpMethod.Post, generate, HttpStatusCode.NotFound, generation);
+            var afterRevocation = store.Read();
+            Require(calls == 2 && afterRevocation.ProviderUsages.Count == 2 &&
+                afterRevocation.ProviderUsages.All(usage => usage.ProjectId == first.Id && usage.GoalId == fundedGoal.Id &&
+                    usage.ProviderId == profile.Id && usage.Model == "fixture-model" && usage.Role == "planner" &&
+                    usage.InputTokens == 30 && usage.OutputTokens == 10 && usage.FinalUsageReported) &&
+                afterRevocation.ProviderBudgetReservations.Count == 2 &&
+                afterRevocation.ProviderBudgetReservations.All(reservation => reservation.State == "released") &&
+                GoalBudgetLedger.Available(afterRevocation, fundedGoal.Id) == 4016,
+                "Confirmed provider and goal usage must settle even after revocation");
+            Require(MissionControlManager.ReadPlan(store, fundedGoal.Id)?.Revision == generated.Revision && AuditCount() == 8,
+                "Revoked output escaped the publication fence");
+
+            store.SetViewerGrant(alice.SubjectId, first.Id, grant: true, planner: true);
+            var regranted = Request(alice.Token, HttpMethod.Post, generate, HttpStatusCode.Conflict, generation);
+            try
+            {
+                await enteredRegrant.Task.WaitAsync(timeout.Token);
+                store.SetViewerGrant(alice.SubjectId, first.Id, grant: false, planner: true);
+                store.SetViewerGrant(alice.SubjectId, first.Id, grant: true, planner: true);
+            }
+            finally { releaseRegrant.TrySetResult(); }
+            await regranted;
+            var afterRegrant = store.Read();
+            Require(MissionControlManager.ReadPlan(store, fundedGoal.Id)?.Revision == generated.Revision && AuditCount() == 9 &&
+                afterRegrant.ProviderUsages.Count == 3 && afterRegrant.ProviderUsages.All(usage => usage.FinalUsageReported) &&
+                afterRegrant.ProviderBudgetReservations.All(reservation => reservation.State == "released") &&
+                GoalBudgetLedger.Available(afterRegrant, fundedGoal.Id) == 3976,
+                "Regrant must fence the old output and preserve its confirmed usage");
+            var fresh = JsonSerializer.Deserialize<FactoryPlan>(
+                await Request(alice.Token, HttpMethod.Post, generate, HttpStatusCode.OK, generation), Json.Options)!;
+            Require(calls == 4 && fresh.Revision != generated.Revision && AuditCount() == 11,
+                "The new grant must authorize a fresh request");
+            using var reservationAudit = db.CreateCommand();
+            reservationAudit.CommandText = """
+                SELECT COUNT(*) FROM project_planning_audit a JOIN provider_usages u ON u.id=a.target_id
+                WHERE a.operation='plan_generation_reserved' AND a.subject_id=$actor AND a.project_id=u.project_id;
+                """;
+            reservationAudit.Parameters.AddWithValue("$actor", alice.SubjectId.ToString("D"));
+            Require((long)reservationAudit.ExecuteScalar()! == 4, "Reservation audit is not bound to its actor and usage");
 
             async Task<FactoryPlan> Save() => JsonSerializer.Deserialize<FactoryPlan>(
                 await Request(alice.Token, HttpMethod.Put, path, HttpStatusCode.OK, draft), Json.Options)!;

@@ -50,13 +50,31 @@ public static class Planning
         var existingRevision = MissionControlManager.ReadPlan(store, goal.Id)?.Revision;
         if (expectedPlanRevision is { } expected && expected != (existingRevision ?? Guid.Empty))
             throw new InvalidOperationException("Plan changed; reopen it before regenerating");
-        var goalRevision = GoalRevision(goal);
-        var preflight = WorkPackagePreflight.Inspect(current, p, goal);
+        var preflight = PrepareDraft(current, p, goal);
+        var plan = await GenerateDraftAsync(p, goal, preflight, agent, ct, existingRevision);
+        return SaveRevision(store, plan, p);
+    }
+
+    internal static WorkPackagePreflightReport PrepareDraft(FactoryState current, ProjectInfo project, FactoryGoal goal)
+    {
+        var preflight = WorkPackagePreflight.Inspect(current, project, goal);
         WorkPackagePreflight.RequireCurrentMaster(preflight.RemoteMasterStatus);
-        if (GitOperations.Head(p.Path) != preflight.BaseCommit ||
-            !string.IsNullOrWhiteSpace(GitOperations.Git(p.Path, "status", "--porcelain")))
+        RequirePlanningCheckout(project, preflight.BaseCommit);
+        return preflight;
+    }
+
+    internal static void RequirePlanningCheckout(ProjectInfo project, string baseCommit)
+    {
+        if (GitOperations.Head(project.Path) != baseCommit ||
+            !string.IsNullOrWhiteSpace(GitOperations.Git(project.Path, "status", "--porcelain")))
             throw new InvalidOperationException(
                 "Planning must inspect a clean checkout at master; do not plan from a feature branch or uncommitted source.");
+    }
+
+    internal static async Task<FactoryPlan> GenerateDraftAsync(ProjectInfo p, FactoryGoal goal,
+        WorkPackagePreflightReport preflight, IAgentRuntime agent, CancellationToken ct, Guid? existingRevision)
+    {
+        var goalRevision = GoalRevision(goal);
         var context = Json.Stringify(new
         {
             preflight.BaseBranch, preflight.BaseCommit, preflight.RemoteMasterCommit, preflight.RemoteMasterStatus,
@@ -90,7 +108,7 @@ public static class Planning
         Validate(plan);
         plan.GoalRevision = goalRevision;
         plan.Revision = existingRevision;
-        return SaveRevision(store, plan, p);
+        return plan;
     }
 
     internal static FactoryPlan SaveRevision(StateStore store, FactoryPlan plan, ProjectInfo source)

@@ -926,7 +926,10 @@ public sealed partial class StateStore
     /// Renew only the exact live execution lease. No snapshot is loaded, and a stale
     /// generation, token, owner, expired lease or terminal state cannot be renewed.
     /// </summary>
-    public bool RenewLease(Guid jobId, ExecutionFence fence, int leaseSeconds)
+    public bool RenewLease(Guid jobId, ExecutionFence fence, int leaseSeconds) =>
+        RenewLease(jobId, fence, leaseSeconds, out _);
+
+    internal bool RenewLease(Guid jobId, ExecutionFence fence, int leaseSeconds, out string? requestedState)
     {
         if (leaseSeconds <= 0) throw new ArgumentOutOfRangeException(nameof(leaseSeconds));
         var now = DateTimeOffset.UtcNow;
@@ -936,13 +939,14 @@ public sealed partial class StateStore
             UPDATE jobs SET lease_until=$until
             WHERE id=$id AND execution_generation=$generation AND lease_token=$token
               AND lease_owner=$owner AND lease_until>$now
-              AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval');
+              AND state IN ('preparing','building','gating','reviewing','reworking','awaiting_approval')
+            RETURNING requested_state;
             """, ("$until", now.AddSeconds(leaseSeconds)), ("$id", jobId),
             ("$generation", fence.Generation), ("$token", fence.Token),
             ("$owner", fence.Owner), ("$now", now));
-        var updated = command.ExecuteNonQuery() == 1;
+        requestedState = command.ExecuteScalar() as string;
         tx.Commit();
-        return updated;
+        return requestedState is not null;
     }
 
     /// <summary>
@@ -966,15 +970,22 @@ public sealed partial class StateStore
     {
         using var db = Open();
         using var tx = db.BeginTransaction(deferred: true);
+        var job = ReadJob(db, tx, id) ?? throw new ArgumentException($"Unknown job: {id}");
+        tx.Commit();
+        return job;
+    }
+
+    private static FactoryJob? ReadJob(SqliteConnection db, SqliteTransaction tx, Guid id, Guid? projectId = null)
+    {
         var map = Entities.Single(m => m.Type == typeof(FactoryJob));
         var scalar = Scalars(map);
         FactoryJob? job;
         using (var cmd = Command(db, tx, "SELECT " +
             string.Join(",", scalar.Select(p => Q(Column(p.Name)))) +
-            " FROM jobs WHERE id=$id;", ("$id", id)))
+            " FROM jobs WHERE id=$id AND ($project IS NULL OR project_id=$project);", ("$id", id), ("$project", projectId)))
         using (var reader = cmd.ExecuteReader())
         {
-            if (!reader.Read()) throw new ArgumentException($"Unknown job: {id}");
+            if (!reader.Read()) return null;
             job = new FactoryJob();
             for (int index = 0; index < scalar.Length; index++)
                 scalar[index].SetValue(job,
@@ -991,7 +1002,6 @@ public sealed partial class StateStore
             using var reader = cmd.ExecuteReader();
             while (reader.Read()) values.Add(FromDb(reader.GetValue(0), elementType));
         }
-        tx.Commit();
         return job;
     }
 

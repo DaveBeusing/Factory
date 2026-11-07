@@ -27,6 +27,7 @@ public static class JobRecovery
         job.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(leaseSeconds);
         job.Attempt++;
         job.State = JobStates.Preparing;
+        if (LocalJobControl.IsProjectRequest(job.RequestedState)) job.RequestedState = "";
         job.Stage = local ? "worktree" : "remote_claimed";
         job.CheckpointStage = job.Stage;
         job.CheckpointAt = DateTimeOffset.UtcNow;
@@ -140,6 +141,24 @@ public static class JobRecovery
             throw new InvalidOperationException("Explicit worktree and process review with a reason is required");
 
         var snapshot = store.Job(id);
+        VerifyLocalRecoveryEvidence(snapshot);
+
+        return store.Change(s =>
+        {
+            var j = s.Jobs.Single(j => j.Id == id);
+            VerifyRecoverySnapshot(snapshot, j);
+            j.State = JobStates.Queued;
+            j.Stage = "reconciled";
+            j.Error = "";
+            j.UpdatedAt = DateTimeOffset.UtcNow;
+            s.Events.Add(new FactoryEvent { JobId = id, Type = "reconciled",
+                Message = "Reviewed clean checkpoint " + j.CheckpointCommit + "; " + reason.Trim()[..Math.Min(reason.Trim().Length, 1000)] });
+            return j;
+        });
+    }
+
+    internal static void VerifyLocalRecoveryEvidence(FactoryJob snapshot)
+    {
         if (snapshot.State != JobStates.Blocked || snapshot.Stage != "reconcile" ||
             !string.IsNullOrEmpty(snapshot.LeaseOwner))
             throw new InvalidOperationException("Job is not waiting for reconciliation");
@@ -154,25 +173,16 @@ public static class JobRecovery
             Environment.CurrentDirectory);
         if (!status.Ok || !string.IsNullOrWhiteSpace(status.Output))
             throw new InvalidOperationException("Worktree has unresolved modifications; inspect and clean manually");
+    }
 
-        return store.Change(s =>
-        {
-            var j = s.Jobs.Single(j => j.Id == id);
-            if (j.State != JobStates.Blocked || j.Stage != "reconcile" ||
-                j.ExecutionGeneration != snapshot.ExecutionGeneration ||
-                j.WorkerProcessId != snapshot.WorkerProcessId ||
-                j.WorkerMachineName != snapshot.WorkerMachineName ||
-                j.CheckpointStage != snapshot.CheckpointStage ||
-                j.CheckpointCommit != snapshot.CheckpointCommit ||
-                j.Worktree != snapshot.Worktree || !string.IsNullOrEmpty(j.LeaseOwner))
-                throw new InvalidOperationException("Recovery state changed while reconciling");
-            j.State = JobStates.Queued;
-            j.Stage = "reconciled";
-            j.Error = "";
-            j.UpdatedAt = DateTimeOffset.UtcNow;
-            s.Events.Add(new FactoryEvent { JobId = id, Type = "reconciled",
-                Message = "Reviewed clean checkpoint " + j.CheckpointCommit + "; " + reason.Trim()[..Math.Min(reason.Trim().Length, 1000)] });
-            return j;
-        });
+    internal static void VerifyRecoverySnapshot(FactoryJob snapshot, FactoryJob current)
+    {
+        if (current.State != JobStates.Blocked || current.Stage != "reconcile" ||
+            current.Mode != snapshot.Mode || current.ExecutionGeneration != snapshot.ExecutionGeneration ||
+            current.WorkerProcessId != snapshot.WorkerProcessId || current.WorkerMachineName != snapshot.WorkerMachineName ||
+            current.WorkerProcessStartedAt != snapshot.WorkerProcessStartedAt ||
+            current.CheckpointStage != snapshot.CheckpointStage || current.CheckpointCommit != snapshot.CheckpointCommit ||
+            current.Worktree != snapshot.Worktree || !string.IsNullOrEmpty(current.LeaseOwner))
+            throw new InvalidOperationException("Recovery state changed while reconciling");
     }
 }

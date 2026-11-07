@@ -11,7 +11,8 @@ public sealed class ProjectJobControlInput
     public string Reason { get; set; } = "";
 }
 
-internal sealed record ProjectJobControlResult(Guid Id, Guid ProjectId, string State, DateTimeOffset UpdatedAt);
+internal sealed record ProjectJobControlResult(Guid Id, Guid ProjectId, string State, DateTimeOffset UpdatedAt,
+    string? RequestedState = null);
 
 public sealed partial class StateStore
 {
@@ -48,14 +49,44 @@ public sealed partial class StateStore
         using var tx = db.BeginTransaction();
         var actor = CheckJobControlAccess(db, tx, verifier, projectId, jobId, request);
         using var query = Command(db, tx, """
-            SELECT j.state, j.stage, j.lease_owner, j.started_at, j.error, j.requested_state, p.status
+            SELECT j.state, j.stage, j.lease_owner, j.started_at, j.error, j.requested_state, p.status,
+                j.mode, j.lease_until, j.lease_token, j.updated_at
             FROM jobs j JOIN projects p ON p.id=j.project_id WHERE j.project_id=$project AND j.id=$job;
             """, ("$project", projectId), ("$job", jobId));
         using var row = query.ExecuteReader();
         if (!row.Read()) throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
         var previousState = row.GetString(0);
-        if (row.GetString(6) == "archived" || JobStates.Active.Contains(previousState) || row.GetString(2).Length != 0)
-            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The job is leased, executing or belongs to an archived project.");
+        if (row.GetString(6) == "archived")
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The job belongs to an archived project.");
+        var leaseOwner = row.GetString(2);
+        if (JobStates.Active.Contains(previousState))
+        {
+            var leaseUntil = (DateTimeOffset?)FromDb(row.GetValue(8), typeof(DateTimeOffset?));
+            if (request.Action == "resume" || row.GetString(7) != JobExecutionModes.Local ||
+                string.IsNullOrWhiteSpace(leaseOwner) || leaseOwner.StartsWith("remote:", StringComparison.Ordinal) ||
+                row.GetString(9).Length == 0 || leaseUntil is null || leaseUntil <= DateTimeOffset.UtcNow)
+                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Only a running local job with a current lease can be paused or stopped.");
+            var pending = row.GetString(5);
+            var updatedAt = (DateTimeOffset)FromDb(row.GetValue(10), typeof(DateTimeOffset))!;
+            row.Close();
+            var stop = request.Action == "stop";
+            var signal = stop ? LocalJobControl.ProjectStopRequest : LocalJobControl.ProjectPauseRequest;
+            var target = stop ? JobStates.Stopped : JobStates.Paused;
+            if (pending == signal) return new(jobId, projectId, previousState, updatedAt, target);
+            if (pending.Length != 0)
+                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The current lease already has a control request.");
+            var now = DateTimeOffset.UtcNow;
+            Execute(db, tx, """
+                UPDATE jobs SET requested_state=$requested,updated_at=$at WHERE project_id=$project AND id=$job;
+                """, ("$requested", signal), ("$at", now), ("$project", projectId), ("$job", jobId));
+            AuditJobOperation(db, tx, actor, projectId, jobId, request.Action + "_requested",
+                previousState, previousState, request.Reviewed, reason, now);
+            AppendEvent(db, tx, jobId, "job_control_requested", request.Action + " " + reason);
+            tx.Commit();
+            return new(jobId, projectId, previousState, now, target);
+        }
+        if (leaseOwner.Length != 0)
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The job still has a lease.");
         if (request.Action == "resume" && previousState is not (JobStates.Paused or JobStates.Stopped))
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Only paused or stopped jobs can be resumed here.");
         var job = new FactoryJob
@@ -67,15 +98,7 @@ public sealed partial class StateStore
         row.Close();
         if (request.Action == "resume" && job.StartedAt.HasValue && reason.Length == 0)
             throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Record what was reviewed before resuming this job.");
-        if (request.Action == "resume")
-        {
-            using var unsettled = Command(db, tx, """
-                SELECT 1 FROM provider_budget_reservations r JOIN provider_usages u ON u.id=r.usage_id
-                WHERE u.job_id=$job AND r.state IN ('active','held') LIMIT 1;
-                """, ("$job", jobId));
-            if (unsettled.ExecuteScalar() is not null)
-                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Settle outstanding provider reservations before resuming this job.");
-        }
+        if (request.Action == "resume") RequireSettledJobProviderUsage(db, tx, jobId);
         try
         {
             MissionControlManager.ApplyInactiveJobControl(job,
@@ -90,17 +113,109 @@ public sealed partial class StateStore
             WHERE project_id=$project AND id=$job;
             """, ("$state", job.State), ("$error", job.Error), ("$requested", job.RequestedState),
             ("$at", job.UpdatedAt), ("$project", projectId), ("$job", jobId));
-        Execute(db, tx, """
-            INSERT INTO project_operation_audit(subject_id,project_id,job_id,operation,previous_state,
-                resulting_state,reviewed,reason,at)
-            VALUES($actor,$project,$job,$operation,$previous,$state,$reviewed,$reason,$at);
-            """, ("$actor", actor), ("$project", projectId), ("$job", jobId), ("$operation", request.Action),
-            ("$previous", previousState), ("$state", job.State), ("$reviewed", request.Reviewed),
-            ("$reason", reason), ("$at", job.UpdatedAt));
+        AuditJobOperation(db, tx, actor, projectId, jobId, request.Action, previousState, job.State,
+            request.Reviewed, reason, job.UpdatedAt);
         AppendEvent(db, tx, jobId, "job_control", request.Action + " " + reason);
         tx.Commit();
         return new(jobId, projectId, job.State, job.UpdatedAt);
     }
+
+    private static void RequireSettledJobProviderUsage(SqliteConnection db, SqliteTransaction tx, Guid jobId)
+    {
+        using var unsettled = Command(db, tx, """
+            SELECT 1 FROM provider_budget_reservations r JOIN provider_usages u ON u.id=r.usage_id
+            WHERE u.job_id=$job AND r.state IN ('active','held') LIMIT 1;
+            """, ("$job", jobId));
+        if (unsettled.ExecuteScalar() is not null)
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Settle outstanding provider reservations before requeueing this job.");
+    }
+
+    internal ProjectJobControlResult ReconcileProjectJob(string authorization, Guid projectId, Guid jobId,
+        ProjectJobControlInput request)
+    {
+        var verifier = ReadViewerVerifier(authorization)
+            ?? throw new ScopedProjectRejected(DraftGoalStatus.Unauthorized);
+        using var db = Open();
+        FactoryJob snapshot;
+        Guid actor;
+        long grant;
+        using (var read = db.BeginTransaction(deferred: true))
+        {
+            actor = CheckJobControlAccess(db, read, verifier, projectId, jobId, request);
+            grant = ReadOperatorGrantRevision(db, read, actor, projectId)
+                ?? throw new ScopedProjectRejected(DraftGoalStatus.Forbidden);
+            snapshot = ReadRecoveryTarget(db, read, projectId, jobId);
+        }
+        var reason = request.Reason?.Trim() ?? "";
+        if (!request.Reviewed || reason.Length is < 10 or > 1000)
+            throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Confirm the process and worktree review with a reason of 10 to 1000 characters.");
+        VerifyEvidence(snapshot);
+
+        using (var read = db.BeginTransaction(deferred: true))
+            VerifyGrant(read);
+        using var tx = db.BeginTransaction();
+        VerifyGrant(tx);
+        var current = ReadRecoveryTarget(db, tx, projectId, jobId);
+        try { JobRecovery.VerifyRecoverySnapshot(snapshot, current); }
+        catch (InvalidOperationException)
+        {
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Recovery state changed. Review the job again.");
+        }
+        RequireSettledJobProviderUsage(db, tx, jobId);
+        VerifyEvidence(current);
+        var now = DateTimeOffset.UtcNow;
+        Execute(db, tx, """
+            UPDATE jobs SET state='queued',stage='reconciled',error='',requested_state='',updated_at=$at
+            WHERE project_id=$project AND id=$job;
+            """, ("$at", now), ("$project", projectId), ("$job", jobId));
+        AuditJobOperation(db, tx, actor, projectId, jobId, "reconcile", current.State, JobStates.Queued, true, reason, now);
+        AppendEvent(db, tx, jobId, "reconciled", "Reviewed clean checkpoint " + current.CheckpointCommit + "; " + reason);
+        tx.Commit();
+        return new(jobId, projectId, JobStates.Queued, now);
+
+        void VerifyGrant(SqliteTransaction transaction)
+        {
+            var currentActor = CheckJobControlAccess(db, transaction, verifier, projectId, jobId, request);
+            if (currentActor != actor || ReadOperatorGrantRevision(db, transaction, actor, projectId) != grant)
+                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The Operator grant changed. Review the job again.");
+        }
+
+        static void VerifyEvidence(FactoryJob job)
+        {
+            try { JobRecovery.VerifyLocalRecoveryEvidence(job); }
+            catch (Exception ex) when (ex is InvalidOperationException or ArgumentException or IOException)
+            {
+                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Recovery requires a stopped local runner and a clean, matching checkpoint.");
+            }
+        }
+    }
+
+    private static FactoryJob ReadRecoveryTarget(SqliteConnection db, SqliteTransaction tx, Guid projectId, Guid jobId)
+    {
+        using var project = Command(db, tx, "SELECT status FROM projects WHERE id=$project;", ("$project", projectId));
+        if (project.ExecuteScalar() is "archived")
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The job belongs to an archived project.");
+        return ReadJob(db, tx, jobId, projectId) ?? throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
+    }
+
+    private static long? ReadOperatorGrantRevision(SqliteConnection db, SqliteTransaction tx, Guid actor, Guid projectId)
+    {
+        using var query = Command(db, tx, """
+            SELECT id FROM viewer_access_audit WHERE subject_id=$subject AND project_id=$project
+              AND operation='grant_operator' ORDER BY id DESC LIMIT 1;
+            """, ("$subject", actor), ("$project", projectId));
+        return query.ExecuteScalar() as long?;
+    }
+
+    private static void AuditJobOperation(SqliteConnection db, SqliteTransaction tx, Guid actor, Guid projectId,
+        Guid jobId, string operation, string previousState, string state, bool reviewed, string reason, DateTimeOffset at) =>
+        Execute(db, tx, """
+            INSERT INTO project_operation_audit(subject_id,project_id,job_id,operation,previous_state,
+                resulting_state,reviewed,reason,at)
+            VALUES($actor,$project,$job,$operation,$previous,$state,$reviewed,$reason,$at);
+            """, ("$actor", actor), ("$project", projectId), ("$job", jobId), ("$operation", operation),
+            ("$previous", previousState), ("$state", state), ("$reviewed", reviewed),
+            ("$reason", reason), ("$at", at));
 
     private static Guid CheckJobControlAccess(SqliteConnection db, SqliteTransaction tx, string verifier,
         Guid projectId, Guid jobId, ProjectJobControlInput request)

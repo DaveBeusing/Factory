@@ -72,6 +72,9 @@ public sealed class ControlInput
 
 public static class LocalJobControl
 {
+    internal const string ProjectPauseRequest = "project:paused";
+    internal const string ProjectStopRequest = "project:stopped";
+    internal static bool IsProjectRequest(string? state) => state is ProjectPauseRequest or ProjectStopRequest;
     private static readonly ConcurrentDictionary<Guid, CancellationTokenSource> Active = new();
     public static void Register(Guid id, CancellationTokenSource cts) => Active[id] = cts;
     public static void Unregister(Guid id) => Active.TryRemove(id, out _);

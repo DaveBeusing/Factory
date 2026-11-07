@@ -12,7 +12,17 @@ internal sealed class ProjectViewerEndpoint
         app.MapPost("/api/viewer/projects/{projectId:guid}/jobs/{jobId:guid}/action",
             (HttpContext context, Guid projectId, Guid jobId, ProjectJobControlInput input) =>
             {
-                try { return Results.Ok(store.ControlProjectJob(context.Request.Headers.Authorization.ToString(), projectId, jobId, input)); }
+                try
+                {
+                    var result = store.ControlProjectJob(context.Request.Headers.Authorization.ToString(), projectId, jobId, input);
+                    return result.RequestedState is null ? Results.Ok(result) : Results.Accepted(value: result);
+                }
+                catch (ScopedProjectRejected ex) { return PlanFailure(ex); }
+            }).WithMetadata(viewer);
+        app.MapPost("/api/viewer/projects/{projectId:guid}/jobs/{jobId:guid}/reconcile",
+            (HttpContext context, Guid projectId, Guid jobId, ProjectJobControlInput input) =>
+            {
+                try { return Results.Ok(store.ReconcileProjectJob(context.Request.Headers.Authorization.ToString(), projectId, jobId, input)); }
                 catch (ScopedProjectRejected ex) { return PlanFailure(ex); }
             }).WithMetadata(viewer);
         const string planRoute = "/api/viewer/projects/{projectId:guid}/plans/{goalId:guid}";

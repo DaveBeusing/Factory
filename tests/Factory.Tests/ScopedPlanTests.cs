@@ -264,6 +264,93 @@ internal static class ScopedPlanTests
             reservationAudit.Parameters.AddWithValue("$actor", alice.SubjectId.ToString("D"));
             Require((long)reservationAudit.ExecuteScalar()! == 4, "Reservation audit is not bound to its actor and usage");
 
+            store.SetOperatorGrant(bob.SubjectId, first.Id, grant: true);
+            var local = new FactoryJob { ProjectId = first.Id, Title = "Running local fixture", Priority = 100, ExpectedPaths = ["control.txt"] };
+            var foreignJob = new FactoryJob { ProjectId = second.Id };
+            store.Change(state =>
+            {
+                state.Projects.Single(item => item.Id == first.Id).Checks.Add(new()
+                    { Name = "head", Executable = "git", Arguments = ["rev-parse", "HEAD"] });
+                state.Jobs.AddRange([local, foreignJob]);
+            });
+            var runtime = new PausedControlRuntime();
+            using var execution = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+            var engine = new FactoryEngine(store, new FactorySettings { LeaseSeconds = 15 }, agent: runtime);
+            var executionTask = engine.RunOneAsync(local.Id, execution.Token);
+            var jobUrl = project + $"/jobs/{local.Id}";
+            try
+            {
+                var enteredExecution = await Task.WhenAny(runtime.Entered.Task, executionTask).WaitAsync(timeout.Token);
+                if (enteredExecution == executionTask) await executionTask;
+                Require(runtime.Entered.Task.IsCompletedSuccessfully, "Local runner did not reach the provider");
+                await Request(alice.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Forbidden, new { action = "stop" });
+                await Request(bob.Token, HttpMethod.Post, project + $"/jobs/{foreignJob.Id}/action",
+                    HttpStatusCode.NotFound, new { action = "stop" });
+                RejectOperationAudit();
+                await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.InternalServerError,
+                    new { action = "stop" });
+                Require(store.Job(local.Id).RequestedState == "", "Rejected control left an interrupt request");
+                Execute("DROP TRIGGER reject_operation_audit;");
+                var accepted = JsonSerializer.Deserialize<ProjectJobControlResult>(
+                    await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Accepted,
+                        new { action = "stop", reason = "Stop fixture" }), Json.Options)!;
+                Require(accepted.RequestedState == JobStates.Stopped, "Active stop response did not expose its requested outcome");
+                await executionTask.WaitAsync(timeout.Token);
+            }
+            finally
+            {
+                execution.Cancel();
+                await executionTask;
+            }
+            var stopped = store.Job(local.Id);
+            Require(stopped.State == JobStates.Stopped && stopped.LeaseOwner == "" && stopped.RequestedState == "",
+                "The runner did not consume the durable stop request");
+
+            var recovery = new FactoryJob { ProjectId = first.Id, ExpectedPaths = ["control.txt"] };
+            store.Change(state =>
+            {
+                state.Jobs.Add(recovery);
+                JobRecovery.Assign(recovery, "fixture-recovery", 120, local: true);
+                recovery.Worktree = repository;
+                JobRecovery.Checkpoint(recovery, "agent", GitOperations.Head(repository));
+                recovery.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1);
+            });
+            Require(JobRecovery.QuarantineExpired(store).Contains(recovery.Id), "Recovery fixture was not quarantined");
+            var review = new { reviewed = true, reason = "Verified runner and clean worktree" };
+            var recoveryUrl = project + $"/jobs/{recovery.Id}/reconcile";
+            await Request(bob.Token, HttpMethod.Post, project + $"/jobs/{foreignJob.Id}/reconcile",
+                HttpStatusCode.NotFound, review);
+            await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.BadRequest, new { reviewed = false });
+            await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.Conflict, review);
+            // The live fixture PID now represents a reused PID, not the old runner.
+            store.UpdateJob(recovery.Id, job => job.WorkerProcessStartedAt = job.WorkerProcessStartedAt!.Value.AddDays(-1));
+            var dirty = Path.Combine(repository, "dirty.txt");
+            File.WriteAllText(dirty, "untracked");
+            await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.Conflict, review);
+            File.Delete(dirty);
+            RejectOperationAudit();
+            await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.InternalServerError, review);
+            Require(store.Job(recovery.Id).State == JobStates.Blocked, "Recovery escaped audit rollback");
+            Execute("DROP TRIGGER reject_operation_audit;");
+            await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.OK, review);
+            Require(store.Job(recovery.Id).Stage == "reconciled" && store.Job(recovery.Id).State == JobStates.Queued &&
+                store.Job(foreignJob.Id).State == JobStates.Queued, "Scoped recovery changed an unexpected job");
+            store.SetOperatorGrant(bob.SubjectId, first.Id, grant: false);
+            await Request(bob.Token, HttpMethod.Post, recoveryUrl, HttpStatusCode.Forbidden, review);
+            using var operations = db.CreateCommand();
+            operations.CommandText = """
+                SELECT job_id,operation,reviewed,reason FROM project_operation_audit
+                WHERE subject_id=$actor AND project_id=$project ORDER BY id;
+                """;
+            operations.Parameters.AddWithValue("$actor", bob.SubjectId.ToString("D"));
+            operations.Parameters.AddWithValue("$project", first.Id.ToString("D"));
+            using var op = operations.ExecuteReader();
+            Require(op.Read() && Guid.Parse(op.GetString(0)) == local.Id && op.GetString(1) == "stop_requested" &&
+                !op.GetBoolean(2) && op.GetString(3) == "Stop fixture" &&
+                op.Read() && Guid.Parse(op.GetString(0)) == recovery.Id && op.GetString(1) == "reconcile" &&
+                op.GetBoolean(2) && op.GetString(3) == review.reason && !op.Read(),
+                "Active control and recovery audit did not bind the actor, project and evidence");
+
             async Task<FactoryPlan> Save() => JsonSerializer.Deserialize<FactoryPlan>(
                 await Request(alice.Token, HttpMethod.Put, path, HttpStatusCode.OK, draft), Json.Options)!;
             Task<string> Adopt(Guid? revision, HttpStatusCode status, bool reviewed = true) =>
@@ -284,6 +371,10 @@ internal static class ScopedPlanTests
             void RejectAudit() => Execute("""
                 CREATE TRIGGER reject_plan_audit BEFORE INSERT ON project_planning_audit
                 BEGIN SELECT RAISE(ABORT, 'Fixture audit failure'); END;
+                """);
+            void RejectOperationAudit() => Execute("""
+                CREATE TRIGGER reject_operation_audit BEFORE INSERT ON project_operation_audit
+                BEGIN SELECT RAISE(ABORT, 'Fixture operation audit failure'); END;
                 """);
             void Execute(string sql)
             {
@@ -314,6 +405,20 @@ internal static class ScopedPlanTests
                     File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
             }
             if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private sealed class PausedControlRuntime : IAgentRuntime
+    {
+        internal TaskCompletionSource Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public async Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+            CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+            Action<AgentTokenUsage>? onUsage = null)
+        {
+            Entered.TrySetResult();
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellation);
+            throw new InvalidOperationException("The fixture provider must be interrupted");
         }
     }
 

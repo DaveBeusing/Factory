@@ -241,6 +241,90 @@ browserTest('recovers a foreign-host hold and settles linked provider and goal b
   ] }));
 }, { weekly: { usedPercent: 35, remainingPercent: 65 }, stale: true });
 
+browserTest('limits recovery to Budget Reconciler grants and the selected project', async ({ page, form, api, connection, fixture }) => {
+  const { reconciler, operatorToken, projectId, otherId } = fixture.access;
+  const snapshot = await api('state');
+  const providerJob = snapshot.jobs.find((job) => job.mode === 'remote');
+  const turn = snapshot.remoteProviderTurns[0];
+  const foreignGoal = snapshot.goals.find((goal) => goal.projectId === otherId);
+  const foreignHold = snapshot.budgetReservations.find((hold) => hold.goalId === foreignGoal.id);
+  const unauthorizedPaths = [];
+  page.on('request', (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (request.headers().authorization?.startsWith('Bearer factory-viewer-') &&
+        pathname.startsWith('/api/') && !pathname.startsWith('/api/viewer/')) unauthorizedPaths.push(pathname);
+  });
+  async function connect(token) {
+    await page.locator('#brand-connection').click();
+    await connection.getByLabel('API token').fill(token);
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await connection.waitFor({ state: 'hidden' });
+  }
+  const main = page.locator('#main');
+  const roleNotice = main.getByRole('heading', { name: 'Budget Reconciler access required' });
+  const select = main.getByLabel('Project', { exact: true });
+  const settle = main.getByRole('button', { name: 'Settle goal reservation' });
+  const recover = main.getByRole('button', { name: 'Recover executor receipt' });
+  await connect(operatorToken);
+  await roleNotice.waitFor();
+  assert.deepEqual(await select.locator('option').allTextContents(), ['Provider evidence fixture']);
+  assert.equal(await settle.count(), 0);
+  assert.equal(await recover.count(), 0);
+  assert.equal(await page.locator('#top-create').isVisible(), false);
+
+  await connect(reconciler);
+  await settle.waitFor();
+  await recover.waitFor();
+  assert.deepEqual(await select.locator('option').allTextContents(), ['Provider evidence fixture', 'Read-only project']);
+  assert.doesNotMatch(await main.innerText(), /Read-only project goal|Unrelated project|fixture-lease-secret|A{64}/);
+  await select.selectOption(otherId);
+  await roleNotice.waitFor();
+  assert.equal(await settle.count(), 0);
+  assert.equal(await recover.count(), 0);
+  await select.selectOption(projectId);
+  await settle.waitFor();
+
+  const route = (project) => new URL('/api/viewer/projects/' + project, page.url()).href;
+  const scopedPost = (path, data) => page.request.post(path, { headers: { Authorization: 'Bearer ' + reconciler }, data });
+  const decision = { reviewed: true, reason: 'Verified fixture evidence' };
+  const foreignSettlement = await scopedPost(route(projectId) + '/goals/' + foreignGoal.id + '/budget/reconcile',
+    { ...decision, reservationId: foreignHold.id, finalTokensIn: 20, finalTokensOut: 0 });
+  assert.equal(foreignSettlement.status(), 404);
+  const foreignReceipt = await scopedPost(route(otherId) + '/jobs/' + providerJob.id + '/provider-turns/' + turn.id + '/recover', decision);
+  assert.equal(foreignReceipt.status(), 403);
+  assert.equal(fixture.receiptRequests, 0);
+
+  await recover.click();
+  await form.getByLabel('Evidence and review justification').fill(decision.reason);
+  await form.getByLabel('I independently reviewed the evidence').check();
+  await form.getByRole('button', { name: 'Recover executor receipt' }).click();
+  await page.getByText('The configured executor has no durable receipt.').waitFor();
+  assert.equal(await form.isVisible(), true);
+  fixture.receipt = {
+    turnId: turn.id, leaseId: snapshot.remoteProviderLeases[0].id, providerId: 'fixture-provider', role: 'builder',
+    inputCommit: '', observedModel: 'requested-v1', inputTokens: 70, outputTokens: 35, finalUsage: true,
+    success: false, finalText: '', finalTextIsFallback: false, outputTree: '', patch: ''
+  };
+  await form.getByRole('button', { name: 'Recover executor receipt' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await main.getByRole('heading', { name: 'No held executor turns' }).waitFor();
+
+  await settle.click();
+  await form.getByLabel('Verified input tokens').fill('25');
+  await form.getByLabel('Verified output tokens').fill('5');
+  await form.getByLabel('Evidence and review justification').fill(decision.reason);
+  await form.getByLabel('I independently reviewed the evidence').check();
+  await form.getByRole('button', { name: 'Settle goal reservation' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await main.getByRole('heading', { name: 'No held goal reservations' }).waitFor();
+  const settled = await api('state');
+  assert.equal(settled.remoteProviderTurns[0].state, 'reconciled');
+  assert.equal(settled.budgetReservations.find((hold) => hold.id === foreignHold.id).state, 'held');
+  assert.equal(settled.budgetReservations.find((hold) =>
+    settled.goals.some((goal) => goal.id === hold.goalId && goal.projectId === projectId)).consumed, 30);
+  assert.deepEqual(unauthorizedPaths, []);
+}, (home) => seedProviderEvidence(home, true));
+
 browserTest('recovers a held executor receipt without exposing lease credentials', async ({ page, nav, form, inspector, api, fixture }) => {
   const snapshot = await api('state');
   const [job] = snapshot.jobs;
@@ -277,10 +361,51 @@ browserTest('recovers a held executor receipt without exposing lease credentials
   assert.equal(settled.observedModel, 'requested-v1');
   assert.equal(settled.canRecoverReceipt, false);
   assert.equal((await api('state')).jobs[0].state, 'blocked');
-}, async (home) => {
+}, seedProviderEvidence);
+
+browserTest('ignores an older admin login after connecting with a project token', async ({ page, connection, fixture }) => {
+  let finishAdminRequest;
+  const finishAdmin = new Promise((resolve) => { finishAdminRequest = resolve; });
+  const delayedAdmin = await page.evaluate(() => sessionStorage.getItem('factory-token'));
+  const isDelayedAdminRequest = (request) =>
+    request.url().endsWith('/api/state') && request.headers().authorization === 'Bearer ' + delayedAdmin;
+  await page.route('**/api/state', async (route) => {
+    if (!isDelayedAdminRequest(route.request())) return route.continue();
+    await finishAdmin;
+    await route.fulfill({ status: 401, json: { error: 'Invalid administrator token' } });
+  });
+
+  try {
+    await Promise.all([page.waitForRequest(isDelayedAdminRequest), page.reload({ waitUntil: 'domcontentloaded' })]);
+    await page.locator('#brand-connection').click();
+    await connection.getByLabel('API token').fill(fixture.access.reconciler);
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await connection.waitFor({ state: 'hidden' });
+    await page.getByRole('heading', { name: 'Project recovery' }).waitFor();
+
+    const adminResponse = page.waitForResponse((response) => isDelayedAdminRequest(response.request()));
+    const wrongStream = page.waitForRequest((request) =>
+      request.url().endsWith('/api/events/stream') &&
+      request.headers().authorization === 'Bearer ' + fixture.access.reconciler,
+    { timeout: 1500 }).catch((error) => {
+      if (error.name !== 'TimeoutError') throw error;
+      return null;
+    });
+    finishAdminRequest();
+    assert.equal((await adminResponse).status(), 401);
+    assert.ok(!(await wrongStream), 'A stale admin login started the event stream with the project token');
+    await page.getByRole('button', { name: 'Connection settings, connected' }).waitFor();
+    await page.getByRole('button', { name: 'Settle goal reservation' }).waitFor();
+  } finally {
+    finishAdminRequest();
+  }
+}, (home) => seedProviderEvidence(home, true));
+
+async function seedProviderEvidence(home, scoped = false) {
   const token = 'b'.repeat(64);
-  const fixture = { env: { FACTORY_REMOTE_EXECUTOR_TOKEN: token }, receipt: null };
+  const fixture = { env: { FACTORY_REMOTE_EXECUTOR_TOKEN: token }, receipt: null, receiptRequests: 0 };
   const executor = createServer(async (request, response) => {
+    fixture.receiptRequests++;
     let body = '';
     for await (const chunk of request) body += chunk;
     const query = JSON.parse(body);
@@ -297,11 +422,12 @@ browserTest('recovers a held executor receipt without exposing lease credentials
   fixture.dispose = () => new Promise((resolve) => executor.close(resolve));
   try {
     const dll = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
-    execFileSync('dotnet', [dll, '--browser-provider-evidence-fixture', home,
-      `http://127.0.0.1:${executor.address().port}/`], { timeout: 15_000 });
+    const output = execFileSync('dotnet', [dll, scoped ? '--browser-project-recovery-fixture' : '--browser-provider-evidence-fixture', home,
+      `http://127.0.0.1:${executor.address().port}/`], { timeout: 15_000, encoding: 'utf8' });
+    if (scoped) fixture.access = JSON.parse(output);
     return fixture;
   } catch (error) {
     await fixture.dispose();
     throw error;
   }
-});
+}

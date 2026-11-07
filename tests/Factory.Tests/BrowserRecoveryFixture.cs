@@ -10,11 +10,12 @@ internal static class BrowserRecoveryFixture
             var project = new ProjectInfo { Name = "Provider evidence fixture", Path = directory };
             var job = new FactoryJob { ProjectId = project.Id, Title = "Blocked provider fixture",
                 Mode = JobExecutionModes.Remote, State = JobStates.Blocked, Stage = "reconcile",
-                LeaseToken = "fixture-lease-secret" };
+                LeaseToken = "fixture-lease-secret", ExecutionGeneration = 5, TokensIn = 60, TokensOut = 30 };
             var lease = new RemoteProviderLease { JobId = job.Id, ExecutionGeneration = 4, WorkerId = "fixture",
                 ExecutorUrl = executorUrl };
             var usage = new ProviderUsageEntry { JobId = job.Id, ProjectId = project.Id,
-                ProviderId = "fixture-provider", Model = "requested-v1", Role = "builder", InputTokens = 60, OutputTokens = 30 };
+                ProviderId = "fixture-provider", Model = "requested-v1", Role = "builder", InputTokens = 60, OutputTokens = 30,
+                ExecutionGeneration = lease.ExecutionGeneration };
             state.Projects.Add(project);
             state.Jobs.Add(job);
             state.RemoteProviderLeases.Add(lease);
@@ -32,6 +33,36 @@ internal static class BrowserRecoveryFixture
         {
             RemoteProviderExecutorUrl = executorUrl
         }));
+    }
+
+    public static object SeedProjectRecovery(string home, string executorUrl)
+    {
+        SeedProviderEvidence(home, executorUrl);
+        var store = new StateStore(home);
+        var project = store.Read().Projects.Single();
+        var other = new ProjectInfo { Name = "Read-only project" };
+        var hidden = new ProjectInfo { Name = "Unrelated project" };
+        var reconciler = store.CreateViewer("Browser reconciler");
+        var operatorAccess = store.CreateViewer("Browser operator");
+        store.Change(state =>
+        {
+            state.Projects.AddRange([other, hidden]);
+            foreach (var owner in new[] { project, other, hidden })
+            {
+                var goal = new FactoryGoal { ProjectId = owner.Id, Objective = owner.Name + " goal", TokenBudget = 1000 };
+                var job = new FactoryJob { ProjectId = owner.Id, GoalId = goal.Id, Title = owner.Name + " goal job",
+                    State = JobStates.Stopped, ExecutionGeneration = 1, TokensIn = 20 };
+                state.Goals.Add(goal);
+                state.Jobs.Add(job);
+                state.BudgetReservations.Add(new GoalBudgetReservation { GoalId = goal.Id, JobId = job.Id,
+                    State = GoalBudgetLedger.Held, Reserved = 100, Consumed = 20, ExecutionGeneration = 1 });
+            }
+        });
+        store.SetBudgetReconcilerGrant(reconciler.SubjectId, project.Id, grant: true);
+        store.SetViewerGrant(reconciler.SubjectId, other.Id, grant: true);
+        store.SetViewerGrant(operatorAccess.SubjectId, project.Id, grant: true, planner: true);
+        store.SetOperatorGrant(operatorAccess.SubjectId, project.Id, grant: true);
+        return new { reconciler = reconciler.Token, operatorToken = operatorAccess.Token, projectId = project.Id, otherId = other.Id };
     }
 
     public static void Seed(string home)

@@ -72,6 +72,15 @@ internal static class ProjectViewerTests
             };
             var firstUrl = $"/api/viewer/projects/{first.Id}";
             var secondUrl = $"/api/viewer/projects/{second.Id}";
+            const string projectsUrl = "/api/viewer/projects";
+            await Request(settings.ApiToken, projectsUrl, HttpStatusCode.Unauthorized);
+            using (var index = JsonDocument.Parse(await Request(alice.Token, projectsUrl, HttpStatusCode.OK)))
+            {
+                var item = index.RootElement.EnumerateArray().Single();
+                Require(item.GetProperty("id").GetGuid() == first.Id);
+                Require(item.GetProperty("name").GetString() == first.Name);
+                Require(!item.GetProperty("canReconcileBudget").GetBoolean());
+            }
             var summary = await Request(alice.Token, firstUrl, HttpStatusCode.OK);
             using var summaryJson = JsonDocument.Parse(summary);
             Require(summaryJson.RootElement.GetProperty("usage")[0].GetProperty("inputTokens").GetInt64() == 7);
@@ -103,6 +112,7 @@ internal static class ProjectViewerTests
             UpdateFixture("UPDATE provider_usages SET input_tokens=0 WHERE id=$id;", extraUsage.Id);
 
             store.SetViewerGrant(alice.SubjectId, first.Id, grant: false);
+            Require(await Request(alice.Token, projectsUrl, HttpStatusCode.OK) == "[]");
             await Request(alice.Token, firstUrl, HttpStatusCode.NotFound);
             store.SetViewerGrant(alice.SubjectId, first.Id, grant: true);
             var rotated = store.SetViewerCredential(alice.SubjectId, rotate: true)!;

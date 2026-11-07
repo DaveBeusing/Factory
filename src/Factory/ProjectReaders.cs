@@ -163,6 +163,36 @@ public sealed partial class StateStore
         return (access.SubjectId.HasValue, access.CanRead ? read(db, tx) : null);
     }
 
+    internal IReadOnlyList<ViewerProjectAccess> ReadViewerProjects(string authorization)
+    {
+        var verifier = ReadViewerVerifier(authorization) ?? throw new ScopedProjectRejected(DraftGoalStatus.Unauthorized);
+        using var db = Open();
+        using var tx = db.BeginTransaction(deferred: true);
+        using var subject = Command(db, tx, "SELECT id FROM viewer_subjects WHERE verifier=$verifier;", ("$verifier", verifier));
+        if (subject.ExecuteScalar() is not string subjectId)
+            throw new ScopedProjectRejected(DraftGoalStatus.Unauthorized);
+        using var projects = Command(db, tx, """
+            WITH granted(project_id) AS (
+                SELECT project_id FROM viewer_project_grants WHERE subject_id=$subject
+                UNION SELECT project_id FROM planner_project_grants WHERE subject_id=$subject
+                UNION SELECT project_id FROM operator_project_grants WHERE subject_id=$subject
+                UNION SELECT project_id FROM budget_reconciler_project_grants WHERE subject_id=$subject
+            )
+            SELECT p.id,p.name,EXISTS(
+                SELECT 1 FROM budget_reconciler_project_grants WHERE subject_id=$subject AND project_id=p.id
+            )
+            FROM granted g JOIN projects p ON p.id=g.project_id
+            ORDER BY p.name,p.id;
+            """, ("$subject", subjectId));
+        using var row = projects.ExecuteReader();
+        var result = new List<ViewerProjectAccess>();
+        while (row.Read())
+            result.Add(new(Guid.Parse(row.GetString(0)), row.GetString(1), row.GetBoolean(2)));
+        return result;
+    }
+
+    internal sealed record ViewerProjectAccess(Guid Id, string Name, bool CanReconcileBudget);
+
     private static string? ReadViewerVerifier(string authorization)
     {
         if (!AuthenticationHeaderValue.TryParse(authorization, out var header) ||

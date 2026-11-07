@@ -201,6 +201,20 @@ internal static class ProjectPlanningTests
                 Require(!row.Read(), "Denied operations created job control audit rows");
             }
 
+            var running = new FactoryJob { ProjectId = first.Id };
+            store.Change(state =>
+            {
+                state.Jobs.Add(running);
+                JobRecovery.Assign(running, "other-controller-process", 120, local: true);
+            });
+            store.SetOperatorGrant(bob.SubjectId, first.Id, grant: true);
+            await Request(bob.Token, HttpMethod.Post, firstUrl + $"/jobs/{running.Id}/action",
+                HttpStatusCode.Accepted, new { action = "stop" });
+            await Request(settings.ApiToken, HttpMethod.Post, $"/api/jobs/{running.Id}/action",
+                HttpStatusCode.BadRequest, new { action = "pause" });
+            Require(store.Job(running.Id).RequestedState == LocalJobControl.ProjectStopRequest,
+                "A failed administrator pause cleared the accepted operator stop");
+
             async Task<string> Request(string token, HttpMethod method, string path, HttpStatusCode expected,
                 object? body = null, CancellationToken? deadline = null)
             {

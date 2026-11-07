@@ -42,6 +42,7 @@ internal static class ProjectPlanningTests
                 DROP TABLE operator_project_grants;
                 DROP TABLE project_operation_audit;
                 DROP TABLE budget_reconciler_project_grants;
+                DROP TABLE project_goal_budget_audit;
                 DROP TABLE project_budget_audit;
                 PRAGMA user_version=12;
                 """);
@@ -241,6 +242,10 @@ internal static class ProjectPlanningTests
                 reason = "Verified provider totals", subjectId = alice.SubjectId };
             await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.Forbidden, settlement);
             store.SetBudgetReconcilerGrant(bob.SubjectId, first.Id, grant: true);
+            var goalSettlementUrl = firstUrl + $"/goals/{active.Id}/budget/reconcile";
+            var goalSettlement = new { reservationId = goalHold.Id, finalTokensIn = 45L, reviewed = true,
+                reason = "Verified linked goal totals", subjectId = alice.SubjectId };
+            await Request(bob.Token, HttpMethod.Post, goalSettlementUrl, HttpStatusCode.Conflict, goalSettlement);
             var holds = JsonSerializer.Deserialize<List<ProjectProviderHold>>(
                 await Request(bob.Token, HttpMethod.Get, holdsUrl, HttpStatusCode.OK), Json.Options)!;
             Require(holds.Single().Id == held.Id, "Held reservations crossed project boundaries");
@@ -293,6 +298,46 @@ internal static class ProjectPlanningTests
                     Guid.Parse(row.GetString(1)) == first.Id && Guid.Parse(row.GetString(2)) == held.Id &&
                     row.GetInt64(3) == 45 && row.GetBoolean(4) && row.GetString(5) == settlement.reason && !row.Read(),
                     "Budget audit did not bind the actor, reservation and confirmed overrun");
+            }
+
+            await Request(bob.Token, HttpMethod.Post, goalSettlementUrl, HttpStatusCode.Forbidden, goalSettlement);
+            store.SetBudgetReconcilerGrant(bob.SubjectId, first.Id, grant: true);
+            var foreignGoalHold = new GoalBudgetReservation { GoalId = foreign.Id, JobId = foreignJob.Id,
+                Reserved = 512, State = GoalBudgetLedger.Held };
+            store.Change(state =>
+            {
+                state.Jobs.Single(item => item.Id == foreignJob.Id).GoalId = foreign.Id;
+                state.BudgetReservations.Add(foreignGoalHold);
+            });
+            var goalHolds = JsonSerializer.Deserialize<List<ProjectGoalHold>>(
+                await Request(bob.Token, HttpMethod.Get, firstUrl + "/goal-reservations", HttpStatusCode.OK), Json.Options)!;
+            Require(goalHolds.Single().Id == goalHold.Id, "Goal holds crossed project boundaries");
+            await Request(bob.Token, HttpMethod.Post, firstUrl + $"/goals/{foreign.Id}/budget/reconcile", HttpStatusCode.NotFound,
+                new { reservationId = foreignGoalHold.Id, finalTokensIn = 45, reviewed = true, goalSettlement.reason });
+            await Request(bob.Token, HttpMethod.Post, goalSettlementUrl, HttpStatusCode.NotFound,
+                new { reservationId = foreignGoalHold.Id, finalTokensIn = 45, reviewed = true, goalSettlement.reason });
+            Execute("""
+                CREATE TRIGGER reject_goal_audit BEFORE INSERT ON project_goal_budget_audit
+                BEGIN SELECT RAISE(ABORT, 'Fixture goal audit failure'); END;
+                """);
+            await Request(bob.Token, HttpMethod.Post, goalSettlementUrl, HttpStatusCode.InternalServerError, goalSettlement);
+            Require(store.Read().BudgetReservations.Single(item => item.Id == goalHold.Id).State == GoalBudgetLedger.Held,
+                "Goal audit failure did not roll back the release");
+            Execute("DROP TRIGGER reject_goal_audit;");
+            await Request(bob.Token, HttpMethod.Post, goalSettlementUrl, HttpStatusCode.OK, goalSettlement);
+            await Request(bob.Token, HttpMethod.Post, goalSettlementUrl, HttpStatusCode.Conflict, goalSettlement);
+            var goalState = store.Read();
+            Require(goalState.BudgetReservations.Single(item => item.Id == goalHold.Id).State == GoalBudgetLedger.Released &&
+                goalState.BudgetReservations.Single(item => item.Id == foreignGoalHold.Id).State == GoalBudgetLedger.Held,
+                "Goal reconciliation did not release only the requested hold");
+            using (var audit = db.CreateCommand())
+            {
+                audit.CommandText = "SELECT subject_id,project_id,reservation_id,input_tokens,reason FROM project_goal_budget_audit;";
+                using var row = audit.ExecuteReader();
+                Require(row.Read() && Guid.Parse(row.GetString(0)) == bob.SubjectId &&
+                    Guid.Parse(row.GetString(1)) == first.Id && Guid.Parse(row.GetString(2)) == goalHold.Id &&
+                    row.GetInt64(3) == 45 && row.GetString(4) == goalSettlement.reason && !row.Read(),
+                    "Goal audit did not bind the actor, project, reservation and evidence");
             }
 
             async Task<string> Request(string token, HttpMethod method, string path, HttpStatusCode expected,

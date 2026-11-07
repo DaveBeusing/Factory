@@ -118,4 +118,19 @@ factory viewer revoke-budget-reconciler --subject SUBJECT_GUID --project PROJECT
 
 `GET /api/viewer/projects/{projectId}/provider-reservations` lists held provider reservations available for scoped settlement. Send verified final totals to `POST /api/viewer/projects/{projectId}/provider-reservations/{reservationId}/reconcile` with `finalInputTokens`, `finalOutputTokens`, `reviewed: true`, and `reason`. Set `confirmOverrun: true` when verified usage exceeds the reservation.
 
-The controller checks the grant and reservation ownership again in the write transaction. It settles the provider reservation, posts any linked job and goal usage delta, and records the actor, totals, evidence and overrun confirmation in the same transaction. Separate goal-hold settlement and executor receipt recovery use the administrator workflows.
+The controller checks the grant and reservation ownership again in the write transaction. It settles the provider reservation, posts any linked job and goal usage delta, and records the actor, totals, evidence and overrun confirmation in the same transaction.
+
+## Project goal budget settlement and executor receipt recovery
+
+Schema 17 extends the Budget Reconciler grant with the following endpoints under `/api/viewer/projects/{projectId}`.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /goal-reservations` | List held goal reservations in the project. |
+| `POST /goals/{goalId}/budget/reconcile` | Submit `reservationId`, `finalTokensIn`, `finalTokensOut`, `reviewed: true`, and `reason`. Set `confirmOverrun: true` for verified usage above the reservation. |
+| `GET /executor-receipts` | List held executor turns eligible for investigation. |
+| `POST /jobs/{jobId}/provider-turns/{turnId}/recover` | Submit `reviewed: true` and `reason` to recover final usage from the configured executor. Set `confirmOverrun: true` for a verified overrun. |
+
+Settle linked provider holds before closing the goal hold. Where provider turns exist, the goal settlement must match the totals already booked to the job. The goal audit and release are committed together.
+
+The controller authorizes the project and verifies the job, lease, turn and reservation links before asking the configured executor for the receipt. It rechecks the original grant and the execution generation before posting usage. Missing or invalid evidence leaves the hold in place. A successful response contains `turnId`, `reservationId`, and `state: "reconciled"`. Repeating a successful recovery returns the same result and leaves the ledger and audit unchanged.

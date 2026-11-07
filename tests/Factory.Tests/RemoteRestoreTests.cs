@@ -117,17 +117,47 @@ internal static class RemoteRestoreTests
             "Restored expired lease did not retain both budget holds");
         var recover = $"api/jobs/{job.Id}/provider-turns/{turnId}/recover";
         var decision = new RemoteReceiptRecoveryInput(true, "Verified restored executor receipt", false);
+        var reconciler = restoredStore.CreateViewer("Receipt reconciler");
+        var foreign = new ProjectInfo { Name = "Foreign receipt project" };
+        restoredStore.Change(state => state.Projects.Add(foreign));
+        restoredStore.SetViewerGrant(reconciler.SubjectId, job.ProjectId, grant: true);
+        using var scoped = Client(restoredController.Address, reconciler.Token);
+        var projectRoute = $"api/viewer/projects/{job.ProjectId}";
+        var scopedRecovery = projectRoute + $"/jobs/{job.Id}/provider-turns/{turnId}/recover";
+        await PostAsync(scoped, scopedRecovery, decision, HttpStatusCode.Forbidden, ct);
+        restoredStore.SetBudgetReconcilerGrant(reconciler.SubjectId, job.ProjectId, grant: true);
+        restoredStore.SetBudgetReconcilerGrant(reconciler.SubjectId, foreign.Id, grant: true);
+        var ownHolds = await scoped.GetFromJsonAsync<List<ProjectExecutorHold>>(projectRoute + "/executor-receipts", Json.Options, ct);
+        var foreignRoute = $"api/viewer/projects/{foreign.Id}";
+        var foreignHolds = await scoped.GetFromJsonAsync<List<ProjectExecutorHold>>(foreignRoute + "/executor-receipts", Json.Options, ct);
+        Check(ownHolds?.Single().TurnId == turnId && foreignHolds?.Count == 0, "Executor receipt holds crossed projects");
+        await PostAsync(scoped, foreignRoute + $"/jobs/{job.Id}/provider-turns/{turnId}/recover",
+            decision, HttpStatusCode.NotFound, ct);
+        await PostAsync(scoped, projectRoute + $"/jobs/{Guid.NewGuid()}/provider-turns/{turnId}/recover",
+            decision, HttpStatusCode.NotFound, ct);
         var receiptName = turnId.ToString("N") + ".receipt.json";
         var restoredReceipt = Path.Combine(restoredExecutorHome, "executor-receipts", receiptName);
         File.Delete(restoredReceipt);
         await PostAsync(admin, recover, decision, HttpStatusCode.BadRequest, ct);
+        await PostAsync(scoped, scopedRecovery, decision, HttpStatusCode.Conflict, ct);
         Check(restoredStore.Read().ProviderBudgetReservations.Single() is { State: "held", Consumed: 0 } &&
             restoredStore.Read().BudgetReservations.Single() is { State: GoalBudgetLedger.Held, Consumed: 0 },
             "A missing receipt released or debited held usage");
         await PostAsync(executorReader, "api/executor/turn", grant, HttpStatusCode.InternalServerError, ct);
         Check(calls == 1, "Removing the restored receipt released the dispatch marker");
         File.Copy(Path.Combine(executorBackup, "executor-receipts", receiptName), restoredReceipt);
-        await PostAsync(admin, recover, decision, HttpStatusCode.OK, ct);
+        var firstRecovery = await ReadScopedRecoveryAsync();
+        var repeatedRecovery = await ReadScopedRecoveryAsync();
+        var reservationId = held.ProviderBudgetReservations.Single().Id;
+        Check(firstRecovery == repeatedRecovery, "Receipt recovery changed its response on replay");
+        using (var result = System.Text.Json.JsonDocument.Parse(firstRecovery))
+        {
+            var body = result.RootElement;
+            Check(body.GetProperty("turnId").GetGuid() == turnId &&
+                body.GetProperty("reservationId").GetGuid() == reservationId &&
+                body.GetProperty("state").GetString() == "reconciled",
+                "Receipt recovery did not return both identifiers and the turn state");
+        }
         await PostAsync(admin, recover, decision, HttpStatusCode.OK, ct);
         var settled = restoredStore.Read();
         Check(settled.RemoteProviderTurns.Single() is { State: "reconciled", ObservedModel: model } &&
@@ -136,6 +166,26 @@ internal static class RemoteRestoreTests
             settled.BudgetReservations.Single() is { State: GoalBudgetLedger.Held, Consumed: 40 } &&
             settled.Jobs.Single() is { State: JobStates.Blocked, TokensIn: 30, TokensOut: 10 } && calls == 1,
             "Recovery did not charge exactly once or reopened the fenced job");
+        using var auditDb = new SqliteConnection(new SqliteConnectionStringBuilder
+            { DataSource = Path.Combine(restoredControllerHome, "factory.sqlite3") }.ToString());
+        auditDb.Open();
+        using var audit = auditDb.CreateCommand();
+        audit.CommandText = "SELECT subject_id,project_id,reservation_id,usage_id,input_tokens,output_tokens,reason FROM project_budget_audit;";
+        using var row = audit.ExecuteReader();
+        Check(row.Read() && Guid.Parse(row.GetString(0)) == reconciler.SubjectId &&
+            Guid.Parse(row.GetString(1)) == job.ProjectId &&
+            Guid.Parse(row.GetString(2)) == settled.ProviderBudgetReservations.Single().Id &&
+            Guid.Parse(row.GetString(3)) == settled.ProviderUsages.Single().Id &&
+            row.GetInt64(4) == 30 && row.GetInt64(5) == 10 &&
+            row.GetString(6).Contains(turnId.ToString(), StringComparison.OrdinalIgnoreCase) && !row.Read(),
+            "Receipt settlement must audit the actor and ledger evidence exactly once");
+
+        async Task<string> ReadScopedRecoveryAsync()
+        {
+            using var response = await scoped.PostAsJsonAsync(scopedRecovery, decision, Json.Options, ct);
+            await RequireStatus(response, HttpStatusCode.OK, scopedRecovery, ct);
+            return await response.Content.ReadAsStringAsync(ct);
+        }
     }
 
     private static async Task<(string Base, string Head, string Tree, byte[] Bundle)> MakeBundleAsync(string root, CancellationToken ct)

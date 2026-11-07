@@ -334,42 +334,46 @@ public static class GoalBudgetLedger
     {
         if (!reviewed || string.IsNullOrWhiteSpace(reason) || reason.Trim().Length < 10)
             throw new InvalidOperationException("Independent usage reconciliation requires review and justification");
-        return store.Change(state =>
-        {
-            var reservation = state.BudgetReservations.Single(r => r.Id == reservationId);
-            if (reservation.GoalId != goalId)
-                throw new InvalidOperationException("Reservation belongs to a different goal");
-            if (reservation.State != Held)
-                throw new InvalidOperationException("Only held reservations can be reconciled");
-            var job = state.Jobs.Single(j => j.Id == reservation.JobId);
-            if (!string.IsNullOrEmpty(job.LeaseOwner) || JobStates.Active.Contains(job.State))
-                throw new InvalidOperationException("Cannot reconcile a running job");
-            if (finalTokensIn < job.TokensIn || finalTokensOut < job.TokensOut)
-                throw new InvalidOperationException("Final token usage cannot be below observed usage");
-            var linkedTurns = state.ProviderUsages.Where(u => u.JobId == job.Id && u.GoalId == goalId &&
-                u.ExecutionGeneration == reservation.ExecutionGeneration)
-                .Join(state.ProviderBudgetReservations, u => u.Id, r => r.UsageId, (u, r) => (Usage: u, Hold: r))
-                .ToArray();
-            if (linkedTurns.Any(turn => !turn.Usage.FinalUsageReported || turn.Hold.State != Released))
-                throw new InvalidOperationException("Reconcile outstanding provider turns before settling their goal reservation");
-            if (linkedTurns.Length > 0 && (finalTokensIn != job.TokensIn || finalTokensOut != job.TokensOut))
-                throw new InvalidOperationException("Record additional usage on its provider turn before settling the linked goal reservation");
-            if (state.BudgetReservations.Any(r => r.JobId == job.Id && r.ExecutionGeneration > reservation.ExecutionGeneration))
-                throw new InvalidOperationException("A newer goal reservation exists for this job");
-            var usage = checked(finalTokensIn + finalTokensOut);
-            var consumed = checked(usage - reservation.BaseUsage);
-            if (consumed < reservation.Consumed)
-                throw new InvalidOperationException("Goal reservation usage cannot regress");
-            RequireVerifiedOverrun(reservation.Reserved, consumed, confirmOverrun);
-            job.TokensIn = finalTokensIn;
-            job.TokensOut = finalTokensOut;
-            job.UsageComplete = true;
-            reservation.Consumed = consumed;
-            reservation.State = Released;
-            reservation.UpdatedAt = DateTimeOffset.UtcNow;
-            state.Events.Add(new FactoryEvent { JobId = job.Id, Type = "budget_reconciled",
-                Message = $"Reservation {reservation.Id}; consumed {consumed}; verified overrun {Math.Max(0, consumed - reservation.Reserved)}; {reason.Trim()[..Math.Min(1000, reason.Trim().Length)]}" });
-            return reservation;
-        });
+        return store.Change(state => ApplyGoalReconciliation(state, goalId, reservationId, finalTokensIn,
+            finalTokensOut, reason, confirmOverrun));
+    }
+
+    internal static GoalBudgetReservation ApplyGoalReconciliation(FactoryState state, Guid goalId, Guid reservationId,
+        long finalTokensIn, long finalTokensOut, string reason, bool confirmOverrun)
+    {
+        var reservation = state.BudgetReservations.Single(r => r.Id == reservationId);
+        if (reservation.GoalId != goalId)
+            throw new InvalidOperationException("Reservation belongs to a different goal");
+        if (reservation.State != Held)
+            throw new InvalidOperationException("Only held reservations can be reconciled");
+        var job = state.Jobs.Single(j => j.Id == reservation.JobId);
+        if (!string.IsNullOrEmpty(job.LeaseOwner) || JobStates.Active.Contains(job.State))
+            throw new InvalidOperationException("Cannot reconcile a running job");
+        if (finalTokensIn < job.TokensIn || finalTokensOut < job.TokensOut)
+            throw new InvalidOperationException("Final token usage cannot be below observed usage");
+        var linkedTurns = state.ProviderUsages.Where(u => u.JobId == job.Id && u.GoalId == goalId &&
+            u.ExecutionGeneration == reservation.ExecutionGeneration)
+            .Join(state.ProviderBudgetReservations, u => u.Id, r => r.UsageId, (u, r) => (Usage: u, Hold: r))
+            .ToArray();
+        if (linkedTurns.Any(turn => !turn.Usage.FinalUsageReported || turn.Hold.State != Released))
+            throw new InvalidOperationException("Reconcile outstanding provider turns before settling their goal reservation");
+        if (linkedTurns.Length > 0 && (finalTokensIn != job.TokensIn || finalTokensOut != job.TokensOut))
+            throw new InvalidOperationException("Record additional usage on its provider turn before settling the linked goal reservation");
+        if (state.BudgetReservations.Any(r => r.JobId == job.Id && r.ExecutionGeneration > reservation.ExecutionGeneration))
+            throw new InvalidOperationException("A newer goal reservation exists for this job");
+        var usage = checked(finalTokensIn + finalTokensOut);
+        var consumed = checked(usage - reservation.BaseUsage);
+        if (consumed < reservation.Consumed)
+            throw new InvalidOperationException("Goal reservation usage cannot regress");
+        RequireVerifiedOverrun(reservation.Reserved, consumed, confirmOverrun);
+        job.TokensIn = finalTokensIn;
+        job.TokensOut = finalTokensOut;
+        job.UsageComplete = true;
+        reservation.Consumed = consumed;
+        reservation.State = Released;
+        reservation.UpdatedAt = DateTimeOffset.UtcNow;
+        state.Events.Add(new FactoryEvent { JobId = job.Id, Type = "budget_reconciled",
+            Message = $"Reservation {reservation.Id}; consumed {consumed}; verified overrun {Math.Max(0, consumed - reservation.Reserved)}; {reason.Trim()[..Math.Min(1000, reason.Trim().Length)]}" });
+        return reservation;
     }
 }

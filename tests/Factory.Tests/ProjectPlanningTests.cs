@@ -223,7 +223,7 @@ internal static class ProjectPlanningTests
                 JobId = budgetJob.Id, ExecutionGeneration = 1, ProviderId = "codex", InputTokens = 30 };
             var held = new ProviderBudgetReservation { ProjectId = first.Id, UsageId = budgetUsage.Id,
                 ProviderId = "codex", Reserved = 40, Consumed = 30, State = "held" };
-            var foreignUsage = new ProviderUsageEntry { ProjectId = second.Id, JobId = foreignJob.Id, ProviderId = "codex" };
+            var foreignUsage = new ProviderUsageEntry { ProjectId = second.Id, JobId = foreignJob.Id, ProviderId = "codex", InputTokens = 1 };
             var foreignHold = new ProviderBudgetReservation { ProjectId = second.Id, UsageId = foreignUsage.Id,
                 ProviderId = "codex", Reserved = 512, State = "held" };
             var goalHold = new GoalBudgetReservation { GoalId = active.Id, JobId = budgetJob.Id,
@@ -249,6 +249,21 @@ internal static class ProjectPlanningTests
                 HttpStatusCode.Forbidden, settlement);
             await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.Conflict,
                 new { finalInputTokens = 45, reviewed = true, reason = "Verified provider totals" });
+            await Request(settings.ApiToken, HttpMethod.Get, "/api/providers", HttpStatusCode.OK);
+            var overflow = await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.Conflict,
+                new { finalInputTokens = long.MaxValue - 30, reviewed = true, confirmOverrun = true, reason = "Verified provider totals" });
+            Require(overflow.Contains("supported budget total", StringComparison.Ordinal), "Shared provider total overflow was not detected");
+            await Request(settings.ApiToken, HttpMethod.Get, "/api/providers", HttpStatusCode.OK);
+            store.Change(state => state.Jobs.Add(new FactoryJob
+                { ProjectId = first.Id, GoalId = active.Id, TokensIn = 2048 }));
+            await Request(bob.Token, HttpMethod.Post, settleUrl, HttpStatusCode.Conflict,
+                new { finalInputTokens = long.MaxValue - 1024, reviewed = true, confirmOverrun = true, reason = "Verified provider totals" });
+            var afterOverflow = store.Read();
+            Require(afterOverflow.ProviderUsages.Single(item => item.Id == budgetUsage.Id).InputTokens == 30 &&
+                afterOverflow.ProviderBudgetReservations.Single(item => item.Id == held.Id).State == "held" &&
+                afterOverflow.BudgetReservations.Single(item => item.Id == goalHold.Id).Consumed == 30 &&
+                afterOverflow.Jobs.Single(item => item.Id == budgetJob.Id).TokensIn == 30,
+                "Overflow rejection must roll back both ledgers and the job");
             Execute("""
                 CREATE TRIGGER reject_budget_audit BEFORE INSERT ON project_budget_audit
                 BEGIN SELECT RAISE(ABORT, 'Fixture budget audit failure'); END;

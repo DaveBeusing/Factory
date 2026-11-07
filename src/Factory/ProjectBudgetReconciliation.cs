@@ -107,6 +107,7 @@ public sealed partial class StateStore
         if (linked is not null)
             Execute(db, tx, "UPDATE goal_budget_reservations SET consumed=$consumed,updated_at=$at WHERE id=$id;",
                 ("$consumed", linked.Consumed), ("$at", linked.UpdatedAt), ("$id", linked.Id));
+        RequireRepresentableBudgetTotals(db, tx, usage);
         Execute(db, tx, """
             INSERT INTO project_budget_audit(subject_id,project_id,reservation_id,usage_id,reserved,
                 input_tokens,output_tokens,confirm_overrun,reason,at)
@@ -118,6 +119,45 @@ public sealed partial class StateStore
         AppendEvent(db, tx, entry.JobId, entry.Type, entry.Message);
         tx.Commit();
         return result;
+    }
+
+    private static void RequireRepresentableBudgetTotals(SqliteConnection db, SqliteTransaction tx, ProviderUsageEntry usage)
+    {
+        // Use the transaction's proposed values and widen before adding, including outstanding capacity.
+        using var provider = Command(db, tx, """
+            SELECT input_tokens,output_tokens,0 FROM provider_usages WHERE provider_id=$provider
+            UNION ALL
+            SELECT reserved,consumed,1 FROM provider_budget_reservations
+            WHERE provider_id=$provider AND state<>'released';
+            """, ("$provider", usage.ProviderId));
+        RequireRepresentableTotal(provider);
+        if (usage.GoalId is not { } goalId) return;
+        using var goal = Command(db, tx, """
+            SELECT tokens_in,tokens_out,0 FROM jobs WHERE goal_id=$goal
+            UNION ALL
+            SELECT input_tokens,output_tokens,0 FROM provider_usages WHERE goal_id=$goal AND job_id IS NULL
+            UNION ALL
+            SELECT reserved,consumed,1 FROM goal_budget_reservations WHERE goal_id=$goal AND state IN ('active','held')
+            UNION ALL
+            SELECT r.reserved,r.consumed,1 FROM provider_budget_reservations r
+            JOIN provider_usages u ON u.id=r.usage_id
+            WHERE u.goal_id=$goal AND u.job_id IS NULL AND r.state IN ('active','held');
+            """, ("$goal", goalId));
+        RequireRepresentableTotal(goal);
+    }
+
+    private static void RequireRepresentableTotal(SqliteCommand command)
+    {
+        using var row = command.ExecuteReader();
+        Int128 total = 0;
+        while (row.Read())
+        {
+            Int128 first = row.GetInt64(0);
+            Int128 second = row.GetInt64(1);
+            total += row.GetBoolean(2) ? Int128.Max(0, first - second) : first + second;
+            if (total > long.MaxValue)
+                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The settlement would exceed the supported budget total.");
+        }
     }
 
     private static Guid RequireBudgetReconciler(SqliteConnection db, SqliteTransaction tx, string verifier,

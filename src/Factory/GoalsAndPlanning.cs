@@ -149,8 +149,15 @@ public static class Planning
     public static IReadOnlyList<FactoryJob> Adopt(StateStore store, Guid goalId, string mode,
         bool reviewedExistingWork = false, Guid planRevision = default)
     {
-        var plan = MissionControlManager.ReadPlan(store, goalId)
-            ?? throw new InvalidOperationException("No saved plan");
+        var plan = store.ReadStoredPlanRevision(goalId);
+        if (plan is null)
+        {
+            var legacy = MissionControlManager.ReadLegacyPlan(store, goalId);
+            if (legacy is null) throw new InvalidOperationException("No saved plan");
+            if (legacy.Revision is null || string.IsNullOrEmpty(legacy.GoalRevision))
+                throw new InvalidOperationException("Plan predates revision tracking; review and save it again before adoption");
+            throw new InvalidOperationException("Save the legacy plan as a new revision and review it before adoption");
+        }
         var snapshot = store.Read();
         var requestedGoal = snapshot.Goals.Single(g => g.Id == goalId);
         var requestedProject = snapshot.Projects.Single(p => p.Id == requestedGoal.ProjectId);
@@ -159,7 +166,7 @@ public static class Planning
         {
             var goal = state.Goals.Single(g => g.Id == goalId);
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
-            VerifyAdoptionTarget(plan, store.ReadPlanRevision(db, tx, goalId),
+            VerifyAdoptionTarget(plan, StateStore.ReadStoredPlanRevision(db, tx, goalId),
                 requestedProject, project, goal);
             var jobs = BuildAdoptedJobs(plan, goal, mode);
             state.Jobs.AddRange(jobs);

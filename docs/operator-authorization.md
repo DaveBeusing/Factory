@@ -86,4 +86,4 @@ These endpoints require a Planner grant for the goal's project.
 
 A stale goal, stale plan revision or changed master returns HTTP 409. Plan saves commit the revision and audit together. Adoption commits the jobs, goal state and audit together. The audit identifies the goal and exact plan revision, and records the review acknowledgment on adoption.
 
-Schema 14 stores new plan revisions in SQLite. Existing plan files remain readable until a SQLite revision takes precedence. Include the SQLite backup and any legacy plan files in controller backups. Provider-backed planning under human credentials and Mission Control integration follow in later increments.
+Schema 14 stores new plan revisions in SQLite. Existing plan files remain readable until a SQLite revision takes precedence. To adopt a legacy plan, save it to create a new SQLite revision and review that revision first. The same requirement applies to administrator and CLI adoption. Include the SQLite backup and any legacy plan files in controller backups. Provider-backed planning under human credentials and Mission Control integration follow in later increments.

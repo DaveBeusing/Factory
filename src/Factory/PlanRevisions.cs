@@ -32,31 +32,33 @@ public sealed partial class StateStore
         return ReadPlanRevision(db, tx, goalId);
     }
 
-    internal FactoryPlan? ReadPlanRevision(SqliteConnection db, SqliteTransaction tx, Guid goalId)
+    internal FactoryPlan? ReadPlanRevision(SqliteConnection db, SqliteTransaction tx, Guid goalId) =>
+        ReadStoredPlanRevision(db, tx, goalId) ?? MissionControlManager.ReadLegacyPlan(this, goalId);
+
+    internal FactoryPlan? ReadStoredPlanRevision(Guid goalId)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction(deferred: true);
+        return ReadStoredPlanRevision(db, tx, goalId);
+    }
+
+    internal static FactoryPlan? ReadStoredPlanRevision(SqliteConnection db, SqliteTransaction tx, Guid goalId)
     {
         using var query = Command(db, tx, """
             SELECT content FROM goal_plan_revisions WHERE goal_id=$goal ORDER BY id DESC LIMIT 1;
             """, ("$goal", goalId));
         return query.ExecuteScalar() is string content
             ? JsonSerializer.Deserialize<FactoryPlan>(content, Json.Options)
-            : MissionControlManager.ReadLegacyPlan(this, goalId);
+            : null;
     }
 
     internal static FactoryPlan InsertPlanRevision(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan)
     {
         plan.Revision = Guid.NewGuid();
-        StorePlanRevision(db, tx, plan);
-        return plan;
-    }
-
-    private static void StorePlanRevision(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan,
-        bool importLegacy = false)
-    {
         Execute(db, tx, """
             INSERT INTO goal_plan_revisions(goal_id, revision, content)
-            SELECT $goal, $revision, $content
-            WHERE NOT $import OR NOT EXISTS (SELECT 1 FROM goal_plan_revisions WHERE goal_id=$goal);
-            """, ("$goal", plan.GoalId), ("$revision", plan.Revision), ("$content", Json.Stringify(plan)),
-            ("$import", importLegacy));
+            VALUES($goal, $revision, $content);
+            """, ("$goal", plan.GoalId), ("$revision", plan.Revision), ("$content", Json.Stringify(plan)));
+        return plan;
     }
 }

@@ -11,7 +11,11 @@ internal sealed record ScopedPlanView(string GoalRevision, FactoryPlan? Plan);
 
 public sealed partial class StateStore
 {
-    private sealed record PlanScope(Guid SubjectId, ProjectInfo Project, FactoryGoal Goal, FactoryPlan? Plan);
+    private sealed record PlanScope(Guid SubjectId, ProjectInfo Project, FactoryGoal Goal,
+        FactoryPlan? StoredPlan, FactoryPlan? LegacyPlan)
+    {
+        public FactoryPlan? Plan => StoredPlan ?? LegacyPlan;
+    }
 
     internal ScopedPlanView ReadScopedPlan(string authorization, Guid projectId, Guid goalId)
     {
@@ -54,7 +58,9 @@ public sealed partial class StateStore
         using var db = Open();
         var (scope, snapshot) = ReadPlanPreflight(db, verifier, projectId, goalId);
         RequireDraftPlanTarget(scope);
-        if (scope.Plan is not { } plan || plan.Revision != input.PlanRevision || input.PlanRevision == Guid.Empty)
+        if (scope.LegacyPlan is not null)
+            throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Save the legacy plan as a new revision and review it before adoption.");
+        if (scope.StoredPlan is not { } plan || plan.Revision != input.PlanRevision || input.PlanRevision == Guid.Empty)
             throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Review the current saved plan revision.");
         if (!input.ReviewedExistingWork)
             throw new ScopedPlanRejected(DraftGoalStatus.Invalid, "Confirm review of existing work before adoption.");
@@ -64,14 +70,13 @@ public sealed partial class StateStore
         using var tx = db.BeginTransaction();
         var current = ReadPlanScope(db, tx, verifier, projectId, goalId);
         RequireDraftPlanTarget(current);
-        Planning.VerifyAdoptionTarget(plan, current.Plan, scope.Project, current.Project, current.Goal);
+        Planning.VerifyAdoptionTarget(plan, current.StoredPlan, scope.Project, current.Project, current.Goal);
         using var next = Command(db, tx, "SELECT COALESCE(MAX(position),-1)+1 FROM jobs;");
         var position = Convert.ToInt32(next.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
         var entity = Entities.Single(map => map.Type == typeof(FactoryJob));
         foreach (var job in jobs) Upsert(db, tx, entity, job, position++);
         Execute(db, tx, "UPDATE goals SET state='active' WHERE id=$goal AND project_id=$project;",
             ("$goal", goalId), ("$project", projectId));
-        StorePlanRevision(db, tx, plan, importLegacy: true);
         AuditPlan(db, tx, current, plan, "plan_adopted", reviewed: true);
         AppendEvent(db, tx, null, "plan_adopted", $"Goal {goalId}: {jobs.Count} work packages");
         tx.Commit();
@@ -122,12 +127,14 @@ public sealed partial class StateStore
         using var values = criteria.ExecuteReader();
         while (values.Read()) goal.AcceptanceCriteria.Add(values.GetString(0));
         values.Close();
-        var plan = ReadPlanRevision(db, tx, goalId);
+        var stored = ReadStoredPlanRevision(db, tx, goalId);
+        var legacy = stored is null ? MissionControlManager.ReadLegacyPlan(this, goalId) : null;
+        var plan = stored ?? legacy;
         if (plan is not null && (plan.ProjectId != projectId || plan.GoalId != goalId))
             throw new ScopedPlanRejected(DraftGoalStatus.NotFound);
         if (plan?.Preflight is { } preflight && (preflight.ProjectId != projectId || preflight.GoalId != goalId))
             throw new ScopedPlanRejected(DraftGoalStatus.NotFound);
-        return new(actor, project, goal, plan);
+        return new(actor, project, goal, stored, legacy);
     }
 
     private static void RequireDraftPlanTarget(PlanScope scope)

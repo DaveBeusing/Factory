@@ -77,7 +77,34 @@ internal static class ScopedPlanTests
             Require(MissionControlManager.ReadPlan(store, goal.Id) is null && AuditCount() == 0, "Plan save escaped audit rollback");
             Execute("DROP TRIGGER reject_plan_audit;");
 
+            var preflight = WorkPackagePreflight.Inspect(store.Read(), first, goal);
+            var legacy = new FactoryPlan
+            {
+                GoalId = goal.Id, ProjectId = first.Id, GoalRevision = goalRevision, Revision = Guid.NewGuid(),
+                BaseCommit = preflight.BaseCommit, Preflight = preflight,
+                Packages = [new PlannedPackage { Title = "Reviewed legacy package", Description = "Legacy work", Files = ["README.md"] }]
+            };
+            var legacyPath = Planning.PathFor(store, goal.Id);
+            Directory.CreateDirectory(Path.GetDirectoryName(legacyPath)!);
+            File.WriteAllText(legacyPath, Json.Stringify(legacy));
+            var reviewedLegacy = JsonSerializer.Deserialize<ScopedPlanView>(
+                await Request(alice.Token, HttpMethod.Get, path, HttpStatusCode.OK), Json.Options)!.Plan!;
+            Require(reviewedLegacy.Packages.Single().Title == "Reviewed legacy package", "Legacy plan was not readable");
+            legacy.Packages[0].Title = "Changed after review";
+            File.WriteAllText(legacyPath, Json.Stringify(legacy));
+            await Adopt(reviewedLegacy.Revision, HttpStatusCode.Conflict);
+            try
+            {
+                Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true, planRevision: reviewedLegacy.Revision!.Value);
+                throw new Exception("Administrator adopted a mutable legacy file");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("Save the legacy plan", StringComparison.Ordinal)) { }
+            Require(store.Read().Jobs.Count == 0 && AuditCount() == 0, "Rejected legacy adoption wrote state");
+
+            draft.Revision = reviewedLegacy.Revision;
             var firstPlan = await Save();
+            Require(firstPlan.Revision != reviewedLegacy.Revision, "A saved legacy plan needs a new immutable revision");
+            await Adopt(reviewedLegacy.Revision, HttpStatusCode.Conflict);
             Require(MissionControlManager.ReadPlan(store, goal.Id)?.Revision == firstPlan.Revision, "Administrator cannot read scoped revision");
             draft.Revision = firstPlan.Revision;
             draft.Packages[0].Title = "Revised package";
@@ -108,6 +135,7 @@ internal static class ScopedPlanTests
             await Adopt(current.Revision, HttpStatusCode.Conflict);
             var final = store.Read();
             Require(final.Jobs.Single().ProjectId == first.Id && final.Jobs.Single().GoalId == goal.Id &&
+                final.Jobs.Single().Title == "Revised package" &&
                 final.Goals.Single(item => item.Id == goal.Id).State == "active" && AuditCount() == 5,
                 "Reviewed adoption did not commit expected state and audit");
             using var audit = db.CreateCommand();

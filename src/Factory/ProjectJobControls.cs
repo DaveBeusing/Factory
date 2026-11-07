@@ -13,6 +13,8 @@ public sealed class ProjectJobControlInput
 
 internal sealed record ProjectJobControlResult(Guid Id, Guid ProjectId, string State, DateTimeOffset UpdatedAt,
     string? RequestedState = null);
+internal sealed record ProjectJobOperation(Guid Id, string Title, string State, string Mode, string[] Actions,
+    bool ReviewBeforeResume, string? RequestedState, string? CheckpointCommit);
 
 public sealed partial class StateStore
 {
@@ -30,6 +32,68 @@ public sealed partial class StateStore
             );
             PRAGMA user_version=15;
             """);
+
+    internal IReadOnlyList<ProjectJobOperation> ReadProjectJobOperations(string authorization, Guid projectId)
+    {
+        var verifier = ReadViewerVerifier(authorization) ?? throw new ScopedProjectRejected(DraftGoalStatus.Unauthorized);
+        using var db = Open();
+        using var tx = db.BeginTransaction(deferred: true);
+        var access = ReadProjectAccess(db, tx, verifier, projectId);
+        if (access.SubjectId is null) throw new ScopedProjectRejected(DraftGoalStatus.Unauthorized);
+        if (!access.CanRead) throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
+        if (!access.CanOperate) throw new ScopedProjectRejected(DraftGoalStatus.Forbidden);
+        var now = DateTimeOffset.UtcNow;
+        return ReadViewerRows(db, tx, projectId, """
+            SELECT j.id,j.title,j.state,j.mode,j.stage,j.started_at,j.lease_owner,j.lease_until,
+                LENGTH(j.lease_token)>0,j.requested_state,j.checkpoint_stage,j.checkpoint_commit,p.status
+            FROM jobs j JOIN projects p ON p.id=j.project_id WHERE j.project_id=$project
+            ORDER BY j.position,j.id;
+            """, row =>
+        {
+            var state = row.GetString(2);
+            var mode = row.GetString(3);
+            var stage = row.GetString(4);
+            var owner = row.GetString(6);
+            var expires = (DateTimeOffset?)FromDb(row.GetValue(7), typeof(DateTimeOffset?));
+            var active = JobStates.Active.Contains(state);
+            var requested = row.GetString(9);
+            var actions = new List<string>();
+            string? checkpoint = null;
+            if (row.GetString(12) != "archived")
+            {
+                if (active)
+                {
+                    if (requested.Length == 0 && HasCurrentLocalLease(mode, owner, row.GetBoolean(8), expires, now))
+                        actions.AddRange(["pause", "stop"]);
+                }
+                else if (owner.Length == 0)
+                {
+                    if (state is JobStates.Queued or JobStates.Paused or JobStates.Stopped)
+                        actions.AddRange(["pause", "stop"]);
+                    if ((state is JobStates.Paused or JobStates.Stopped) && stage is not ("scope" or "reconcile"))
+                        actions.Add("resume");
+                    if (state == JobStates.Blocked && stage == "reconcile" && mode == JobExecutionModes.Local &&
+                        row.GetString(10) is "worktree" or "agent" && row.GetString(11).Length != 0)
+                    {
+                        actions.Add("reconcile");
+                        checkpoint = row.GetString(11);
+                    }
+                }
+            }
+            return new ProjectJobOperation(Guid.Parse(row.GetString(0)), row.GetString(1), state, mode, actions.ToArray(),
+                actions.Contains("resume") && !row.IsDBNull(5), (active ? requested : "") switch
+                {
+                    LocalJobControl.ProjectPauseRequest => JobStates.Paused,
+                    LocalJobControl.ProjectStopRequest => JobStates.Stopped,
+                    _ => null
+                }, checkpoint);
+        });
+    }
+
+    private static bool HasCurrentLocalLease(string mode, string owner, bool hasToken,
+        DateTimeOffset? expires, DateTimeOffset now) =>
+        mode == JobExecutionModes.Local && !string.IsNullOrWhiteSpace(owner) &&
+        !owner.StartsWith("remote:", StringComparison.Ordinal) && hasToken && expires > now;
 
     internal ProjectJobControlResult ControlProjectJob(string authorization, Guid projectId, Guid jobId,
         ProjectJobControlInput request)
@@ -62,9 +126,8 @@ public sealed partial class StateStore
         if (JobStates.Active.Contains(previousState))
         {
             var leaseUntil = (DateTimeOffset?)FromDb(row.GetValue(8), typeof(DateTimeOffset?));
-            if (request.Action == "resume" || row.GetString(7) != JobExecutionModes.Local ||
-                string.IsNullOrWhiteSpace(leaseOwner) || leaseOwner.StartsWith("remote:", StringComparison.Ordinal) ||
-                row.GetString(9).Length == 0 || leaseUntil is null || leaseUntil <= DateTimeOffset.UtcNow)
+            if (request.Action == "resume" ||
+                !HasCurrentLocalLease(row.GetString(7), leaseOwner, row.GetString(9).Length > 0, leaseUntil, DateTimeOffset.UtcNow))
                 throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Only a running local job with a current lease can be paused or stopped.");
             var pending = row.GetString(5);
             var updatedAt = (DateTimeOffset)FromDb(row.GetValue(10), typeof(DateTimeOffset))!;

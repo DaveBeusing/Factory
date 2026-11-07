@@ -357,13 +357,17 @@ async function loadProjectRecovery(selected=projectRecovery.selected){
   connected=true;
   const project=projects.find(item=>item.id===selected)||projects[0];
   projectRecovery={projects,selected:project?.id||'',loading:true};
-  if(project?.canReconcileBudget){
+  if(project&&(project.canOperate||project.canReconcileBudget)){
    const path='viewer/projects/'+encodeURIComponent(project.id);
-   const [summary,goals,providers,receipts]=await Promise.all([
-    api(path),api(path+'/goal-reservations'),api(path+'/provider-reservations'),api(path+'/executor-receipts')
+   const [operations,budget]=await Promise.all([
+    project.canOperate?api(path+'/jobs/operations'):[],
+    project.canReconcileBudget?Promise.all([
+     api(path),api(path+'/goal-reservations'),api(path+'/provider-reservations'),api(path+'/executor-receipts')
+    ]):[]
    ]);
    if(request!==recoveryRequest)return;
-   Object.assign(projectRecovery,{summary,goals,providers,receipts});
+   const [summary,goals,providers,receipts]=budget;
+   Object.assign(projectRecovery,{operations,summary,goals,providers,receipts});
   }
  }catch(error){
   if(request!==recoveryRequest)return;
@@ -374,17 +378,30 @@ async function loadProjectRecovery(selected=projectRecovery.selected){
   if(request===recoveryRequest){projectRecovery.loading=false;render();statusFromHealth();}
  }
 }
+const projectJobActions={pause:'Pause job',stop:'Stop job',resume:'Resume job',reconcile:'Review and requeue'};
+function renderProjectJobOperations(jobs){
+ const rows=jobs.map(job=>{
+  const controls=job.actions.map(action=>`<button class="tiny-button" data-act="project-job-operation"
+   data-id="${esc(job.id)}" data-index="${esc(action)}">${esc(projectJobActions[action])}</button>`).join('');
+  const pending=job.requestedState?`<small>Requested: ${esc(job.requestedState)} · waiting for the runner</small>`:'';
+  return `<tr><td><strong>${esc(job.title)}</strong></td><td>${badge(job.state)}${pending}</td>
+   <td>${esc(job.mode)}</td><td><div class="tiny-actions">${controls}</div></td></tr>`;
+ }).join('');
+ return card('Project job operations','Control jobs and review interrupted local executions.',
+  rows?table(['Work package','State','Execution mode','Actions'],rows):empty('layers','No jobs','This project has no work packages.'));
+}
 function renderProjectRecovery(){
  const {projects,selected,loading,error,summary,goals,providers,receipts}=projectRecovery;
  const project=projects.find(item=>item.id===selected);
  const picker=projects.length?'<label for="recovery-project">Project</label> <select id="recovery-project">'+projects.map(item=>
   `<option value="${esc(item.id)}" ${item.id===selected?'selected':''}>${esc(item.name)}</option>`).join('')+'</select>':'';
- let result=header('Project recovery','Review held budgets and recover verified executor usage for a project.');
- result+=card('Project access','Recovery actions require the Budget Reconciler role for the selected project.',
+ let result=header('Project recovery','Control work packages, review interrupted jobs and settle held budgets.');
+ result+=card('Project access','Job actions require an Operator grant. Budget recovery requires a Budget Reconciler grant.',
   `<div class="field">${picker}</div>`,null,'<button class="button button-muted" data-act="refresh-project-recovery">Refresh projects</button>');
  if(loading)return result+'<p role="status">Loading project recovery…</p>';
  if(error)return result+`<p role="alert">${esc(error)}</p>`;
  if(!project)return result+empty('folder','No granted projects','Ask an administrator for project access.');
+ if(project.canOperate)result+=renderProjectJobOperations(projectRecovery.operations);
  if(!project.canReconcileBudget)return result+empty('shield','Budget Reconciler access required','Your grant for this project does not include budget recovery.');
  const goalRows=goals.map(hold=>{
   const goal=summary.goals.find(item=>item.id===hold.goalId);
@@ -412,6 +429,45 @@ function renderProjectRecovery(){
   goalRows?table(['Goal','Work package','Reserved','Consumed',''],goalRows):empty('check','No held goal reservations','No goal reservations require settlement.'))}
   ${card('Held executor turns','Recover final usage from the configured executor.',
   receiptRows?table(['Work package','Provider','Model',''],receiptRows):empty('check','No held executor turns','No executor receipts require recovery.'))}</div>`;
+}
+async function submitProjectRecovery(context,projectId,path,body,message){
+ let result;
+ try{result=await api(path,'POST',body);}
+ catch(error){
+  if(projectRecovery===context&&[401,403,404].includes(error.status)){
+   $('form-modal').close();
+   await loadProjectRecovery(projectId);
+  }
+  throw error;
+ }
+ if(projectRecovery===context){
+  notify(result===null?'Request accepted. Waiting for the runner.':message);
+  await loadProjectRecovery(projectId);
+ }
+}
+function formProjectJobOperation(id,action){
+ const context=projectRecovery;
+ const project=context.projects.find(item=>item.id===context.selected&&item.canOperate);
+ if(!project||context.loading||context.error)return;
+ const job=context.operations.find(item=>item.id===id);
+ if(!job?.actions.includes(action))return;
+ const reconcile=action==='reconcile';
+ const review=reconcile||action==='resume'&&job.reviewBeforeResume;
+ const evidence=review?field('reviewed',reconcile
+  ?'I reviewed the stopped process and clean worktree checkpoint':'I reviewed the worktree and any external changes',false,'checkbox'):'';
+ const checkpoint=reconcile?`<p class="subtext">Checkpoint <code>${esc(job.checkpointCommit)}</code></p>`:'';
+ openForm(projectJobActions[action],project.name+' · '+job.title,
+  checkpoint+field('reason',review?'Evidence and review justification':'Reason (optional)','','textarea')+evidence,
+  async form=>{
+   if(projectRecovery!==context)throw new Error('Project recovery changed. Review the selected project again.');
+   const reason=values(form).reason.trim(), reviewed=form.elements.reviewed?.checked||false;
+   if(review&&(!reviewed||reason.length<(reconcile?10:1)))
+    throw new Error(reconcile?'Confirm the review and enter at least 10 characters of evidence.':'Confirm the review and record what you inspected.');
+   if(reason.length>(reconcile?1000:2000))throw new Error('The reason is too long.');
+   const path='viewer/projects/'+encodeURIComponent(project.id)+'/jobs/'+encodeURIComponent(job.id);
+   await submitProjectRecovery(context,project.id,path+(reconcile?'/reconcile':'/action'),
+    {action,reviewed,reason},reconcile?'Job requeued after review':'Job state updated');
+  },projectJobActions[action]);
 }
 function formProjectRecovery(action,id){
  const context=projectRecovery;
@@ -449,18 +505,8 @@ function formProjectRecovery(action,id){
     if(goal)Object.assign(body,{reservationId:hold.id,finalTokensIn:totals[0],finalTokensOut:totals[1]});
     else Object.assign(body,{finalInputTokens:totals[0],finalOutputTokens:totals[1]});
    }
-   try{await api(path,'POST',body);}
-   catch(error){
-    if(projectRecovery===context&&[401,403,404].includes(error.status)){
-     $('form-modal').close();
-     await loadProjectRecovery(project.id);
-    }
-    throw error;
-   }
-   if(projectRecovery===context){
-    notify(goal?'Goal reservation settled':provider?'Provider reservation settled':'Executor receipt recovered');
-    await loadProjectRecovery(project.id);
-   }
+   await submitProjectRecovery(context,project.id,path,body,
+    goal?'Goal reservation settled':provider?'Provider reservation settled':'Executor receipt recovered');
   },title);
 }
 function renderRecovery(){
@@ -1025,6 +1071,7 @@ document.addEventListener('click',async e=>{const btn=e.target.closest('[data-vi
   const action=btn.dataset.act;
   if(btn.dataset.view==='recovery'){nav('recovery');await loadProjectRecovery();}
   if(action==='refresh-project-recovery')await loadProjectRecovery();
+  if(action==='project-job-operation')formProjectJobOperation(btn.dataset.id,btn.dataset.index);
   if(action==='settle-project-goal'||action==='settle-project-provider'||action==='recover-project-receipt')
    formProjectRecovery(action,btn.dataset.id);
   return;

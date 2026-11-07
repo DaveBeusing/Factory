@@ -1597,7 +1597,7 @@ await TestAsync("Remote restore preserves holds, fences replay and accepts only 
     RemoteRestoreTests.RunAsync);
 await TestAsync("Project viewers can only read their granted projects and redacted quality evidence",
     ProjectViewerTests.RunAsync);
-await TestAsync("Project planners can write only their own goal drafts and commit audit atomically",
+await TestAsync("Project planners and operators enforce scoped writes and atomic audit",
     ProjectPlanningTests.RunAsync);
 await TestAsync("Project plan revisions and reviewed adoption enforce scope and atomic audit",
     ScopedPlanTests.RunAsync);
@@ -2185,7 +2185,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 14, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 15, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -2690,7 +2690,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 14);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 15);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3190,7 +3190,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 14);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 15);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

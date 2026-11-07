@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 
 namespace Factory;
 
-internal sealed class ScopedPlanRejected(DraftGoalStatus status, string? message = null) : Exception(message)
+internal sealed class ScopedProjectRejected(DraftGoalStatus status, string? message = null) : Exception(message)
 {
     internal DraftGoalStatus Status { get; } = status;
 }
@@ -38,7 +38,7 @@ public sealed partial class StateStore
         using var db = Open();
         var (scope, snapshot) = ReadPlanPreflight(db, verifier, projectId, goalId,
             draft.ProjectId == Guid.Empty ? null : draft.ProjectId);
-        if (draft.GoalId != Guid.Empty && draft.GoalId != goalId) throw new ScopedPlanRejected(DraftGoalStatus.NotFound);
+        if (draft.GoalId != Guid.Empty && draft.GoalId != goalId) throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
         VerifyPlanSave(scope, draft);
         Planning.Validate(draft);
         draft.ProjectId = projectId;
@@ -62,7 +62,7 @@ public sealed partial class StateStore
         {
             (scope, snapshot) = ReadPlanPreflight(db, read, verifier, projectId, goalId);
             grantRevision = ReadPlannerGrantRevision(db, read, scope)
-                ?? throw new ScopedPlanRejected(DraftGoalStatus.Forbidden);
+                ?? throw new ScopedProjectRejected(DraftGoalStatus.Forbidden);
             VerifyGenerationTarget(db, read, scope);
             snapshot.ProviderAssignments = ReadViewerRows(db, read, projectId, """
                 SELECT provider_id FROM provider_assignments WHERE project_id=$project AND role='planner';
@@ -84,7 +84,7 @@ public sealed partial class StateStore
                     VerifyGenerationTarget(connection, tx, ReadPlanScope(connection, tx, verifier, projectId, goalId));
                     var currentProfile = ProviderRouter.Resolve(settings, state, projectId, "planner");
                     if (currentProfile != profile || ProviderRouter.EffectiveModel(settings, currentProfile, "medium") != model)
-                        throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "The project provider route changed. Retry planning.");
+                        throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The project provider route changed. Retry planning.");
                 },
                 auditReservation: (connection, tx, usageId) => Execute(connection, tx, """
                     INSERT INTO project_planning_audit(subject_id,project_id,target_id,operation,at)
@@ -102,13 +102,13 @@ public sealed partial class StateStore
         void VerifyGenerationTarget(SqliteConnection connection, SqliteTransaction tx, PlanScope current)
         {
             if (current.SubjectId != scope.SubjectId || ReadPlannerGrantRevision(connection, tx, current) != grantRevision)
-                throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "The Planner grant changed. Start a new planning request.");
+                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The Planner grant changed. Start a new planning request.");
             VerifyPlanSave(current, expected);
             if (current.Project.Status != "active")
-                throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Provider planning requires an active project.");
+                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Provider planning requires an active project.");
             if (current.Project.Path != scope.Project.Path || current.Project.Origin != scope.Project.Origin ||
                 current.Project.BaseBranch != scope.Project.BaseBranch)
-                throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "The project checkout changed. Retry planning.");
+                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The project checkout changed. Retry planning.");
         }
     }
 
@@ -147,11 +147,11 @@ public sealed partial class StateStore
         var (scope, snapshot) = ReadPlanPreflight(db, verifier, projectId, goalId);
         RequireDraftPlanTarget(scope);
         if (scope.LegacyPlan is not null)
-            throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Save the legacy plan as a new revision and review it before adoption.");
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Save the legacy plan as a new revision and review it before adoption.");
         if (scope.StoredPlan is not { } plan || plan.Revision != input.PlanRevision || input.PlanRevision == Guid.Empty)
-            throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Review the current saved plan revision.");
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Review the current saved plan revision.");
         if (!input.ReviewedExistingWork)
-            throw new ScopedPlanRejected(DraftGoalStatus.Invalid, "Confirm review of existing work before adoption.");
+            throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Confirm review of existing work before adoption.");
         Planning.VerifyAdoption(plan, snapshot, scope.Project, scope.Goal, input.Mode, true, input.PlanRevision);
         var jobs = Planning.BuildAdoptedJobs(plan, scope.Goal, input.Mode);
 
@@ -172,7 +172,7 @@ public sealed partial class StateStore
     }
 
     private static string RequirePlanVerifier(string authorization) =>
-        ReadViewerVerifier(authorization) ?? throw new ScopedPlanRejected(DraftGoalStatus.Unauthorized);
+        ReadViewerVerifier(authorization) ?? throw new ScopedProjectRejected(DraftGoalStatus.Unauthorized);
 
     private (PlanScope Scope, FactoryState Snapshot) ReadPlanPreflight(SqliteConnection db, string verifier,
         Guid projectId, Guid goalId, Guid? requestedProjectId = null)
@@ -200,14 +200,14 @@ public sealed partial class StateStore
         Guid goalId, Guid? requestedProjectId = null)
     {
         if (CheckDraftAccess(db, tx, verifier, projectId, goalId, requestedProjectId, out var actor) is { } denial)
-            throw new ScopedPlanRejected(denial);
+            throw new ScopedProjectRejected(denial);
         using var query = Command(db, tx, """
             SELECT p.path, p.origin, p.base_branch, p.status, g.objective, g.state
             FROM goals g JOIN projects p ON p.id=g.project_id
             WHERE p.id=$project AND g.id=$goal;
             """, ("$project", projectId), ("$goal", goalId));
         using var row = query.ExecuteReader();
-        if (!row.Read()) throw new ScopedPlanRejected(DraftGoalStatus.NotFound);
+        if (!row.Read()) throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
         var project = new ProjectInfo
         {
             Id = projectId, Path = row.GetString(0), Origin = row.GetString(1), BaseBranch = row.GetString(2),
@@ -225,30 +225,30 @@ public sealed partial class StateStore
         var legacy = stored is null ? MissionControlManager.ReadLegacyPlan(this, goalId) : null;
         var plan = stored ?? legacy;
         if (plan is not null && (plan.ProjectId != projectId || plan.GoalId != goalId))
-            throw new ScopedPlanRejected(DraftGoalStatus.NotFound);
+            throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
         if (plan?.Preflight is { } preflight && (preflight.ProjectId != projectId || preflight.GoalId != goalId))
-            throw new ScopedPlanRejected(DraftGoalStatus.NotFound);
+            throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
         return new(actor, project, goal, stored, legacy);
     }
 
     private static void RequireDraftPlanTarget(PlanScope scope)
     {
         if (scope.Goal.State != "draft" || scope.Project.Status == "archived")
-            throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "Only drafts in non-archived projects can be changed.");
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Only drafts in non-archived projects can be changed.");
     }
 
     private static void VerifyPlanSave(PlanScope scope, FactoryPlan draft)
     {
         RequireDraftPlanTarget(scope);
         if (draft.GoalRevision != Planning.GoalRevision(scope.Goal) || scope.Plan?.Revision != draft.Revision)
-            throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "The goal or plan changed. Reopen the current revision.");
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The goal or plan changed. Reopen the current revision.");
     }
 
     private static void VerifyPlanCheckout(ProjectInfo source, ProjectInfo current, string commit)
     {
         if (current.Path != source.Path || current.Origin != source.Origin ||
             WorkPackagePreflight.MasterCommit(current) != commit)
-            throw new ScopedPlanRejected(DraftGoalStatus.Conflict, "The project checkout or master changed.");
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The project checkout or master changed.");
     }
 
     private static void AuditPlan(SqliteConnection db, SqliteTransaction tx, PlanScope scope, FactoryPlan plan,

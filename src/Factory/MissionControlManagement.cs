@@ -351,28 +351,34 @@ public static class MissionControlManager
         return store.Change(s =>
         {
             var j = s.Jobs.Single(j => j.Id == id);
-            if (action is "pause" or "stop")
-            {
-                Require(j.State == JobStates.Queued || j.State is JobStates.Paused or JobStates.Stopped, "Only queued jobs can be paused/stopped immediately");
-                j.State = action == "pause" ? JobStates.Paused : JobStates.Stopped;
-            }
-            else
-            {
-                Require(j.State is JobStates.Paused or JobStates.Stopped or JobStates.Failed or JobStates.Blocked,
-                    "Job is not eligible for retry or resumption");
-                Require(j.Stage != "scope",
-                    "Scope violation must be resolved through a reviewed contract amendment before retry");
-                Require(j.Stage != "reconcile",
-                    "Expired lease must pass explicit process and worktree reconciliation before retry");
-                Require(!j.StartedAt.HasValue || input.Reviewed, "Inspect the existing worktree and acknowledge review before restarting");
-                Require(!j.StartedAt.HasValue || j.Stage is not ("commit" or "push" or "pr") || input.Reviewed,
-                    "Git side effects must be reviewed before restarting");
-                j.State = JobStates.Queued; j.Error = ""; j.RequestedState = "";
-            }
-            j.UpdatedAt = DateTimeOffset.UtcNow;
+            ApplyInactiveJobControl(j, input);
             Log(s, id, "job_control", action + " " + input.Reason);
             return j;
         });
+    }
+
+    internal static void ApplyInactiveJobControl(FactoryJob j, ControlInput input)
+    {
+        var action = input.Action;
+        if (action is "pause" or "stop")
+        {
+            Require(j.State == JobStates.Queued || j.State is JobStates.Paused or JobStates.Stopped, "Only queued jobs can be paused/stopped immediately");
+            j.State = action == "pause" ? JobStates.Paused : JobStates.Stopped;
+        }
+        else
+        {
+            Require(j.State is JobStates.Paused or JobStates.Stopped or JobStates.Failed or JobStates.Blocked,
+                "Job is not eligible for retry or resumption");
+            Require(j.Stage != "scope",
+                "Scope violation must be resolved through a reviewed contract amendment before retry");
+            Require(j.Stage != "reconcile",
+                "Expired lease must pass explicit process and worktree reconciliation before retry");
+            Require(!j.StartedAt.HasValue || input.Reviewed, "Inspect the existing worktree and acknowledge review before restarting");
+            Require(!j.StartedAt.HasValue || j.Stage is not ("commit" or "push" or "pr") || input.Reviewed,
+                "Git side effects must be reviewed before restarting");
+            j.State = JobStates.Queued; j.Error = ""; j.RequestedState = "";
+        }
+        j.UpdatedAt = DateTimeOffset.UtcNow;
     }
     public static WorkerInfo RegisterWorker(StateStore store, WorkerInput input)
     {

@@ -9,6 +9,12 @@ internal sealed class ProjectViewerEndpoint
     internal static void Map(WebApplication app, StateStore store, FactorySettings settings)
     {
         var viewer = new ProjectViewerEndpoint();
+        app.MapPost("/api/viewer/projects/{projectId:guid}/jobs/{jobId:guid}/action",
+            (HttpContext context, Guid projectId, Guid jobId, ProjectJobControlInput input) =>
+            {
+                try { return Results.Ok(store.ControlProjectJob(context.Request.Headers.Authorization.ToString(), projectId, jobId, input)); }
+                catch (ScopedProjectRejected ex) { return PlanFailure(ex); }
+            }).WithMetadata(viewer);
         const string planRoute = "/api/viewer/projects/{projectId:guid}/plans/{goalId:guid}";
         app.MapGet(planRoute, (HttpContext context, Guid projectId, Guid goalId) =>
             PlanResponse(() => store.ReadScopedPlan(context.Request.Headers.Authorization.ToString(), projectId, goalId)))
@@ -85,11 +91,11 @@ internal sealed class ProjectViewerEndpoint
         catch (Exception ex) when (IsPlanFailure(ex)) { return PlanFailure(ex); }
     }
 
-    private static bool IsPlanFailure(Exception ex) => ex is ScopedPlanRejected or ArgumentException or InvalidOperationException;
+    private static bool IsPlanFailure(Exception ex) => ex is ScopedProjectRejected or ArgumentException or InvalidOperationException;
 
     private static IResult PlanFailure(Exception failure)
     {
-        if (failure is ScopedPlanRejected ex)
+        if (failure is ScopedProjectRejected ex)
         {
             return ex.Status switch
             {

@@ -76,4 +76,14 @@ A Planner grant includes project reads. Revoking it leaves any separate Viewer g
 
 The route determines the project. If a body supplies a project ID, it must match the route. Cross-project requests return HTTP 404, and a Viewer attempting a write in a granted project receives HTTP 403. The controller checks the credential, grant and goal in the same SQLite write transaction that records the goal and the audit row. The audit stores the server-resolved subject, project, target, operation and timestamp.
 
-Saved-plan changes, provider-backed planning, reviewed adoption, and Mission Control integration follow in later increments.
+### Saved revisions and adoption
+
+These endpoints require a Planner grant for the goal's project.
+
+- `GET /api/viewer/projects/{projectId}/plans/{goalId}` returns the current `goalRevision` and the latest `plan`, if available.
+- `PUT /api/viewer/projects/{projectId}/plans/{goalId}` saves the supplied `packages`. Send the current `goalRevision` and the previously read plan `revision` when replacing a saved plan. The server computes the master preflight and returns the new revision.
+- `POST /api/viewer/projects/{projectId}/plans/{goalId}/adopt` requires the exact `planRevision` reviewed, `reviewedExistingWork: true`, and a `mode` of `local` or `remote`. The server rechecks master and the applicable PR and issue inventory before creating jobs.
+
+A stale goal, stale plan revision or changed master returns HTTP 409. Plan saves commit the revision and audit together. Adoption commits the jobs, goal state and audit together. The audit identifies the goal and exact plan revision, and records the review acknowledgment on adoption.
+
+Schema 14 stores new plan revisions in SQLite. Existing plan files remain readable until a SQLite revision takes precedence. Include the SQLite backup and any legacy plan files in controller backups. Provider-backed planning under human credentials and Mission Control integration follow in later increments.

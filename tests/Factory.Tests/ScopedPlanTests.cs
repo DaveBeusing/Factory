@@ -1,0 +1,181 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
+using Factory;
+using Microsoft.Data.Sqlite;
+
+internal static class ScopedPlanTests
+{
+    internal static async Task RunAsync()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var root = Path.Combine(Path.GetTempPath(), "factory-scoped-plans-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var repository = Path.Combine(root, "repo");
+            Directory.CreateDirectory(repository);
+            Git("init", "-b", "master");
+            Commit("Initial master");
+            var home = Path.Combine(root, "state");
+            var store = new StateStore(home);
+            var first = new ProjectInfo { Name = "First", Path = repository };
+            var second = new ProjectInfo { Name = "Second" };
+            var goal = new FactoryGoal { ProjectId = first.Id, Objective = "Draft planning fixture" };
+            var foreign = new FactoryGoal { ProjectId = second.Id, Objective = "Foreign draft" };
+            store.Change(state =>
+            {
+                state.Projects.AddRange([first, second]);
+                state.Goals.AddRange([goal, foreign]);
+            });
+            var alice = store.CreateViewer("Alice");
+            var bob = store.CreateViewer("Bob");
+            store.SetViewerGrant(alice.SubjectId, first.Id, grant: true, planner: true);
+            store.SetViewerGrant(bob.SubjectId, first.Id, grant: true);
+            store.SetViewerGrant(bob.SubjectId, second.Id, grant: true, planner: true);
+            var settings = new FactorySettings();
+            settings.EnsureCredentials();
+            File.WriteAllText(Path.Combine(home, "settings.json"), Json.Stringify(settings));
+            using var dashboard = await RemoteRestoreTests.DashboardProcess.StartAsync(
+                home, "unused-executor-test-token", "http://127.0.0.1:0", timeout.Token);
+            using var client = new HttpClient(new HttpClientHandler { UseProxy = false })
+            {
+                BaseAddress = new Uri(dashboard.Address)
+            };
+            using var db = new SqliteConnection(new SqliteConnectionStringBuilder
+            {
+                DataSource = Path.Combine(home, "factory.sqlite3"), Pooling = false
+            }.ToString());
+            db.Open();
+
+            var project = $"/api/viewer/projects/{first.Id}";
+            var path = project + $"/plans/{goal.Id}";
+            var foreignPath = project + $"/plans/{foreign.Id}";
+            var otherPath = $"/api/viewer/projects/{second.Id}/plans/{foreign.Id}";
+            var view = await Request(alice.Token, HttpMethod.Get, path, HttpStatusCode.OK);
+            using var payload = JsonDocument.Parse(view);
+            var goalRevision = payload.RootElement.GetProperty("goalRevision").GetString()!;
+            var draft = new FactoryPlan
+            {
+                GoalRevision = goalRevision,
+                Packages = [new PlannedPackage { Title = "First package", Description = "Review the fixture scope", Files = ["README.md"] }]
+            };
+            await Request(bob.Token, HttpMethod.Put, path, HttpStatusCode.Forbidden, draft);
+            await Request(alice.Token, HttpMethod.Get, otherPath, HttpStatusCode.NotFound);
+            await Request(alice.Token, HttpMethod.Put, foreignPath, HttpStatusCode.NotFound, draft);
+            await Request(alice.Token, HttpMethod.Post, foreignPath + "/adopt", HttpStatusCode.NotFound, new PlanAdoptInput());
+            draft.GoalId = foreign.Id;
+            await Request(alice.Token, HttpMethod.Put, path, HttpStatusCode.NotFound, draft);
+            draft.GoalId = goal.Id;
+            draft.ProjectId = second.Id;
+            await Request(alice.Token, HttpMethod.Put, path, HttpStatusCode.NotFound, draft);
+            draft.ProjectId = first.Id;
+            Require(AuditCount() == 0, "Denied requests wrote planning audit entries");
+
+            RejectAudit();
+            await Request(alice.Token, HttpMethod.Put, path, HttpStatusCode.InternalServerError, draft);
+            Require(MissionControlManager.ReadPlan(store, goal.Id) is null && AuditCount() == 0, "Plan save escaped audit rollback");
+            Execute("DROP TRIGGER reject_plan_audit;");
+
+            var firstPlan = await Save();
+            Require(MissionControlManager.ReadPlan(store, goal.Id)?.Revision == firstPlan.Revision, "Administrator cannot read scoped revision");
+            draft.Revision = firstPlan.Revision;
+            draft.Packages[0].Title = "Revised package";
+            var secondPlan = await Save();
+            await Request(alice.Token, HttpMethod.Put, path, HttpStatusCode.Conflict, draft);
+            await Adopt(firstPlan.Revision, HttpStatusCode.Conflict);
+            await Adopt(secondPlan.Revision, HttpStatusCode.BadRequest, reviewed: false);
+
+            store.Change(state => state.Goals.Single(item => item.Id == goal.Id).AcceptanceCriteria.Add("New criterion"));
+            await Adopt(secondPlan.Revision, HttpStatusCode.Conflict);
+            draft.Revision = secondPlan.Revision;
+            await Request(alice.Token, HttpMethod.Put, path, HttpStatusCode.Conflict, draft);
+            draft.GoalRevision = Planning.GoalRevision(store.Read().Goals.Single(item => item.Id == goal.Id));
+            var thirdPlan = await Save();
+            Commit("Advance master");
+            await Adopt(thirdPlan.Revision, HttpStatusCode.Conflict);
+            draft.Revision = thirdPlan.Revision;
+            var current = await Save();
+            Require(AuditCount() == 4 && store.Read().Jobs.Count == 0, "Rejected adoption wrote state");
+
+            RejectAudit();
+            await Adopt(current.Revision, HttpStatusCode.InternalServerError);
+            var rolledBack = store.Read();
+            Require(rolledBack.Jobs.Count == 0 && rolledBack.Goals.Single(item => item.Id == goal.Id).State == "draft",
+                "Adoption escaped audit rollback");
+            Execute("DROP TRIGGER reject_plan_audit;");
+            await Adopt(current.Revision, HttpStatusCode.OK);
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            var final = store.Read();
+            Require(final.Jobs.Single().ProjectId == first.Id && final.Jobs.Single().GoalId == goal.Id &&
+                final.Goals.Single(item => item.Id == goal.Id).State == "active" && AuditCount() == 5,
+                "Reviewed adoption did not commit expected state and audit");
+            using var audit = db.CreateCommand();
+            audit.CommandText = """
+                SELECT subject_id, project_id, target_id, plan_revision, reviewed_existing_work
+                FROM project_planning_audit WHERE operation='plan_adopted';
+                """;
+            using var row = audit.ExecuteReader();
+            Require(row.Read() && Guid.Parse(row.GetString(0)) == alice.SubjectId &&
+                Guid.Parse(row.GetString(1)) == first.Id && Guid.Parse(row.GetString(2)) == goal.Id &&
+                Guid.Parse(row.GetString(3)) == current.Revision && row.GetBoolean(4) && !row.Read(),
+                "Adoption audit did not bind the server-resolved actor and reviewed revision");
+
+            async Task<FactoryPlan> Save() => JsonSerializer.Deserialize<FactoryPlan>(
+                await Request(alice.Token, HttpMethod.Put, path, HttpStatusCode.OK, draft), Json.Options)!;
+            Task<string> Adopt(Guid? revision, HttpStatusCode status, bool reviewed = true) =>
+                Request(alice.Token, HttpMethod.Post, path + "/adopt", status,
+                    new PlanAdoptInput { PlanRevision = revision!.Value, ReviewedExistingWork = reviewed });
+
+            async Task<string> Request(string token, HttpMethod method, string url, HttpStatusCode status, object? body = null)
+            {
+                using var request = new HttpRequestMessage(method, url);
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                if (body is not null) request.Content = JsonContent.Create(body);
+                using var response = await client.SendAsync(request, timeout.Token);
+                var content = await response.Content.ReadAsStringAsync(timeout.Token);
+                Require(response.StatusCode == status, $"{method} {url}: expected {status}, got {response.StatusCode}: {content}");
+                return content;
+            }
+
+            void RejectAudit() => Execute("""
+                CREATE TRIGGER reject_plan_audit BEFORE INSERT ON project_planning_audit
+                BEGIN SELECT RAISE(ABORT, 'Fixture audit failure'); END;
+                """);
+            void Execute(string sql)
+            {
+                using var command = db.CreateCommand();
+                command.CommandText = sql;
+                command.ExecuteNonQuery();
+            }
+            long AuditCount()
+            {
+                using var command = db.CreateCommand();
+                command.CommandText = "SELECT COUNT(*) FROM project_planning_audit;";
+                return (long)command.ExecuteScalar()!;
+            }
+            void Commit(string message) => Git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "--allow-empty", "-m", message);
+            void Git(params string[] args)
+            {
+                var result = Commands.Run("git", args, repository, 20);
+                Require(result.Ok, "Git fixture failed: " + result.Error);
+            }
+        }
+        finally
+        {
+            var objects = Path.Combine(root, "repo", ".git", "objects");
+            if (OperatingSystem.IsWindows() && Directory.Exists(objects))
+            {
+                foreach (var file in Directory.EnumerateFiles(objects, "*", SearchOption.AllDirectories))
+                    File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
+            }
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void Require(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+}

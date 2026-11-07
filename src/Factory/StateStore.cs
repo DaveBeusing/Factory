@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 13;
+    private const int DatabaseVersion = 14;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -302,12 +302,16 @@ public sealed partial class StateStore
         var schemaVersion = Convert.ToInt32(version.ExecuteScalar(), CultureInfo.InvariantCulture);
         if (schemaVersion != DatabaseVersion)
         {
-            if (schemaVersion != 12)
+            if (schemaVersion != 13)
             {
-                UpgradeToSchema11(db, tx, schemaVersion);
-                UpgradeProjectReaders(db, tx);
+                if (schemaVersion != 12)
+                {
+                    UpgradeToSchema11(db, tx, schemaVersion);
+                    UpgradeProjectReaders(db, tx);
+                }
+                UpgradeProjectPlanning(db, tx);
             }
-            UpgradeProjectPlanning(db, tx);
+            UpgradePlanRevisions(db, tx);
         }
         tx.Commit();
     }
@@ -727,7 +731,9 @@ public sealed partial class StateStore
         }
     }
 
-    public T Change<T>(Func<FactoryState, T> mutator)
+    public T Change<T>(Func<FactoryState, T> mutator) => Change((state, _, _) => mutator(state));
+
+    internal T Change<T>(Func<FactoryState, SqliteConnection, SqliteTransaction, T> mutator)
     {
         using var db = Open();
         using var tx = db.BeginTransaction();
@@ -745,7 +751,7 @@ public sealed partial class StateStore
             }
             return snapshot;
         }).ToArray();
-        var result = mutator(state);
+        var result = mutator(state, db, tx);
         Save(db, tx, state, before);
         tx.Commit();
         return result;
@@ -761,6 +767,12 @@ public sealed partial class StateStore
     {
         using var db = Open();
         using var tx = db.BeginTransaction();
+        AppendEvent(db, tx, jobId, type, message);
+        tx.Commit();
+    }
+
+    private static void AppendEvent(SqliteConnection db, SqliteTransaction tx, Guid? jobId, string type, string message)
+    {
         using (var next = Command(db, tx, "SELECT COALESCE(MAX(position),-1)+1 FROM events;"))
         {
             var position = Convert.ToInt64(next.ExecuteScalar(), CultureInfo.InvariantCulture);
@@ -776,7 +788,6 @@ public sealed partial class StateStore
                 SELECT id FROM events ORDER BY position DESC LIMIT -1 OFFSET 20000
             );
             """);
-        tx.Commit();
     }
 
     /// <summary>

@@ -144,6 +144,27 @@ internal static class ProjectPlanningTests
             await Request(bob.Token, HttpMethod.Post, control, HttpStatusCode.BadRequest, new { action = "resume", reviewed = true });
             await Request(bob.Token, HttpMethod.Post, control, HttpStatusCode.Conflict, new { action = "resume", reason = "Reviewed" });
             var resume = new { action = "resume", reviewed = true, reason = "Worktree inspected" };
+            var usage = new ProviderUsageEntry { ProjectId = first.Id, JobId = local.Id, ProviderId = "codex", InputTokens = 30 };
+            var reservation = new ProviderBudgetReservation
+            {
+                ProjectId = first.Id, UsageId = usage.Id, ProviderId = usage.ProviderId, Reserved = 512, Consumed = 30
+            };
+            store.Change(state =>
+            {
+                state.ProviderUsages.Add(usage);
+                state.ProviderBudgetReservations.Add(reservation);
+            });
+            await Request(bob.Token, HttpMethod.Post, control, HttpStatusCode.Conflict, resume);
+            store.Change(state => ProviderBudgetLedger.Hold(state,
+                state.ProviderBudgetReservations.Single(item => item.Id == reservation.Id), "Unverified fixture usage"));
+            await Request(bob.Token, HttpMethod.Post, control, HttpStatusCode.Conflict, resume);
+            Require(store.Job(local.Id).State == JobStates.Stopped &&
+                store.Read().ProviderBudgetReservations.Single(item => item.Id == reservation.Id).State == "held",
+                "A rejected resume must preserve the stopped job and hold");
+            ProviderBudgetReconciliation.Reconcile(store, reservation.Id, new()
+            {
+                FinalInputTokens = 30, Reviewed = true, Reason = "Verified provider receipt"
+            });
             Execute("""
                 CREATE TRIGGER reject_control_audit BEFORE INSERT ON project_operation_audit
                 BEGIN SELECT RAISE(ABORT, 'PRIVATE-CONTROL-FAILURE'); END;

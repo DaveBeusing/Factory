@@ -101,6 +101,6 @@ factory viewer grant-operator --subject SUBJECT_GUID --project PROJECT_NAME
 factory viewer revoke-operator --subject SUBJECT_GUID --project PROJECT_NAME
 ```
 
-`POST /api/viewer/projects/{projectId}/jobs/{jobId}/action` accepts `pause`, `stop`, or `resume` as the `action` for jobs without a lease. Resuming a previously started job requires `reviewed: true` and a `reason` that records the inspection. The controller checks the grant and job ownership again in the write transaction. The same transaction records the actor, job, prior and resulting state, review acknowledgment, reason and timestamp.
+`POST /api/viewer/projects/{projectId}/jobs/{jobId}/action` accepts `pause`, `stop`, or `resume` as the `action` for jobs without a lease. Resuming a previously started job requires `reviewed: true` and a `reason` that records the inspection. Active or held provider reservations for the job must be settled before resuming, including for jobs without a goal budget. The controller checks the grant, job ownership and applicable reservations in the write transaction. The same transaction records the actor, job, prior and resulting state, review acknowledgment, reason and timestamp.
 
 Active execution control and reviewed recovery follow in later increments.

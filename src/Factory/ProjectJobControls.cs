@@ -67,6 +67,15 @@ public sealed partial class StateStore
         row.Close();
         if (request.Action == "resume" && job.StartedAt.HasValue && reason.Length == 0)
             throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Record what was reviewed before resuming this job.");
+        if (request.Action == "resume")
+        {
+            using var unsettled = Command(db, tx, """
+                SELECT 1 FROM provider_budget_reservations r JOIN provider_usages u ON u.id=r.usage_id
+                WHERE u.job_id=$job AND r.state IN ('active','held') LIMIT 1;
+                """, ("$job", jobId));
+            if (unsettled.ExecuteScalar() is not null)
+                throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Settle outstanding provider reservations before resuming this job.");
+        }
         try
         {
             MissionControlManager.ApplyInactiveJobControl(job,

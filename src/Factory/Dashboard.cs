@@ -65,7 +65,9 @@ public static class DashboardHost
                 {
                     app.Logger.LogError(ex, "Project viewer request failed");
                     ctx.Response.StatusCode = StatusCodes.Status500InternalServerError;
-                    await ctx.Response.WriteAsJsonAsync(new { error = "Unable to read project data." });
+                    var error = HttpMethods.IsGet(ctx.Request.Method)
+                        ? "Unable to read project data." : "Unable to save project data.";
+                    await ctx.Response.WriteAsJsonAsync(new { error });
                     return;
                 }
                 ctx.Response.StatusCode = ex is InvalidOperationException or ArgumentException or FileNotFoundException

@@ -60,19 +60,24 @@ public sealed partial class StateStore
         return secret is null ? null : ViewerTokenPrefix + Convert.ToHexString(secret);
     }
 
-    internal bool SetViewerGrant(Guid subjectId, Guid projectId, bool grant)
+    internal bool SetViewerGrant(Guid subjectId, Guid projectId, bool grant, bool planner = false)
     {
         using var db = Open();
         using var tx = db.BeginTransaction();
+        var table = planner ? "planner_project_grants" : "viewer_project_grants";
         using var update = Command(db, tx, grant
-            ? """
-                INSERT INTO viewer_project_grants(subject_id, project_id) VALUES($subject, $project)
+            ? $"""
+                INSERT INTO {table}(subject_id, project_id) VALUES($subject, $project)
                 ON CONFLICT(subject_id, project_id) DO NOTHING;
                 """
-            : "DELETE FROM viewer_project_grants WHERE subject_id=$subject AND project_id=$project;",
+            : $"DELETE FROM {table} WHERE subject_id=$subject AND project_id=$project;",
             ("$subject", subjectId), ("$project", projectId));
         var changed = update.ExecuteNonQuery() == 1;
-        if (changed) AuditViewerAccess(db, tx, subjectId, projectId, grant ? "grant" : "revoke");
+        if (changed)
+        {
+            var operation = grant ? "grant" : "revoke";
+            AuditViewerAccess(db, tx, subjectId, projectId, planner ? operation + "_planner" : operation);
+        }
         tx.Commit();
         return changed;
     }
@@ -140,21 +145,37 @@ public sealed partial class StateStore
     private (bool Authenticated, T? Value) ReadViewerProject<T>(string authorization, Guid projectId,
         Func<SqliteConnection, SqliteTransaction, T?> read) where T : class
     {
+        var verifier = ReadViewerVerifier(authorization);
+        if (verifier is null) return (false, null);
+        using var db = Open();
+        using var tx = db.BeginTransaction(deferred: true);
+        var access = ReadProjectAccess(db, tx, verifier, projectId);
+        // The grant and the scoped projection share one SQLite snapshot.
+        return (access.SubjectId.HasValue, access.CanRead ? read(db, tx) : null);
+    }
+
+    private static string? ReadViewerVerifier(string authorization)
+    {
         if (!AuthenticationHeaderValue.TryParse(authorization, out var header) ||
             !header.Scheme.Equals("Bearer", StringComparison.OrdinalIgnoreCase) ||
             header.Parameter is not { } token || !token.StartsWith(ViewerTokenPrefix, StringComparison.Ordinal) ||
             !WorkerAuthentication.IsValidKey(token[ViewerTokenPrefix.Length..]))
-            return (false, null);
-        var verifier = ViewerVerifier(Convert.FromHexString(token[ViewerTokenPrefix.Length..]));
-        using var db = Open();
-        using var tx = db.BeginTransaction(deferred: true);
-        using var subject = Command(db, tx, "SELECT id FROM viewer_subjects WHERE verifier=$verifier;",
-            ("$verifier", verifier));
-        if (subject.ExecuteScalar() is not string subjectId) return (false, null);
-        using var grant = Command(db, tx, """
-            SELECT 1 FROM viewer_project_grants WHERE subject_id=$subject AND project_id=$project;
-            """, ("$subject", subjectId), ("$project", projectId));
-        // The grant and the scoped projection share one SQLite snapshot.
-        return (true, grant.ExecuteScalar() is null ? null : read(db, tx));
+            return null;
+        return ViewerVerifier(Convert.FromHexString(token[ViewerTokenPrefix.Length..]));
+    }
+
+    private static (Guid? SubjectId, bool CanRead, bool CanPlan) ReadProjectAccess(
+        SqliteConnection db, SqliteTransaction tx, string verifier, Guid projectId)
+    {
+        using var query = Command(db, tx, """
+            SELECT s.id,
+                EXISTS(SELECT 1 FROM viewer_project_grants WHERE subject_id=s.id AND project_id=$project),
+                EXISTS(SELECT 1 FROM planner_project_grants WHERE subject_id=s.id AND project_id=$project)
+            FROM viewer_subjects s WHERE s.verifier=$verifier;
+            """, ("$verifier", verifier), ("$project", projectId));
+        using var row = query.ExecuteReader();
+        if (!row.Read()) return default;
+        var planner = row.GetBoolean(2);
+        return (Guid.Parse(row.GetString(0)), row.GetBoolean(1) || planner, planner);
     }
 }

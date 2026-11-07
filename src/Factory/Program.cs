@@ -61,6 +61,7 @@ Factory | C# / .NET 10
   worker-token --id WORKER_ID
   viewer create --name NAME | viewer rotate|disable --subject GUID
   viewer grant|revoke --subject GUID --project NAME
+  viewer grant-planner|revoke-planner --subject GUID --project NAME
   usage | providers | install-skills [--overwrite]
 Environment: FACTORY_HOME overrides the local state directory.
 """);
@@ -295,13 +296,16 @@ Environment: FACTORY_HOME overrides the local state directory.
                 break;
             case "grant":
             case "revoke":
+            case "grant-planner":
+            case "revoke-planner":
                 var subject = GuidArg(Required(args, "subject"));
                 var project = store.Project(Required(args, "project"));
-                var changed = store.SetViewerGrant(subject, project.Id, grant: args[1] == "grant");
+                var changed = store.SetViewerGrant(subject, project.Id, grant: args[1] is "grant" or "grant-planner",
+                    planner: args[1] is "grant-planner" or "revoke-planner");
                 Print(new { subjectId = subject, projectId = project.Id, changed });
                 break;
             default:
-                throw new ArgumentException("Expected viewer create, rotate, disable, grant or revoke");
+                throw new ArgumentException("Expected viewer create, rotate, disable, grant, revoke, grant-planner or revoke-planner");
         }
         return 0;
     }

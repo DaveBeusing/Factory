@@ -9,6 +9,12 @@ internal sealed class ProjectViewerEndpoint
     internal static void Map(WebApplication app, StateStore store)
     {
         var viewer = new ProjectViewerEndpoint();
+        app.MapPost("/api/viewer/projects/{projectId:guid}/goals",
+            (HttpContext context, Guid projectId, ProjectDraftGoalInput input) =>
+                WriteDraft(store, context, projectId, null, input)).WithMetadata(viewer);
+        app.MapPut("/api/viewer/projects/{projectId:guid}/goals/{goalId:guid}",
+            (HttpContext context, Guid projectId, Guid goalId, ProjectDraftGoalInput input) =>
+                WriteDraft(store, context, projectId, goalId, input)).WithMetadata(viewer);
         app.MapGet("/api/viewer/projects/{projectId:guid}", (HttpContext context, Guid projectId) =>
         {
             var (authenticated, summary) = store.ReadViewerSummary(context.Request.Headers.Authorization.ToString(), projectId);
@@ -34,5 +40,22 @@ internal sealed class ProjectViewerEndpoint
                     return Results.NotFound();
                 }
             }).WithMetadata(viewer);
+    }
+
+    private static IResult WriteDraft(StateStore store, HttpContext context, Guid projectId, Guid? goalId,
+        ProjectDraftGoalInput input)
+    {
+        var result = store.WriteProjectDraftGoal(context.Request.Headers.Authorization.ToString(), projectId, goalId, input);
+        return result.Status switch
+        {
+            DraftGoalStatus.Unauthorized => Results.Unauthorized(),
+            DraftGoalStatus.NotFound => Results.NotFound(),
+            DraftGoalStatus.Forbidden => Results.StatusCode(StatusCodes.Status403Forbidden),
+            DraftGoalStatus.Invalid => Results.BadRequest(new { error = result.Error }),
+            DraftGoalStatus.Conflict => Results.Conflict(new { error = result.Error }),
+            DraftGoalStatus.Saved when goalId.HasValue => Results.Ok(result.Goal),
+            DraftGoalStatus.Saved => Results.Created($"/api/viewer/projects/{projectId}", result.Goal),
+            _ => throw new InvalidOperationException("Unexpected draft goal result")
+        };
     }
 }

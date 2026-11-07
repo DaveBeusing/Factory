@@ -9,6 +9,14 @@ internal sealed class ProjectViewerEndpoint
     internal static void Map(WebApplication app, StateStore store, FactorySettings settings)
     {
         var viewer = new ProjectViewerEndpoint();
+        const string providerHolds = "/api/viewer/projects/{projectId:guid}/provider-reservations";
+        app.MapGet(providerHolds, (HttpContext context, Guid projectId) =>
+            PlanResponse(() => store.ReadProjectProviderHolds(context.Request.Headers.Authorization.ToString(), projectId)))
+            .WithMetadata(viewer);
+        app.MapPost(providerHolds + "/{reservationId:guid}/reconcile",
+            (HttpContext context, Guid projectId, Guid reservationId, ProviderBudgetReconciliationInput input) =>
+                PlanResponse(() => store.ReconcileProjectProviderHold(context.Request.Headers.Authorization.ToString(),
+                    projectId, reservationId, input))).WithMetadata(viewer);
         app.MapPost("/api/viewer/projects/{projectId:guid}/jobs/{jobId:guid}/action",
             (HttpContext context, Guid projectId, Guid jobId, ProjectJobControlInput input) =>
             {

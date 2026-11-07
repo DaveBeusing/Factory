@@ -63,6 +63,7 @@ Factory | C# / .NET 10
   viewer grant|revoke --subject GUID --project NAME
   viewer grant-planner|revoke-planner --subject GUID --project NAME
   viewer grant-operator|revoke-operator --subject GUID --project NAME
+  viewer grant-budget-reconciler|revoke-budget-reconciler --subject GUID --project NAME
   usage | providers | install-skills [--overwrite]
 Environment: FACTORY_HOME overrides the local state directory.
 """);
@@ -301,16 +302,21 @@ Environment: FACTORY_HOME overrides the local state directory.
             case "revoke-planner":
             case "grant-operator":
             case "revoke-operator":
+            case "grant-budget-reconciler":
+            case "revoke-budget-reconciler":
                 var subject = GuidArg(Required(args, "subject"));
                 var project = store.Project(Required(args, "project"));
-                var grant = args[1] is "grant" or "grant-planner" or "grant-operator";
-                var changed = args[1] is "grant-operator" or "revoke-operator"
-                    ? store.SetOperatorGrant(subject, project.Id, grant)
-                    : store.SetViewerGrant(subject, project.Id, grant, planner: args[1] is "grant-planner" or "revoke-planner");
+                var grant = args[1].StartsWith("grant", StringComparison.Ordinal);
+                var changed = args[1] switch
+                {
+                    "grant-operator" or "revoke-operator" => store.SetOperatorGrant(subject, project.Id, grant),
+                    "grant-budget-reconciler" or "revoke-budget-reconciler" => store.SetBudgetReconcilerGrant(subject, project.Id, grant),
+                    _ => store.SetViewerGrant(subject, project.Id, grant, planner: args[1] is "grant-planner" or "revoke-planner")
+                };
                 Print(new { subjectId = subject, projectId = project.Id, changed });
                 break;
             default:
-                throw new ArgumentException("Expected viewer create, rotate, disable, grant, revoke, grant-planner, revoke-planner, grant-operator or revoke-operator");
+                throw new ArgumentException("Unknown viewer command; see factory help");
         }
         return 0;
     }

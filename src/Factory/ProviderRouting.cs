@@ -472,45 +472,46 @@ public static class ProviderBudgetReconciliation
 
     internal static object Reconcile(StateStore store, Guid reservationId, ProviderBudgetReconciliationInput input,
         string? observedModel, long? reportedCostMicros)
+        => store.Change(state => ApplyReconciliation(state, reservationId, input, observedModel, reportedCostMicros));
+
+    internal static object ApplyReconciliation(FactoryState state, Guid reservationId,
+        ProviderBudgetReconciliationInput input, string? observedModel = null, long? reportedCostMicros = null)
     {
         var evidence = EvidenceReason(input.Reviewed, input.Reason);
         if (input.FinalInputTokens < 0 || input.FinalOutputTokens < 0)
             throw new InvalidOperationException("Verified token totals must be nonnegative");
         var consumed = checked(input.FinalInputTokens + input.FinalOutputTokens);
-        return store.Change(state =>
+        var reservation = state.ProviderBudgetReservations.Single(x => x.Id == reservationId);
+        if (reservation.State != "held")
+            throw new InvalidOperationException("Only held provider reservations can be reconciled");
+        var usage = state.ProviderUsages.Single(x => x.Id == reservation.UsageId);
+        if (input.FinalInputTokens < usage.InputTokens || input.FinalOutputTokens < usage.OutputTokens)
+            throw new InvalidOperationException("Verified usage cannot be lower than already reported usage");
+        var job = RequireStoppedJob(state, usage);
+        if (reservation.Reserved > 0)
+            GoalBudgetLedger.RequireVerifiedOverrun(reservation.Reserved, consumed, input.ConfirmOverrun);
+        var goalReservation = job is null ? null : GoalBudgetLedger.ApplyProviderReconciliation(state, job, usage,
+            input.FinalInputTokens - usage.InputTokens, input.FinalOutputTokens - usage.OutputTokens, input.ConfirmOverrun);
+        usage.InputTokens = input.FinalInputTokens;
+        usage.OutputTokens = input.FinalOutputTokens;
+        usage.FinalUsageReported = true;
+        if (reportedCostMicros is >= 0) usage.ReportedCostMicros = reportedCostMicros;
+        reservation.Consumed = consumed;
+        reservation.State = "released";
+        var remoteTurn = state.RemoteProviderTurns.SingleOrDefault(turn => turn.UsageId == usage.Id);
+        if (remoteTurn is { State: "held" })
         {
-            var reservation = state.ProviderBudgetReservations.Single(x => x.Id == reservationId);
-            if (reservation.State != "held")
-                throw new InvalidOperationException("Only held provider reservations can be reconciled");
-            var usage = state.ProviderUsages.Single(x => x.Id == reservation.UsageId);
-            if (input.FinalInputTokens < usage.InputTokens || input.FinalOutputTokens < usage.OutputTokens)
-                throw new InvalidOperationException("Verified usage cannot be lower than already reported usage");
-            var job = RequireStoppedJob(state, usage);
-            if (reservation.Reserved > 0)
-                GoalBudgetLedger.RequireVerifiedOverrun(reservation.Reserved, consumed, input.ConfirmOverrun);
-            var goalReservation = job is null ? null : GoalBudgetLedger.ApplyProviderReconciliation(state, job, usage,
-                input.FinalInputTokens - usage.InputTokens, input.FinalOutputTokens - usage.OutputTokens, input.ConfirmOverrun);
-            usage.InputTokens = input.FinalInputTokens;
-            usage.OutputTokens = input.FinalOutputTokens;
-            usage.FinalUsageReported = true;
-            if (reportedCostMicros is >= 0) usage.ReportedCostMicros = reportedCostMicros;
-            reservation.Consumed = consumed;
-            reservation.State = "released";
-            var remoteTurn = state.RemoteProviderTurns.SingleOrDefault(turn => turn.UsageId == usage.Id);
-            if (remoteTurn is { State: "held" })
-            {
-                remoteTurn.State = "reconciled";
-                if (observedModel is not null) remoteTurn.ObservedModel = observedModel;
-            }
-            state.Events.Add(new FactoryEvent { JobId = usage.JobId,
-                Type = "provider_budget_reconciled",
-                Message = "Provider " + usage.ProviderId + " usage " + usage.Id +
-                    (goalReservation is null ? "" : " linked goal reservation " + goalReservation.Id) +
-                    (reservation.Reserved > 0 && consumed > reservation.Reserved
-                        ? "; verified provider overrun " + (consumed - reservation.Reserved) : "") + ": " + evidence });
-            return new { reservation.Id, reservation.State, usage.ProviderId,
-                usage.InputTokens, usage.OutputTokens, goalReservationId = goalReservation?.Id };
-        });
+            remoteTurn.State = "reconciled";
+            if (observedModel is not null) remoteTurn.ObservedModel = observedModel;
+        }
+        state.Events.Add(new FactoryEvent { JobId = usage.JobId,
+            Type = "provider_budget_reconciled",
+            Message = "Provider " + usage.ProviderId + " usage " + usage.Id +
+                (goalReservation is null ? "" : " linked goal reservation " + goalReservation.Id) +
+                (reservation.Reserved > 0 && consumed > reservation.Reserved
+                    ? "; verified provider overrun " + (consumed - reservation.Reserved) : "") + ": " + evidence });
+        return new { reservation.Id, reservation.State, usage.ProviderId,
+            usage.InputTokens, usage.OutputTokens, goalReservationId = goalReservation?.Id };
     }
 }
 

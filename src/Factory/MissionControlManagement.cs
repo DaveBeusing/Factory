@@ -468,7 +468,9 @@ public static class MissionControlManager
         store.Event(null, "plan_saved", goal.Id.ToString());
         return plan;
     }
-    public static FactoryPlan? ReadPlan(StateStore store, Guid goalId)
+    public static FactoryPlan? ReadPlan(StateStore store, Guid goalId) => store.ReadPlanRevision(goalId);
+
+    internal static FactoryPlan? ReadLegacyPlan(StateStore store, Guid goalId)
     {
         var file = Planning.PathFor(store, goalId);
         try

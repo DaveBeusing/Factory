@@ -95,9 +95,7 @@ public static class Planning
 
     internal static FactoryPlan SaveRevision(StateStore store, FactoryPlan plan, ProjectInfo source)
     {
-        // All plan writes and adoptions take the same SQLite writer lock, including
-        // across CLI and dashboard processes. The file itself is replaced atomically.
-        return store.Change(state =>
+        return store.Change((state, db, tx) =>
         {
             var goal = state.Goals.Single(g => g.Id == plan.GoalId);
             if (goal.State != "draft" || goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
@@ -106,26 +104,12 @@ public static class Planning
             if (project.Path != source.Path || project.Origin != source.Origin ||
                 WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
                 throw new InvalidOperationException("Project checkout or master changed; refresh the plan");
-            if (MissionControlManager.ReadPlan(store, goal.Id)?.Revision != plan.Revision)
+            if (store.ReadPlanRevision(db, tx, goal.Id)?.Revision != plan.Revision)
                 throw new InvalidOperationException("Plan changed; reopen the latest revision before saving");
-            plan.Revision = Guid.NewGuid();
-            Write(store, plan);
-            return plan;
+            return StateStore.InsertPlanRevision(db, tx, plan);
         });
     }
 
-    private static void Write(StateStore store, FactoryPlan plan)
-    {
-        var path = PathFor(store, plan.GoalId);
-        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
-        var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-        try
-        {
-            File.WriteAllText(temp, Json.Stringify(plan));
-            File.Move(temp, path, overwrite: true);
-        }
-        finally { File.Delete(temp); }
-    }
     private static string ExtractJson(string raw)
     {
         var start = raw.IndexOf('{'); var end = raw.LastIndexOf('}');
@@ -138,7 +122,8 @@ public static class Planning
         for (var index = 0; index < plan.Packages.Count; index++)
         {
             var item = plan.Packages[index];
-            if (string.IsNullOrWhiteSpace(item.Title) || string.IsNullOrWhiteSpace(item.Description))
+            if (item is null || string.IsNullOrWhiteSpace(item.Title) || string.IsNullOrWhiteSpace(item.Description) ||
+                item.Files is null || item.DependsOn is null)
                 throw new ArgumentException($"Invalid package {index}");
             if (item.Priority is < 0 or > 100) throw new ArgumentException("Priority out of range");
             if (!new[] { "low", "medium", "high" }.Contains(item.Risk)) throw new ArgumentException("Invalid risk");
@@ -164,18 +149,43 @@ public static class Planning
     public static IReadOnlyList<FactoryJob> Adopt(StateStore store, Guid goalId, string mode,
         bool reviewedExistingWork = false, Guid planRevision = default)
     {
+        var plan = store.ReadStoredPlanRevision(goalId);
+        if (plan is null)
+        {
+            var legacy = MissionControlManager.ReadLegacyPlan(store, goalId);
+            if (legacy is null) throw new InvalidOperationException("No saved plan");
+            if (legacy.Revision is null || string.IsNullOrEmpty(legacy.GoalRevision))
+                throw new InvalidOperationException("Plan predates revision tracking; review and save it again before adoption");
+            throw new InvalidOperationException("Save the legacy plan as a new revision and review it before adoption");
+        }
+        var snapshot = store.Read();
+        var requestedGoal = snapshot.Goals.Single(g => g.Id == goalId);
+        var requestedProject = snapshot.Projects.Single(p => p.Id == requestedGoal.ProjectId);
+        VerifyAdoption(plan, snapshot, requestedProject, requestedGoal, mode, reviewedExistingWork, planRevision);
+        return store.Change((state, db, tx) =>
+        {
+            var goal = state.Goals.Single(g => g.Id == goalId);
+            var project = state.Projects.Single(p => p.Id == goal.ProjectId);
+            VerifyAdoptionTarget(plan, StateStore.ReadStoredPlanRevision(db, tx, goalId),
+                requestedProject, project, goal);
+            var jobs = BuildAdoptedJobs(plan, goal, mode);
+            state.Jobs.AddRange(jobs);
+            goal.State = "active";
+            state.Events.Add(new FactoryEvent { Type = "plan_adopted", Message = $"Goal {goalId}: {jobs.Count} work packages" });
+            return (IReadOnlyList<FactoryJob>)jobs;
+        });
+    }
+
+    internal static void VerifyAdoption(FactoryPlan plan, FactoryState snapshot, ProjectInfo requestedProject,
+        FactoryGoal requestedGoal, string mode, bool reviewedExistingWork, Guid planRevision)
+    {
         if (mode is not ("local" or "remote")) throw new ArgumentException("mode must be local or remote");
-        var plan = MissionControlManager.ReadPlan(store, goalId)
-            ?? throw new InvalidOperationException("No saved plan");
         if (plan.Revision is null || string.IsNullOrEmpty(plan.GoalRevision))
             throw new InvalidOperationException("Plan predates revision tracking; review and save it again before adoption");
         if (planRevision == Guid.Empty || plan.Revision != planRevision)
             throw new InvalidOperationException("Review and confirm the current plan revision before adoption");
         Validate(plan);
-        var snapshot = store.Read();
-        var requestedGoal = snapshot.Goals.Single(g => g.Id == goalId);
-        var requestedProject = snapshot.Projects.Single(p => p.Id == requestedGoal.ProjectId);
-        if (plan.GoalId != goalId || plan.ProjectId != requestedProject.Id ||
+        if (plan.GoalId != requestedGoal.Id || plan.ProjectId != requestedProject.Id ||
             plan.GoalRevision != GoalRevision(requestedGoal))
             throw new InvalidOperationException("Goal changed; review and save or regenerate its plan before adoption");
         if (plan.Preflight is null || plan.Preflight.BaseCommit != plan.BaseCommit)
@@ -205,31 +215,32 @@ public static class Planning
         if (!reviewedExistingWork)
             throw new InvalidOperationException(
                 "All new work packages require explicit review of existing master code and outstanding PRs and issues before adoption");
-        return store.Change(state =>
+    }
+
+    internal static void VerifyAdoptionTarget(FactoryPlan plan, FactoryPlan? current,
+        ProjectInfo requestedProject, ProjectInfo project, FactoryGoal goal)
+    {
+        if (goal.State != "draft") throw new InvalidOperationException("Goal already adopted");
+        if (goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
+            throw new InvalidOperationException("Goal changed; review and save or regenerate its plan before adoption");
+        if (current?.Revision != plan.Revision)
+            throw new InvalidOperationException("Plan changed; review and confirm the current plan revision before adoption");
+        WorkPackagePreflight.RequireMaster(project);
+        if (project.Path != requestedProject.Path || project.Origin != requestedProject.Origin ||
+            WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
+            throw new InvalidOperationException("master advanced; regenerate the plan");
+    }
+
+    internal static List<FactoryJob> BuildAdoptedJobs(FactoryPlan plan, FactoryGoal goal, string mode)
+    {
+        var jobs = plan.Packages.Select(pkg => new FactoryJob
         {
-            var goal = state.Goals.Single(g => g.Id == goalId);
-            if (goal.State != "draft") throw new InvalidOperationException("Goal already adopted");
-            if (goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
-                throw new InvalidOperationException("Goal changed; review and save or regenerate its plan before adoption");
-            if (MissionControlManager.ReadPlan(store, goalId)?.Revision != planRevision)
-                throw new InvalidOperationException("Plan changed; review and confirm the current plan revision before adoption");
-            var project = state.Projects.Single(p => p.Id == goal.ProjectId);
-            WorkPackagePreflight.RequireMaster(project);
-            if (project.Path != requestedProject.Path || project.Origin != requestedProject.Origin ||
-                WorkPackagePreflight.MasterCommit(project) != plan.BaseCommit)
-                throw new InvalidOperationException("master advanced; regenerate the plan");
-            var jobs = plan.Packages.Select(pkg => new FactoryJob
-            {
-                ProjectId = goal.ProjectId, GoalId = goalId, Title = pkg.Title, Description = pkg.Description,
-                Risk = pkg.Risk, Priority = pkg.Priority, ExpectedPaths = pkg.Files, Mode = mode
-            }).ToList();
-            for (var i = 0; i < jobs.Count; i++)
-                jobs[i].DependsOn = plan.Packages[i].DependsOn.Select(index => jobs[index].Id).ToList();
-            if (DependencyGraph.WouldCycle(jobs)) throw new InvalidOperationException("Cyclic plan");
-            state.Jobs.AddRange(jobs);
-            goal.State = "active";
-            state.Events.Add(new FactoryEvent { Type = "plan_adopted", Message = $"Goal {goalId}: {jobs.Count} work packages" });
-            return (IReadOnlyList<FactoryJob>)jobs;
-        });
+            ProjectId = goal.ProjectId, GoalId = goal.Id, Title = pkg.Title, Description = pkg.Description,
+            Risk = pkg.Risk, Priority = pkg.Priority, ExpectedPaths = pkg.Files, Mode = mode
+        }).ToList();
+        for (var i = 0; i < jobs.Count; i++)
+            jobs[i].DependsOn = plan.Packages[i].DependsOn.Select(index => jobs[index].Id).ToList();
+        if (DependencyGraph.WouldCycle(jobs)) throw new InvalidOperationException("Cyclic plan");
+        return jobs;
     }
 }

@@ -180,7 +180,7 @@ Factory stores its own state under one directory:
 | `.factory/usage.json` | Cached account-level usage information (no login credentials) |
 | `.factory/plugins.json` | Approved .NET plugin assemblies |
 | `.factory/worktrees/` | Isolated Git working trees |
-| `.factory/plans/` | Proposed plans awaiting adoption |
+| `.factory/plans/` | Legacy plan files, read as fallback until a revision is saved in SQLite |
 | `.factory/evidence/` | Commit-bound check and review evidence |
 
 To override the default location for the current terminal session:

@@ -9,6 +9,16 @@ internal sealed class ProjectViewerEndpoint
     internal static void Map(WebApplication app, StateStore store)
     {
         var viewer = new ProjectViewerEndpoint();
+        const string planRoute = "/api/viewer/projects/{projectId:guid}/plans/{goalId:guid}";
+        app.MapGet(planRoute, (HttpContext context, Guid projectId, Guid goalId) =>
+            PlanResponse(() => store.ReadScopedPlan(context.Request.Headers.Authorization.ToString(), projectId, goalId)))
+            .WithMetadata(viewer);
+        app.MapPut(planRoute, (HttpContext context, Guid projectId, Guid goalId, FactoryPlan input) =>
+            PlanResponse(() => store.SaveScopedPlan(context.Request.Headers.Authorization.ToString(), projectId, goalId, input)))
+            .WithMetadata(viewer);
+        app.MapPost(planRoute + "/adopt", (HttpContext context, Guid projectId, Guid goalId, PlanAdoptInput input) =>
+            PlanResponse(() => store.AdoptScopedPlan(context.Request.Headers.Authorization.ToString(), projectId, goalId, input)))
+            .WithMetadata(viewer);
         app.MapPost("/api/viewer/projects/{projectId:guid}/goals",
             (HttpContext context, Guid projectId, ProjectDraftGoalInput input) =>
                 WriteDraft(store, context, projectId, null, input)).WithMetadata(viewer);
@@ -57,5 +67,29 @@ internal sealed class ProjectViewerEndpoint
             DraftGoalStatus.Saved => Results.Created($"/api/viewer/projects/{projectId}", result.Goal),
             _ => throw new InvalidOperationException("Unexpected draft goal result")
         };
+    }
+
+    private static IResult PlanResponse(Func<object> operation)
+    {
+        try { return Results.Ok(operation()); }
+        catch (ScopedPlanRejected ex)
+        {
+            return ex.Status switch
+            {
+                DraftGoalStatus.Unauthorized => Results.Unauthorized(),
+                DraftGoalStatus.Forbidden => Results.StatusCode(StatusCodes.Status403Forbidden),
+                DraftGoalStatus.NotFound => Results.NotFound(),
+                DraftGoalStatus.Invalid => Results.BadRequest(new { error = ex.Message }),
+                _ => Results.Conflict(new { error = ex.Message })
+            };
+        }
+        catch (ArgumentException)
+        {
+            return Results.BadRequest(new { error = "Invalid plan or adoption input." });
+        }
+        catch (InvalidOperationException)
+        {
+            return Results.Conflict(new { error = "Plan verification failed. Refresh the plan and review master before retrying." });
+        }
     }
 }

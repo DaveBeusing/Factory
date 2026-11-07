@@ -402,7 +402,7 @@ function renderProjectRecovery(){
   const job=summary.jobs.find(item=>item.id===hold.jobId);
   const goal=summary.goals.find(item=>item.id===hold.goalId);
   const target=job?.title||hold.jobId||goal?.objective||hold.goalId||'Project usage';
-  return `<tr><td>${esc(target)}</td><td>${esc(hold.providerId)}<small>${esc(hold.model||'Model unavailable')}</small></td>
+  return `<tr><td>${esc(target)}<small class="mono">Hold ID: ${esc(hold.id)}</small></td><td>${esc(hold.providerId)}<small>${esc(hold.model||'Model unavailable')}</small></td>
    <td>${number(hold.reserved)}</td><td>${number(hold.inputTokens)} / ${number(hold.outputTokens)}</td>
    <td><button class="tiny-button" data-act="settle-project-provider" data-id="${esc(hold.id)}">Settle provider reservation</button></td></tr>`;
  }).join('');
@@ -431,7 +431,7 @@ function formProjectRecovery(action,id){
  const target=job?.title||hold.jobId||linkedGoal?.objective||hold.goalId||'Project usage';
  const title=goal?'Settle goal reservation':provider?'Settle provider reservation':'Recover executor receipt';
  const tokens=goal||provider?field('input','Verified input tokens','','number')+field('output','Verified output tokens','','number'):'';
- const providerContext=provider?' · '+hold.providerId+(hold.model?' / '+hold.model:''):'';
+ const providerContext=provider?' · '+hold.providerId+(hold.model?' / '+hold.model:'')+' · Hold ID: '+hold.id:'';
  openForm(title,project.name+' · '+target+providerContext,tokens+
   field('reason','Evidence and review justification','','textarea')+
   field('reviewed','I independently reviewed the evidence',false,'checkbox')+

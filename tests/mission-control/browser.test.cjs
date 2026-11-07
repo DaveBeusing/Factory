@@ -430,6 +430,30 @@ browserTest('ignores an older admin login after connecting with a project token'
   }
 }, (home) => seedProviderEvidence(home, true));
 
+browserTest('identifies otherwise identical provider holds in the list and settlement dialog', async ({ page, form, connection, fixture }) => {
+  const secondId = '12345678-1234-1234-1234-123456789abc';
+  let firstId;
+  await page.route('**/api/viewer/projects/*/provider-reservations', async (route) => {
+    const response = await route.fetch();
+    const [hold] = await response.json();
+    firstId = hold.id;
+    await route.fulfill({ response, json: [hold, { ...hold, id: secondId }] });
+  });
+  await page.locator('#brand-connection').click();
+  await connection.getByLabel('API token').fill(fixture.access.reconciler);
+  await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+  await connection.waitFor({ state: 'hidden' });
+  const holds = page.getByRole('row').filter({ hasText: 'manual-provider' });
+  assert.equal(await holds.count(), 2);
+  for (const id of [firstId, secondId]) {
+    const row = holds.filter({ hasText: 'Hold ID: ' + id });
+    await row.getByRole('button', { name: 'Settle provider reservation' }).click();
+    const subtitle = form.locator('#modal-subtitle');
+    assert.ok((await subtitle.innerText()).includes('Hold ID: ' + id));
+    await form.getByRole('button', { name: 'Cancel' }).click();
+  }
+}, (home) => seedProviderEvidence(home, true));
+
 async function seedProviderEvidence(home, scoped = false) {
   const token = 'b'.repeat(64);
   const fixture = { env: { FACTORY_REMOTE_EXECUTOR_TOKEN: token }, receipt: null, receiptRequests: 0 };

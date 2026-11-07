@@ -249,17 +249,30 @@ public static class RemoteProviderRouting
         var lease = state.RemoteProviderLeases.Single(l => l.Id == turn.LeaseId && l.JobId == jobId);
         if (turn.State == "reconciled") return new { turn.Id, turn.State };
         var usage = state.ProviderUsages.Single(u => u.Id == turn.UsageId);
+        VerifyRecoveredReceipt(turn, lease, usage, receipt);
+        var reservation = state.ProviderBudgetReservations.Single(r => r.UsageId == usage.Id);
+        return ProviderBudgetReconciliation.Reconcile(store, reservation.Id, ReceiptSettlementInput(turn.Id, input, receipt),
+            receipt.ObservedModel, receipt.ReportedCostMicros);
+    }
+
+    internal static void VerifyRecoveredReceipt(RemoteProviderTurn turn, RemoteProviderLease lease,
+        ProviderUsageEntry usage, RemoteExecutorReceipt receipt)
+    {
         if (turn.State != "held" || !receipt.FinalUsage || receipt.TurnId != turn.Id ||
             receipt.LeaseId != lease.Id || receipt.InputCommit != turn.InputCommit || receipt.Role != turn.Role ||
             receipt.ProviderId != usage.ProviderId || receipt.ObservedModel != usage.Model)
             throw new InvalidOperationException("Executor receipt does not establish final usage for this held turn");
-        var reservation = state.ProviderBudgetReservations.Single(r => r.UsageId == usage.Id);
-        var reason = "Recovered executor receipt " + turn.Id + ". " + input.Reason.Trim();
-        return ProviderBudgetReconciliation.Reconcile(store, reservation.Id, new()
+    }
+
+    internal static ProviderBudgetReconciliationInput ReceiptSettlementInput(Guid turnId,
+        RemoteReceiptRecoveryInput input, RemoteExecutorReceipt receipt)
+    {
+        var reason = "Recovered executor receipt " + turnId + ". " + input.Reason.Trim();
+        return new()
         {
             Reviewed = input.Reviewed, Reason = reason[..Math.Min(reason.Length, 1000)],
             ConfirmOverrun = input.ConfirmOverrun, FinalInputTokens = receipt.InputTokens, FinalOutputTokens = receipt.OutputTokens
-        }, receipt.ObservedModel, receipt.ReportedCostMicros);
+        };
     }
 
     internal static bool Record(FactoryState state, FactorySettings settings, RemoteExecutorGrant grant, RemoteExecutorReceipt receipt)

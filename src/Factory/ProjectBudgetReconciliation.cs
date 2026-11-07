@@ -51,6 +51,15 @@ public sealed partial class StateStore
             RequireBudgetReconciler(db, read, verifier, projectId, reservationId);
         using var tx = db.BeginTransaction();
         var actor = RequireBudgetReconciler(db, tx, verifier, projectId, reservationId);
+        var result = ApplyProjectProviderSettlement(db, tx, actor, projectId, reservationId, input);
+        tx.Commit();
+        return result;
+    }
+
+    private static object ApplyProjectProviderSettlement(SqliteConnection db, SqliteTransaction tx, Guid actor,
+        Guid projectId, Guid reservationId, ProviderBudgetReconciliationInput input,
+        RemoteProviderTurn? turn = null, RemoteExecutorReceipt? receipt = null)
+    {
         using var query = Command(db, tx, """
             SELECT r.usage_id,r.provider_id,r.reserved,r.state,u.job_id,u.goal_id,u.provider_id,u.execution_generation,
                 u.input_tokens,u.output_tokens,
@@ -61,7 +70,7 @@ public sealed partial class StateStore
             """, ("$reservation", reservationId), ("$project", projectId));
         using var row = query.ExecuteReader();
         if (!row.Read() || !row.GetBoolean(11)) throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
-        if (row.GetBoolean(10))
+        if (row.GetBoolean(10) && turn is null)
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Executor-backed turns require the executor recovery workflow.");
         var usage = new ProviderUsageEntry
         {
@@ -78,6 +87,7 @@ public sealed partial class StateStore
         if (reservation.ProviderId != usage.ProviderId)
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The provider reservation and usage do not match.");
         var state = new FactoryState { ProviderUsages = [usage], ProviderBudgetReservations = [reservation] };
+        if (turn is not null) state.RemoteProviderTurns.Add(turn);
         FactoryJob? job = null;
         if (usage.JobId is { } jobId)
         {
@@ -88,17 +98,23 @@ public sealed partial class StateStore
         }
 
         object result;
-        try { result = ProviderBudgetReconciliation.ApplyReconciliation(state, reservationId, input); }
+        try { result = ProviderBudgetReconciliation.ApplyReconciliation(state, reservationId, input,
+            receipt?.ObservedModel, receipt?.ReportedCostMicros); }
         catch (Exception ex) when (ex is InvalidOperationException or OverflowException)
         {
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict,
                 ex is OverflowException ? "Token totals exceed the supported range." : ex.Message);
         }
         Execute(db, tx, """
-            UPDATE provider_usages SET input_tokens=$input,output_tokens=$output,final_usage_reported=1 WHERE id=$usage;
+            UPDATE provider_usages SET input_tokens=$input,output_tokens=$output,final_usage_reported=1,
+                reported_cost_micros=COALESCE($cost,reported_cost_micros) WHERE id=$usage;
             UPDATE provider_budget_reservations SET consumed=$consumed,state=$state WHERE id=$reservation;
             """, ("$input", usage.InputTokens), ("$output", usage.OutputTokens), ("$usage", usage.Id),
-            ("$consumed", reservation.Consumed), ("$state", reservation.State), ("$reservation", reservationId));
+            ("$consumed", reservation.Consumed), ("$state", reservation.State), ("$reservation", reservationId),
+            ("$cost", receipt?.ReportedCostMicros is >= 0 ? receipt.ReportedCostMicros : null));
+        if (turn is not null)
+            Execute(db, tx, "UPDATE remote_provider_turns SET state=$state,observed_model=$model WHERE id=$turn;",
+                ("$state", turn.State), ("$model", turn.ObservedModel), ("$turn", turn.Id));
         if (job is not null)
             Execute(db, tx, "UPDATE jobs SET tokens_in=$input,tokens_out=$output WHERE id=$job AND project_id=$project;",
                 ("$input", job.TokensIn), ("$output", job.TokensOut), ("$job", job.Id), ("$project", projectId));
@@ -117,7 +133,6 @@ public sealed partial class StateStore
             ("$overrun", input.ConfirmOverrun), ("$reason", input.Reason.Trim()), ("$at", DateTimeOffset.UtcNow));
         var entry = state.Events.Single();
         AppendEvent(db, tx, entry.JobId, entry.Type, entry.Message);
-        tx.Commit();
         return result;
     }
 
@@ -131,7 +146,11 @@ public sealed partial class StateStore
             WHERE provider_id=$provider AND state<>'released';
             """, ("$provider", usage.ProviderId));
         RequireRepresentableTotal(provider);
-        if (usage.GoalId is not { } goalId) return;
+        if (usage.GoalId is { } goalId) RequireRepresentableGoalTotal(db, tx, goalId);
+    }
+
+    private static void RequireRepresentableGoalTotal(SqliteConnection db, SqliteTransaction tx, Guid goalId)
+    {
         using var goal = Command(db, tx, """
             SELECT tokens_in,tokens_out,0 FROM jobs WHERE goal_id=$goal
             UNION ALL

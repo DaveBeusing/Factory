@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 16;
+    private const int DatabaseVersion = 17;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -302,24 +302,16 @@ public sealed partial class StateStore
         var schemaVersion = Convert.ToInt32(version.ExecuteScalar(), CultureInfo.InvariantCulture);
         if (schemaVersion != DatabaseVersion)
         {
-            if (schemaVersion != 15)
+            if (schemaVersion < 12 || schemaVersion > DatabaseVersion)
             {
-                if (schemaVersion != 14)
-                {
-                    if (schemaVersion != 13)
-                    {
-                        if (schemaVersion != 12)
-                        {
-                            UpgradeToSchema11(db, tx, schemaVersion);
-                            UpgradeProjectReaders(db, tx);
-                        }
-                        UpgradeProjectPlanning(db, tx);
-                    }
-                    UpgradePlanRevisions(db, tx);
-                }
-                UpgradeProjectControls(db, tx);
+                UpgradeToSchema11(db, tx, schemaVersion);
+                UpgradeProjectReaders(db, tx);
             }
-            UpgradeProjectBudgetReconciliation(db, tx);
+            if (schemaVersion < 13) UpgradeProjectPlanning(db, tx);
+            if (schemaVersion < 14) UpgradePlanRevisions(db, tx);
+            if (schemaVersion < 15) UpgradeProjectControls(db, tx);
+            if (schemaVersion < 16) UpgradeProjectBudgetReconciliation(db, tx);
+            UpgradeProjectGoalReconciliation(db, tx);
         }
         tx.Commit();
     }

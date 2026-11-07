@@ -17,6 +17,28 @@ internal sealed class ProjectViewerEndpoint
             (HttpContext context, Guid projectId, Guid reservationId, ProviderBudgetReconciliationInput input) =>
                 PlanResponse(() => store.ReconcileProjectProviderHold(context.Request.Headers.Authorization.ToString(),
                     projectId, reservationId, input))).WithMetadata(viewer);
+        const string projectRoute = "/api/viewer/projects/{projectId:guid}";
+        app.MapGet(projectRoute + "/goal-reservations", (HttpContext context, Guid projectId) =>
+            PlanResponse(() => store.ReadProjectGoalHolds(context.Request.Headers.Authorization.ToString(), projectId)))
+            .WithMetadata(viewer);
+        app.MapPost(projectRoute + "/goals/{goalId:guid}/budget/reconcile",
+            (HttpContext context, Guid projectId, Guid goalId, BudgetReconciliationInput input) =>
+                PlanResponse(() => store.ReconcileProjectGoalHold(context.Request.Headers.Authorization.ToString(),
+                    projectId, goalId, input))).WithMetadata(viewer);
+        app.MapGet(projectRoute + "/executor-receipts", (HttpContext context, Guid projectId) =>
+            PlanResponse(() => store.ReadProjectExecutorHolds(context.Request.Headers.Authorization.ToString(), projectId)))
+            .WithMetadata(viewer);
+        app.MapPost(projectRoute + "/jobs/{jobId:guid}/provider-turns/{turnId:guid}/recover",
+            async (HttpContext context, Guid projectId, Guid jobId, Guid turnId, RemoteReceiptRecoveryInput input,
+                CancellationToken cancellation) =>
+            {
+                try
+                {
+                    return Results.Ok(await store.RecoverProjectExecutorReceiptAsync(context.Request.Headers.Authorization.ToString(),
+                        settings, projectId, jobId, turnId, input, cancellation));
+                }
+                catch (Exception ex) when (IsPlanFailure(ex)) { return PlanFailure(ex); }
+            }).WithMetadata(viewer);
         app.MapPost("/api/viewer/projects/{projectId:guid}/jobs/{jobId:guid}/action",
             (HttpContext context, Guid projectId, Guid jobId, ProjectJobControlInput input) =>
             {

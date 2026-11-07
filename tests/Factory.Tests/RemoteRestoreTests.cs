@@ -146,8 +146,18 @@ internal static class RemoteRestoreTests
         await PostAsync(executorReader, "api/executor/turn", grant, HttpStatusCode.InternalServerError, ct);
         Check(calls == 1, "Removing the restored receipt released the dispatch marker");
         File.Copy(Path.Combine(executorBackup, "executor-receipts", receiptName), restoredReceipt);
-        await PostAsync(scoped, scopedRecovery, decision, HttpStatusCode.OK, ct);
-        await PostAsync(scoped, scopedRecovery, decision, HttpStatusCode.OK, ct);
+        var firstRecovery = await ReadScopedRecoveryAsync();
+        var repeatedRecovery = await ReadScopedRecoveryAsync();
+        var reservationId = held.ProviderBudgetReservations.Single().Id;
+        Check(firstRecovery == repeatedRecovery, "Receipt recovery changed its response on replay");
+        using (var result = System.Text.Json.JsonDocument.Parse(firstRecovery))
+        {
+            var body = result.RootElement;
+            Check(body.GetProperty("turnId").GetGuid() == turnId &&
+                body.GetProperty("reservationId").GetGuid() == reservationId &&
+                body.GetProperty("state").GetString() == "reconciled",
+                "Receipt recovery did not return both identifiers and the turn state");
+        }
         await PostAsync(admin, recover, decision, HttpStatusCode.OK, ct);
         var settled = restoredStore.Read();
         Check(settled.RemoteProviderTurns.Single() is { State: "reconciled", ObservedModel: model } &&
@@ -169,6 +179,13 @@ internal static class RemoteRestoreTests
             row.GetInt64(4) == 30 && row.GetInt64(5) == 10 &&
             row.GetString(6).Contains(turnId.ToString(), StringComparison.OrdinalIgnoreCase) && !row.Read(),
             "Receipt settlement must audit the actor and ledger evidence exactly once");
+
+        async Task<string> ReadScopedRecoveryAsync()
+        {
+            using var response = await scoped.PostAsJsonAsync(scopedRecovery, decision, Json.Options, ct);
+            await RequireStatus(response, HttpStatusCode.OK, scopedRecovery, ct);
+            return await response.Content.ReadAsStringAsync(ct);
+        }
     }
 
     private static async Task<(string Base, string Head, string Tree, byte[] Bundle)> MakeBundleAsync(string root, CancellationToken ct)

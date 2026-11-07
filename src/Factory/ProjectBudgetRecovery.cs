@@ -4,11 +4,15 @@ namespace Factory;
 
 internal sealed record ProjectGoalHold(Guid Id, Guid GoalId, Guid JobId, long Reserved, long Consumed);
 internal sealed record ProjectExecutorHold(Guid TurnId, Guid JobId, Guid ReservationId, string ProviderId, string Model);
+internal sealed record ProjectExecutorRecovery(Guid TurnId, Guid ReservationId, string State);
 
 public sealed partial class StateStore
 {
     private sealed record ReceiptTarget(RemoteProviderTurn Turn, RemoteProviderLease Lease,
-        FactoryJob Job, ProviderUsageEntry Usage, Guid ReservationId);
+        FactoryJob Job, ProviderUsageEntry Usage, Guid ReservationId)
+    {
+        public ProjectExecutorRecovery RecoveryResult => new(Turn.Id, ReservationId, Turn.State);
+    }
 
     private static void UpgradeProjectGoalReconciliation(SqliteConnection db, SqliteTransaction tx) =>
         Execute(db, tx, """
@@ -97,7 +101,7 @@ public sealed partial class StateStore
         return new(target.Id, goalId, jobId, target.Reserved, target.Consumed);
     }
 
-    internal async Task<object> RecoverProjectExecutorReceiptAsync(string authorization, FactorySettings settings,
+    internal async Task<ProjectExecutorRecovery> RecoverProjectExecutorReceiptAsync(string authorization, FactorySettings settings,
         Guid projectId, Guid jobId, Guid turnId, RemoteReceiptRecoveryInput input, CancellationToken ct)
     {
         var verifier = RequireBudgetVerifier(authorization);
@@ -113,7 +117,7 @@ public sealed partial class StateStore
                 ?? throw new ScopedProjectRejected(DraftGoalStatus.Forbidden);
         }
         var reason = RequireBudgetReview(input.Reviewed, input.Reason);
-        if (snapshot.Turn.State == "reconciled") return new { snapshot.Turn.Id, snapshot.Turn.State };
+        if (snapshot.Turn.State == "reconciled") return snapshot.RecoveryResult;
         RequireRecoverable(snapshot);
         var credential = RemoteProviderRouting.ExecutorCredential(settings)!;
         var receipt = await RemoteProviderExecutor.FetchReceiptAsync(snapshot.Lease.ExecutorUrl, credential,
@@ -125,7 +129,7 @@ public sealed partial class StateStore
         using var tx = db.BeginTransaction();
         VerifyGrant(tx);
         var current = ReadReceiptTarget(db, tx, projectId, jobId, turnId);
-        if (current.Turn.State == "reconciled") return new { current.Turn.Id, current.Turn.State };
+        if (current.Turn.State == "reconciled") return current.RecoveryResult;
         RequireRecoverable(current);
         if (current.Lease.Id != snapshot.Lease.Id || current.Lease.ExecutorUrl != snapshot.Lease.ExecutorUrl ||
             current.Turn.GrantDigest != snapshot.Turn.GrantDigest || current.Usage.Id != snapshot.Usage.Id ||
@@ -136,9 +140,9 @@ public sealed partial class StateStore
         catch (InvalidOperationException ex) { throw new ScopedProjectRejected(DraftGoalStatus.Conflict, ex.Message); }
         ct.ThrowIfCancellationRequested();
         var settlement = RemoteProviderRouting.ReceiptSettlementInput(turnId, input with { Reason = reason }, receipt);
-        var result = ApplyProjectProviderSettlement(db, tx, actor, projectId, current.ReservationId, settlement, current.Turn, receipt);
+        ApplyProjectProviderSettlement(db, tx, actor, projectId, current.ReservationId, settlement, current.Turn, receipt);
         tx.Commit();
-        return result;
+        return current.RecoveryResult;
 
         void VerifyGrant(SqliteTransaction transaction)
         {

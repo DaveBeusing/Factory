@@ -91,3 +91,16 @@ Schema 14 stores new plan revisions in SQLite. Existing plan files remain readab
 `POST /api/viewer/projects/{projectId}/plans/{goalId}/generate` generates and saves a plan for an active project and a draft goal. Send the current `goalRevision` and the latest `revision` when replacing a saved plan. The controller selects the project's configured Planner provider and model. The invocation uses the existing goal, project and provider budget rules.
 
 The controller binds generation to the original Planner grant and rechecks it before reserving tokens and again before publishing a revision. Revocation prevents publication even when a new grant is issued before the provider responds. The new grant authorizes a fresh request. Usage already incurred is still settled under the existing provider ledger rules. The reservation audit identifies the actor, project and ledger usage ID. A separate audit entry records any generated revision that was saved. Mission Control integration follows in a later increment.
+
+## Project job controls
+
+Schema 15 preserves existing grants and adds an independent Operator role. An Operator grant includes project reads.
+
+```text
+factory viewer grant-operator --subject SUBJECT_GUID --project PROJECT_NAME
+factory viewer revoke-operator --subject SUBJECT_GUID --project PROJECT_NAME
+```
+
+`POST /api/viewer/projects/{projectId}/jobs/{jobId}/action` accepts `pause`, `stop`, or `resume` as the `action` for jobs without a lease. Resuming a previously started job requires `reviewed: true` and a `reason` that records the inspection. The controller checks the grant and job ownership again in the write transaction. The same transaction records the actor, job, prior and resulting state, review acknowledgment, reason and timestamp.
+
+Active execution control and reviewed recovery follow in later increments.

@@ -61,10 +61,16 @@ public sealed partial class StateStore
     }
 
     internal bool SetViewerGrant(Guid subjectId, Guid projectId, bool grant, bool planner = false)
+        => SetProjectRoleGrant(subjectId, projectId, grant,
+            planner ? "planner_project_grants" : "viewer_project_grants", planner ? "_planner" : "");
+
+    internal bool SetOperatorGrant(Guid subjectId, Guid projectId, bool grant)
+        => SetProjectRoleGrant(subjectId, projectId, grant, "operator_project_grants", "_operator");
+
+    private bool SetProjectRoleGrant(Guid subjectId, Guid projectId, bool grant, string table, string auditSuffix)
     {
         using var db = Open();
         using var tx = db.BeginTransaction();
-        var table = planner ? "planner_project_grants" : "viewer_project_grants";
         using var update = Command(db, tx, grant
             ? $"""
                 INSERT INTO {table}(subject_id, project_id) VALUES($subject, $project)
@@ -76,7 +82,7 @@ public sealed partial class StateStore
         if (changed)
         {
             var operation = grant ? "grant" : "revoke";
-            AuditViewerAccess(db, tx, subjectId, projectId, planner ? operation + "_planner" : operation);
+            AuditViewerAccess(db, tx, subjectId, projectId, operation + auditSuffix);
         }
         tx.Commit();
         return changed;
@@ -164,18 +170,20 @@ public sealed partial class StateStore
         return ViewerVerifier(Convert.FromHexString(token[ViewerTokenPrefix.Length..]));
     }
 
-    private static (Guid? SubjectId, bool CanRead, bool CanPlan) ReadProjectAccess(
+    private static (Guid? SubjectId, bool CanRead, bool CanPlan, bool CanOperate) ReadProjectAccess(
         SqliteConnection db, SqliteTransaction tx, string verifier, Guid projectId)
     {
         using var query = Command(db, tx, """
             SELECT s.id,
                 EXISTS(SELECT 1 FROM viewer_project_grants WHERE subject_id=s.id AND project_id=$project),
-                EXISTS(SELECT 1 FROM planner_project_grants WHERE subject_id=s.id AND project_id=$project)
+                EXISTS(SELECT 1 FROM planner_project_grants WHERE subject_id=s.id AND project_id=$project),
+                EXISTS(SELECT 1 FROM operator_project_grants WHERE subject_id=s.id AND project_id=$project)
             FROM viewer_subjects s WHERE s.verifier=$verifier;
             """, ("$verifier", verifier), ("$project", projectId));
         using var row = query.ExecuteReader();
         if (!row.Read()) return default;
         var planner = row.GetBoolean(2);
-        return (Guid.Parse(row.GetString(0)), row.GetBoolean(1) || planner, planner);
+        var canOperate = row.GetBoolean(3);
+        return (Guid.Parse(row.GetString(0)), row.GetBoolean(1) || planner || canOperate, planner, canOperate);
     }
 }

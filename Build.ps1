@@ -14,19 +14,28 @@ function Invoke-DotNet {
     }
 }
 
-function Copy-FactoryAssets {
-    param([Parameter(Mandatory = $true)][string]$DirectoryName)
+function Remove-LegacyCodexAssets {
+    param([Parameter(Mandatory = $true)][string]$DistributionDirectory)
 
-    $source = Join-Path $PSScriptRoot $DirectoryName
-    $destination = Join-Path (Join-Path $PSScriptRoot 'dist') $DirectoryName
-
-    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
-        throw "Missing asset directory: $source"
+    $output = Get-Item -LiteralPath $DistributionDirectory -Force
+    if (-not $output.PSIsContainer -or ($output.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Expected a local distribution directory: $DistributionDirectory"
     }
-
-    New-Item -ItemType Directory -Path $destination -Force | Out-Null
-    Get-ChildItem -LiteralPath $source -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse -Force
+    $prefix = $output.FullName.TrimEnd('\') + '\'
+    foreach ($name in @('agents', 'skills')) {
+        $path = Join-Path $output.FullName $name
+        if (-not (Test-Path -LiteralPath $path)) { continue }
+        $legacy = Get-Item -LiteralPath $path -Force
+        if (-not $legacy.PSIsContainer -or
+            -not $legacy.FullName.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or
+            ($legacy.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Expected a generated asset directory under dist: $path"
+        }
+        $links = Get-ChildItem -LiteralPath $legacy.FullName -Recurse -Force |
+            Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint } |
+            Select-Object -First 1
+        if ($links) { throw "Legacy asset directory contains a link: $($links.FullName)" }
+        Remove-Item -LiteralPath $legacy.FullName -Recurse -Force
     }
 }
 
@@ -71,10 +80,15 @@ try {
         )
         Invoke-DotNet -Arguments (@('build', 'Factory.slnx', '--configuration', 'Release', '--no-restore') + $versionProperties)
         Invoke-DotNet -Arguments (@('run', '--project', 'tests/Factory.Tests/Factory.Tests.csproj', '--configuration', 'Release', '--no-restore', '--no-build') + @('--'))
-        Invoke-DotNet -Arguments (@('publish', 'src/Factory/Factory.csproj', '--configuration', 'Release', '--runtime', 'win-x64', '--self-contained', 'false', '--output', 'dist') + $versionProperties)
-
-        Copy-FactoryAssets -DirectoryName 'skills'
-        Copy-FactoryAssets -DirectoryName 'agents'
+        $distribution = Join-Path $PSScriptRoot 'dist'
+        if (Test-Path -LiteralPath $distribution) {
+            $output = Get-Item -LiteralPath $distribution -Force
+            if (-not $output.PSIsContainer -or ($output.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "Expected a local distribution directory: $distribution"
+            }
+        }
+        Invoke-DotNet -Arguments (@('publish', 'src/Factory/Factory.csproj', '--configuration', 'Release', '--runtime', 'win-x64', '--self-contained', 'false', '--output', $distribution) + $versionProperties)
+        Remove-LegacyCodexAssets -DistributionDirectory $distribution
 
         $exe = Join-Path $PSScriptRoot 'dist/Factory.exe'
         $manifest = [ordered]@{

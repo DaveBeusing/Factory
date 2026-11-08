@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 [CmdletBinding()]
-param()
+param([ValidateSet("Codex", "ClaudeCode", "None")][string]$Provider = "Codex")
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -46,63 +46,6 @@ function Test-DotNet10 {
     return ($LASTEXITCODE -eq 0) -and [bool]($installedSdks | Where-Object { $_ -match '^10\.' })
 }
 
-function Test-NativeAgentCli {
-    if (Test-Executable -Name 'codex.exe') {
-        return $true
-    }
-
-    if ($env:FACTORY_AGENT_EXECUTABLE -and
-        (Test-Path -LiteralPath $env:FACTORY_AGENT_EXECUTABLE -PathType Leaf)) {
-        return $true
-    }
-
-    $candidates = @()
-    if ($env:LOCALAPPDATA) {
-        $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\OpenAI\Codex\bin\codex.exe')
-    }
-    if ($env:USERPROFILE) {
-        $candidates += (Join-Path $env:USERPROFILE '.codex\packages\standalone\current\bin\codex.exe')
-        $candidates += (Join-Path $env:USERPROFILE '.codex\packages\standalone\current\codex.exe')
-    }
-    if ($env:CODEX_INSTALL_DIR) {
-        $candidates += (Join-Path $env:CODEX_INSTALL_DIR 'codex.exe')
-        $candidates += (Join-Path $env:CODEX_INSTALL_DIR 'bin\codex.exe')
-    }
-
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return $true
-        }
-    }
-    return $false
-}
-
-function Install-NativeAgentCli {
-    $installerPath = Join-Path $env:TEMP ("factory-agent-installer-{0}.ps1" -f [guid]::NewGuid().ToString('N'))
-    try {
-        Invoke-WebRequest -UseBasicParsing -Uri 'https://chatgpt.com/codex/install.ps1' -OutFile $installerPath
-        Write-Host 'Review the downloaded official installer before executing it.'
-        Write-Host "Downloaded installer: $installerPath"
-        Start-Process -FilePath 'notepad.exe' -ArgumentList ('"{0}"' -f $installerPath) -Wait
-
-        $approval = Read-Host 'After review, type RUN to execute the installer (anything else cancels)'
-        if ($approval -cne 'RUN') {
-            return $false
-        }
-
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $installerPath
-        if ($LASTEXITCODE -ne 0) {
-            throw "Native agent CLI installer failed with exit code $LASTEXITCODE."
-        }
-        return $true
-    }
-    finally {
-        if (Test-Path -LiteralPath $installerPath -PathType Leaf) {
-            Remove-Item -LiteralPath $installerPath -Force
-        }
-    }
-}
-
 function Invoke-DependencySetup {
     if ($env:OS -ne 'Windows_NT') {
         throw 'Install-Dependencies.ps1 currently supports Windows only.'
@@ -132,17 +75,28 @@ function Invoke-DependencySetup {
         Install-WingetPackage -PackageId 'Git.Git'
     }
 
-    if (Test-NativeAgentCli) {
-        Write-Host '[OK] Native agent CLI'
+    if ($Provider -eq 'Codex') {
+        . (Join-Path $PSScriptRoot 'src/Factory/Providers/Codex/Setup.ps1')
+        if (Test-CodexCli) {
+            Write-Host '[OK] Codex CLI'
+        }
+        else {
+            Write-Host '[MISSING] Codex CLI (codex.exe)'
+            if (-not (Confirm-Installation -Question 'Download and review the official Codex CLI installer?')) {
+                return 2
+            }
+            if (-not (Install-CodexCli)) {
+                return 2
+            }
+        }
     }
-    else {
-        Write-Host '[MISSING] Native agent CLI (codex.exe)'
-        if (-not (Confirm-Installation -Question 'Download and review the official native agent CLI installer?')) {
+    elseif ($Provider -eq 'ClaudeCode') {
+        . (Join-Path $PSScriptRoot 'src/Factory/Providers/ClaudeCode/Setup.ps1')
+        if (-not (Test-ClaudeCodeCli)) {
+            Write-Host '[MISSING] Claude Code CLI. Install the native CLI or set FACTORY_CLAUDE_EXECUTABLE.'
             return 2
         }
-        if (-not (Install-NativeAgentCli)) {
-            return 2
-        }
+        Write-Host '[OK] Claude Code CLI'
     }
 
     if (Test-Executable -Name 'gh.exe') {

@@ -84,3 +84,8 @@ Remote receipts carry a cost when the executor adapter reports one. The controll
 ## Security
 
 Configuration and credentials belong under `.factory`, never in Git. All project routes must use enabled profiles and permitted roles. The controller authorizes writes; UI hiding alone does not enforce permissions. Third-party model/service terms and the safety of transmitted prompt context remain operator responsibilities. The local Ollama adapter uses only loopback transport and no credentials.
+## Provider implementation and assets
+
+Codex and Claude Code have separate implementation directories under `src/Factory/Providers/`. The Codex directory owns its app-server and exec adapters, account usage reader, native executable lookup, Windows setup, skills and agent definitions. Build and publish place the Codex assets under `providers/codex/` in the output. Run `factory install-skills` to install those bundled assets into the native user directories.
+
+The Claude Code directory owns its read-only CLI adapter, native executable lookup and Windows dependency check. Use `Install-Dependencies.ps1 -Provider ClaudeCode` to check a Claude Code setup, or `-Provider None` to check shared prerequisites without checking an agent CLI. The default remains Codex. Projects continue to select provider profiles by role.

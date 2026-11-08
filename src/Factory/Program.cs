@@ -351,39 +351,6 @@ public static class CheckLoader
 
 public static class Skills
 {
-    public static void Install(bool overwrite)
-    {
-        var root = AppContext.BaseDirectory;
-        var source = Path.Combine(root, "skills");
-        if (!Directory.Exists(source))
-            source = Path.GetFullPath(Path.Combine(root, "..", "..", "..", "..", "..", "skills"));
-        if (!Directory.Exists(source)) throw new IOException("Skills directory not found; use the full distribution");
-        var dest = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".agents", "skills");
-        Directory.CreateDirectory(dest);
-        foreach (var folder in Directory.GetDirectories(source))
-        {
-            var target = Path.Combine(dest, Path.GetFileName(folder));
-            if (Directory.Exists(target) && !overwrite) { Console.WriteLine("SKIP " + target); continue; }
-            if (Directory.Exists(target)) Directory.Delete(target, true);
-            CopyTree(folder, target);
-            Console.WriteLine("INSTALLED " + target);
-        }
-        var agentsSource = Path.Combine(Path.GetDirectoryName(source)!, "agents");
-        if (!Directory.Exists(agentsSource)) return;
-        var agentsTarget = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex", "agents");
-        Directory.CreateDirectory(agentsTarget);
-        foreach (var file in Directory.GetFiles(agentsSource, "*.toml"))
-        {
-            var target = Path.Combine(agentsTarget, "factory-" + Path.GetFileName(file));
-            if (File.Exists(target) && !overwrite) { Console.WriteLine("SKIP " + target); continue; }
-            File.Copy(file, target, true);
-            Console.WriteLine("INSTALLED " + target);
-        }
-    }
-    private static void CopyTree(string source, string destination)
-    {
-        Directory.CreateDirectory(destination);
-        foreach (var file in Directory.GetFiles(source)) File.Copy(file, Path.Combine(destination, Path.GetFileName(file)));
-        foreach (var dir in Directory.GetDirectories(source)) CopyTree(dir, Path.Combine(destination, Path.GetFileName(dir)));
-    }
+    public static void Install(bool overwrite) =>
+        CodexAssets.Install(AppContext.BaseDirectory, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), overwrite);
 }

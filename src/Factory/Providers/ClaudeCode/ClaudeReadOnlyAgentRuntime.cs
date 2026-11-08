@@ -19,7 +19,7 @@ internal sealed class ClaudeReadOnlyAgentRuntime(string model) : IAgentRuntime
         };
         if (model.Length > 0) { args.Add("--model"); args.Add(model); }
 
-        var command = await Commands.RunAsync(Commands.ResolveClaudeExecutable(), args, directory,
+        var command = await Commands.RunAsync(ClaudeCodeExecutable.Resolve(), args, directory,
             timeoutSeconds: 7200, stdin: prompt, cancellationToken: cancellation);
         var result = new AgentRunResult
         {

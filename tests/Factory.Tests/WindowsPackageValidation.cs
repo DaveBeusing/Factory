@@ -26,8 +26,18 @@ internal static class WindowsPackageValidation
             var hash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(executable)));
             Require(string.Equals(hash, manifest.RootElement.GetProperty("executableSha256").GetString(),
                 StringComparison.OrdinalIgnoreCase), "Package checksum mismatch");
-            Require(File.Exists(Path.Combine(installed, "skills", "factory-plan", "SKILL.md")) &&
-                File.Exists(Path.Combine(installed, "agents", "builder.toml")), "Packaged assets missing");
+            Require(File.Exists(Path.Combine(installed, "providers", "codex", "skills", "factory-plan", "SKILL.md")) &&
+                File.Exists(Path.Combine(installed, "providers", "codex", "agents", "builder.toml")), "Packaged Codex assets missing");
+            Require(!Directory.Exists(Path.Combine(installed, "skills")) &&
+                !Directory.Exists(Path.Combine(installed, "agents")), "Codex assets must be packaged under their provider");
+            var profile = Directory.CreateDirectory(Path.Combine(scratch.FullName, "codex-profile")).FullName;
+            CodexAssets.Install(installed, profile, overwrite: false);
+            var installedSkill = Path.Combine(profile, ".agents", "skills", "factory-plan", "SKILL.md");
+            var installedAgent = Path.Combine(profile, ".codex", "agents", "factory-builder.toml");
+            Require(File.Exists(installedSkill) && File.Exists(installedAgent), "Codex installer did not find packaged assets");
+            File.WriteAllText(installedAgent, "local customization");
+            CodexAssets.Install(installed, profile, overwrite: false);
+            Require(File.ReadAllText(installedAgent) == "local customization", "Codex installer overwrote a local customization");
 
             var repository = Directory.CreateDirectory(Path.Combine(scratch.FullName, "repository")).FullName;
             GitOperations.Git(repository, "init", "-b", "master");

@@ -264,7 +264,7 @@ See [Provider routing and token budgets](docs/providers.md#budget-semantics) for
 
 **Security:** API mutations require a bearer token. The UI uses a restrictive Content Security Policy, no inline JavaScript, HTML escaping for untrusted repository content, and explicit confirmation for sensitive changes. Never expose the dashboard publicly without TLS, authenticated access and a security review. The supplied HTTP listener is intended for local use.
 
-Use `install-skills --overwrite` only when you intend to replace previously installed Factory skills. The agent CLI's native skills/role directories are external integration locations; the core Factory configuration remains in `.factory`.
+Use `install-skills --overwrite` only when you intend to replace previously installed Factory skills. The command installs the Codex assets bundled under `dist/providers/codex/` into Codex's native user locations. Claude Code has its own native adapter and executable configuration.
 
 ## 6. Configure quality checks
 

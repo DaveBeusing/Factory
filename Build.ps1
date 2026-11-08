@@ -14,22 +14,6 @@ function Invoke-DotNet {
     }
 }
 
-function Copy-FactoryAssets {
-    param([Parameter(Mandatory = $true)][string]$DirectoryName)
-
-    $source = Join-Path $PSScriptRoot $DirectoryName
-    $destination = Join-Path (Join-Path $PSScriptRoot 'dist') $DirectoryName
-
-    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
-        throw "Missing asset directory: $source"
-    }
-
-    New-Item -ItemType Directory -Path $destination -Force | Out-Null
-    Get-ChildItem -LiteralPath $source -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse -Force
-    }
-}
-
 try {
     if (-not (Get-Command dotnet.exe -CommandType Application -ErrorAction SilentlyContinue)) {
         throw '.NET 10 SDK not found. Run Install-Dependencies.ps1.'
@@ -72,9 +56,6 @@ try {
         Invoke-DotNet -Arguments (@('build', 'Factory.slnx', '--configuration', 'Release', '--no-restore') + $versionProperties)
         Invoke-DotNet -Arguments (@('run', '--project', 'tests/Factory.Tests/Factory.Tests.csproj', '--configuration', 'Release', '--no-restore', '--no-build') + @('--'))
         Invoke-DotNet -Arguments (@('publish', 'src/Factory/Factory.csproj', '--configuration', 'Release', '--runtime', 'win-x64', '--self-contained', 'false', '--output', 'dist') + $versionProperties)
-
-        Copy-FactoryAssets -DirectoryName 'skills'
-        Copy-FactoryAssets -DirectoryName 'agents'
 
         $exe = Join-Path $PSScriptRoot 'dist/Factory.exe'
         $manifest = [ordered]@{

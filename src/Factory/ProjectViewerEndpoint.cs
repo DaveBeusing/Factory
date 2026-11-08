@@ -18,6 +18,24 @@ internal sealed class ProjectViewerEndpoint
                 PlanResponse(() => store.ReconcileProjectProviderHold(context.Request.Headers.Authorization.ToString(),
                     projectId, reservationId, input))).WithMetadata(viewer);
         const string projectRoute = "/api/viewer/projects/{projectId:guid}";
+        const string reviewRoute = projectRoute + "/analysis";
+        app.MapGet(reviewRoute, (HttpContext context, Guid projectId) =>
+            PlanResponse(() => new { review = store.ReadScopedProjectReview(context.Request.Headers.Authorization.ToString(), projectId) }))
+            .WithMetadata(viewer);
+        app.MapPost(reviewRoute, (HttpContext context, Guid projectId, CancellationToken ct) =>
+            PlanResponse(() => store.AnalyzeScopedProject(context.Request.Headers.Authorization.ToString(), projectId, ct)))
+            .WithMetadata(viewer);
+        app.MapPost(reviewRoute + "/goals", (HttpContext context, Guid projectId, ReviewGoalInput review) =>
+        {
+            try
+            {
+                return WriteDraft(store, context, projectId, null, new ProjectDraftGoalInput
+                {
+                    Objective = review.Objective, AcceptanceCriteria = review.AcceptanceCriteria, TokenBudget = review.TokenBudget
+                }, review);
+            }
+            catch (Exception ex) when (IsPlanFailure(ex)) { return PlanFailure(ex); }
+        }).WithMetadata(viewer);
         app.MapGet("/api/viewer/projects", (HttpContext context) =>
             PlanResponse(() => store.ReadViewerProjects(context.Request.Headers.Authorization.ToString())))
             .WithMetadata(viewer);
@@ -115,9 +133,9 @@ internal sealed class ProjectViewerEndpoint
     }
 
     private static IResult WriteDraft(StateStore store, HttpContext context, Guid projectId, Guid? goalId,
-        ProjectDraftGoalInput input)
+        ProjectDraftGoalInput input, ReviewGoalInput? review = null)
     {
-        var result = store.WriteProjectDraftGoal(context.Request.Headers.Authorization.ToString(), projectId, goalId, input);
+        var result = store.WriteProjectDraftGoal(context.Request.Headers.Authorization.ToString(), projectId, goalId, input, review);
         return result.Status switch
         {
             DraftGoalStatus.Unauthorized => Results.Unauthorized(),

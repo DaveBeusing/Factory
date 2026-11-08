@@ -2213,7 +2213,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 17, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 18, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -2718,7 +2718,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 17);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 18);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3218,7 +3218,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 17);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 18);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

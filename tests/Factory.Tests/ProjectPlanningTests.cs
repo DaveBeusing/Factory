@@ -42,6 +42,7 @@ internal static class ProjectPlanningTests
                 DROP TABLE operator_project_grants;
                 DROP TABLE project_operation_audit;
                 DROP TABLE budget_reconciler_project_grants;
+                DROP TABLE scoped_project_reviews;
                 DROP TABLE project_goal_budget_audit;
                 DROP TABLE project_budget_audit;
                 PRAGMA user_version=12;

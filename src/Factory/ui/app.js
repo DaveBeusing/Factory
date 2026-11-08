@@ -38,6 +38,7 @@ let connectionRevision=0, loadingStateRevision=null;
 const projectAccess=()=>token.startsWith('factory-viewer-');
 let recoveryRequest=0, projectRecovery={projects:[],selected:'',loading:false};
 let scopedPlanning={projects:[],selected:''}, scopedPlanEditor=null, scopedPlanRequest=0;
+let scopedAnalysis={projects:[],selected:''};
 async function api(path,method='GET',body){if(!token)throw new Error('Connect your API token first');if(projectAccess()&&!path.startsWith('viewer/'))throw new Error('This action requires an administrator connection');const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});if(!res.ok){let msg='Request failed ('+res.status+')';try{let obj=await res.json();msg=obj.error||obj.title||msg}catch{}const error=new Error(msg);error.status=res.status;throw error}if(res.status===204||res.status===202)return null;return res.json()}
 const notify=(message,error=false)=>{const el=document.createElement('div');el.className='toast'+(error?' error':'');el.innerHTML=`<span class="toast-icon">${ico(error?'shield':'check')}</span><span>${esc(message)}</span>`;$('toast-stack').append(el);setTimeout(()=>el.remove(),5500)};
 function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.classList.toggle('hidden',!val)); }
@@ -88,6 +89,7 @@ async function connect(nextToken){
    recoveryRequest++;
    projectRecovery={projects:[],selected:'',loading:false};
    scopedPlanning={projects:[],selected:''};
+   scopedAnalysis={projects:[],selected:''};
    streamController?.abort();
    closeInspector();
    $('inspector-body').replaceChildren();
@@ -161,8 +163,11 @@ function renderAnalysis(){
    <button class="button button-muted" data-act="project-plans" data-id="${selected.id}">Plan goals for this project</button></div></div>
   <p class="subtext">Read-only repository inspection; source commit is verified when converting findings to goals.</p>
  </div></section>`;
- if(projectReview&&projectReview.projectId===selected.id){
-  body+=`<div class="grid metrics-grid" style="margin-top:17px">${metric('Findings',projectReview.findings.length,'Review before generating goals','shield')}
+ return body+renderReviewFindings(projectReview?.projectId===selected.id?projectReview:null,'analysis-goal');
+}
+function renderReviewFindings(projectReview,goalAction){
+ if(!projectReview)return empty('eye','No review loaded','Run analysis to create a commit-bound review snapshot.');
+ let body=`<div class="grid metrics-grid" style="margin-top:17px">${metric('Findings',projectReview.findings.length,'Review before generating goals','shield')}
    ${metric('Indexed files',projectReview.indexedFiles,'Bounded static index','folder')}
    ${metric('Reference commit',shorten(projectReview.commit,11),'Captured master commit','route')}
    ${metric('Reviewed at',dateTime(projectReview.observedAt),'Snapshot time','clock')}</div>`;
@@ -177,11 +182,73 @@ function renderAnalysis(){
    <div class="entity-sub">${esc(f.category)}</div></div></div><p class="subtext">${esc(f.evidence)}</p>
    <p><strong>Proposed goal:</strong> ${esc(f.proposedGoal)}</p>
    <div class="entity-foot">${badge(f.severity)}
-   <button class="button button-muted" data-act="analysis-goal" data-id="${esc(f.id)}">Review & create draft goal</button></div></div>`).join('');
+   ${goalAction?`<button class="button button-muted" data-act="${goalAction}" data-id="${esc(f.id)}">Review & create draft goal</button>`:''}</div></div>`).join('');
   body+=`<section class="card" style="margin-top:17px"><div class="card-head"><div><h2>Review findings</h2><p>Approve individual proposals before creating goals; no work is executed here.</p></div></div>
    <div class="cards-list" style="padding:18px">${findings||empty('check','No findings detected','This limited static inspection cannot certify full code quality.')}</div></section>`;
- }else body+=`<section class="card" style="margin-top:17px">${empty('eye','No review loaded','Choose Analyze project to create a commit-bound review snapshot.')}</section>`;
  return body;
+}
+async function loadScopedAnalysis(selected=scopedAnalysis.selected){
+ const context={projects:scopedAnalysis.projects,selected,loading:true};
+ scopedAnalysis=context;
+ render();
+ try{
+  const projects=await api('viewer/projects');
+  if(scopedAnalysis!==context)return;
+  const project=projects.find(item=>item.id===selected)||projects[0];
+  Object.assign(context,{projects,selected:project?.id||'',project});
+  if(project)context.review=(await api(scopedAnalysisPath(project))).review;
+ }catch(error){
+  if(scopedAnalysis===context)context.error=error.message;
+ }finally{
+  if(scopedAnalysis===context){context.loading=false;render();}
+ }
+}
+function scopedAnalysisPath(project){return 'viewer/projects/'+encodeURIComponent(project.id)+'/analysis';}
+function renderScopedAnalysis(){
+ const {projects,selected,project,loading,error,review,busy}=scopedAnalysis;
+ const options=projects.map(item=>`<option value="${esc(item.id)}" ${item.id===selected?'selected':''}>${esc(item.name)}</option>`).join('');
+ const picker=options?`<div class="field"><label for="scoped-analysis-project">Repository</label><select id="scoped-analysis-project">${options}</select></div>`:'';
+ const actions=project?`<button class="button button-muted" data-act="scoped-analysis-plans">Plan goals for this project</button>
+  ${project.canPlan?`<button class="button button-primary" data-act="scoped-analysis-run" ${busy||loading?'disabled':''}>${busy?'Analyzing…':'Analyze project'}</button>`:''}`:'';
+ let body=header('Project review','Inspect the registered repository and review proposed goals for the selected project.');
+ body+=card('Project analysis','Read-only inspection of master. A Planner grant is required to run analysis or create draft goals.',picker,null,actions);
+ if(loading)return body+'<p role="status">Loading project review…</p>';
+ if(error)return body+`<p role="alert">${esc(error)}</p>`;
+ if(!project)return body+empty('folder','No granted projects','Ask an administrator for project access.');
+ return body+renderReviewFindings(review,project.canPlan&&!busy?'scoped-analysis-goal':null);
+}
+async function handleScopedAnalysis(action,id){
+ const context=scopedAnalysis;
+ const project=context.project;
+ const current=()=>projectAccess()&&view==='analysis'&&scopedAnalysis===context;
+ if(!project||context.loading||!current())return;
+ if(action==='scoped-analysis-plans'){nav('plans');await loadScopedPlanning(project.id);return;}
+ if(!project.canPlan)return;
+ if(action==='scoped-analysis-run'){
+  if(context.busy)return;
+  context.busy=true;render();
+  try{
+   const review=await api(scopedAnalysisPath(project),'POST',{});
+   if(current()){context.review=review;context.error=null;notify('Project review saved');}
+  }catch(error){if(current())notify(error.message,true);}
+  finally{context.busy=false;if(current())render();}
+  return;
+ }
+ const review=context.review;
+ const finding=review?.findings.find(item=>item.id===id);
+ if(action!=='scoped-analysis-goal'||!finding)return;
+ const body=field('objective','Goal outcome',finding.proposedGoal,'textarea')+
+  field('criteria','Acceptance criteria (one per line)',finding.acceptanceCriteria.join('\n'),'textarea')+
+  field('budget','Goal token budget',100000,'number');
+ openForm('Goal from reviewed finding',project.name+' · '+finding.title,body,async form=>{
+  if(!current()||context.review!==review)throw Error('The review changed. Reopen the current finding.');
+  const input=values(form), tokenBudget=Number(input.budget);
+  if(!input.budget||!Number.isSafeInteger(tokenBudget)||tokenBudget<0)throw Error('Enter a valid token budget');
+  await api(scopedAnalysisPath(project)+'/goals','POST',{
+   reviewId:review.id,findingId:id,objective:input.objective,acceptanceCriteria:lines(input.criteria),tokenBudget
+  });
+  if(current()){notify('Draft goal created');nav('plans');await loadScopedPlanning(project.id);}
+ },'Create draft goal');
 }
 let reviewRequest=0;
 const reviewingProjects=new Set();
@@ -697,14 +764,15 @@ function render(){
  document.body.classList.toggle('project-access',scoped);
  if(!token){renderedMain=null;$('main').innerHTML=`<div class="loading-screen"><div style="text-align:center">${ico('shield')}<h2>Connect to Mission Control</h2><p class="muted">Enter the API token to manage your Factory workspace.</p><button class="button button-primary" data-act="open-connection">Connect</button></div></div>`;return}
  if(scoped){
-  const next=view==='plans'?renderScopedPlanning():renderProjectRecovery();
+  const next=view==='plans'?renderScopedPlanning():view==='analysis'?renderScopedAnalysis():renderProjectRecovery();
   if(next!==renderedMain){
    const focused=document.activeElement?.id;
    $('main').innerHTML=next;
    renderedMain=next;
    $('recovery-project')?.addEventListener('change',event=>loadProjectRecovery(event.target.value));
    $('scoped-plan-project')?.addEventListener('change',event=>loadScopedPlanning(event.target.value));
-   if(focused==='recovery-project'||focused==='scoped-plan-project')$(focused)?.focus();
+   $('scoped-analysis-project')?.addEventListener('change',event=>loadScopedAnalysis(event.target.value));
+   if(['recovery-project','scoped-plan-project','scoped-analysis-project'].includes(focused))$(focused)?.focus();
   }
   document.querySelectorAll('[data-count]').forEach(el=>el.textContent='');
   return;
@@ -1220,7 +1288,9 @@ document.addEventListener('click',async e=>{const btn=e.target.closest('[data-vi
  if(projectAccess()){
   const action=btn.dataset.act;
   if(btn.dataset.view==='plans'){nav('plans');await loadScopedPlanning();return;}
+  if(btn.dataset.view==='analysis'){closeInspector();nav('analysis');await loadScopedAnalysis();return;}
   if(btn.dataset.view==='recovery'){closeInspector();nav('recovery');await loadProjectRecovery();return;}
+  if(view==='analysis'){await handleScopedAnalysis(action,btn.dataset.id);return;}
   if(view==='plans'){
    if(action==='scoped-plan-refresh')await loadScopedPlanning();
    else if(action?.startsWith('scoped-'))await handleScopedPlanning(action,btn.dataset.id,btn.dataset.revision);

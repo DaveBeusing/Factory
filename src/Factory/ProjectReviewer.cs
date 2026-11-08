@@ -63,55 +63,11 @@ public static class ProjectReviewer
             ct.ThrowIfCancellationRequested();
             var state = store.Read();
             var project = state.Projects.Single(p => p.Id == projectId);
-            var commit = WorkPackagePreflight.MasterCommit(project);
-            var review = new ProjectReviewSnapshot { ProjectId = projectId, Commit = commit };
-            void Add(string id, string severity, string category, string title, string evidence,
-                string goal, params string[] criteria)
-            {
-                review.Findings.Add(new ProjectReviewFinding
-                {
-                    Id = id, Severity = severity, Category = category, Title = title,
-                    Evidence = evidence, ProposedGoal = goal, AcceptanceCriteria = criteria.ToList()
-                });
-            }
-            if (project.Checks.Count == 0)
-                Add("missing-quality-gates", "high", "quality", "No project checks configured",
-                    "Factory project configuration contains zero executable quality checks.",
-                    "Establish deterministic build and test gates for this project",
-                    "Configure at least one executable quality check",
-                    "Demonstrate a passing and a failing check run",
-                    "Document how the checks run in a clean checkout");
-            ct.ThrowIfCancellationRequested();
+            var blockedCount = state.Jobs.Count(j => j.ProjectId == projectId &&
+                j.State is JobStates.Blocked or JobStates.Failed);
+            var (review, index) = Inspect(project, project.Checks.Count != 0, blockedCount, ct);
+            var commit = review.Commit;
             var root = project.Path;
-            var paths = GitOperations.Git(root, "ls-tree", "-r", "-z", "--name-only", commit)
-                .Split('\0', StringSplitOptions.RemoveEmptyEntries);
-            var hasTestDirectory = paths.Any(path => path.IndexOf('/') is var separator && separator > 0 &&
-                path[..separator].Contains("test", StringComparison.OrdinalIgnoreCase));
-            if (!hasTestDirectory)
-                Add("test-discovery", "medium", "testing", "No top-level test directory detected",
-                    "A top-level directory with 'test' in its name was not found. This heuristic does not establish the absence of tests.",
-                    "Audit automated test discovery and coverage",
-                    "Identify existing test projects and their locations",
-                    "Add or document a repeatable test command",
-                    "Record demonstrable test results");
-            if (!paths.Contains("README.md", StringComparer.OrdinalIgnoreCase))
-                Add("missing-readme", "low", "documentation", "No root README.md detected",
-                    "The repository root does not contain README.md.",
-                    "Create an operational README for this repository",
-                    "Document prerequisites and chronological setup",
-                    "Provide verified build and test commands");
-            var failures = state.Jobs.Where(j => j.ProjectId == projectId &&
-                j.State is JobStates.Blocked or JobStates.Failed).ToArray();
-            if (failures.Length > 0)
-                Add("blocked-jobs", "high", "reliability", "Blocked or failed jobs require review",
-                    failures.Length + " recorded jobs are failed or blocked. Review individual checkpoints and evidence before retry.",
-                    "Resolve outstanding blocked and failed work safely",
-                    "Inspect each unresolved job and classify its failure",
-                    "Reconcile uncertain Git side effects and budget liabilities",
-                    "Rerun required checks against the correct commit");
-            ct.ThrowIfCancellationRequested();
-            var index = paths.Take(500).ToArray();
-            review.IndexedFiles = index.Length;
             if (settings != null && state.ProviderAssignments.Any(x =>
                 x.ProjectId == projectId && x.Role == "analysis"))
             {
@@ -152,6 +108,59 @@ public static class ProjectReviewer
             return review;
         }
         finally { gate.Release(); }
+    }
+
+    internal static (ProjectReviewSnapshot Review, string[] Index) Inspect(ProjectInfo project, bool hasChecks,
+        int blockedCount, CancellationToken ct)
+    {
+        var commit = WorkPackagePreflight.MasterCommit(project);
+        var review = new ProjectReviewSnapshot { ProjectId = project.Id, Commit = commit };
+        void Add(string id, string severity, string category, string title, string evidence,
+            string goal, params string[] criteria)
+        {
+            review.Findings.Add(new ProjectReviewFinding
+            {
+                Id = id, Severity = severity, Category = category, Title = title,
+                Evidence = evidence, ProposedGoal = goal, AcceptanceCriteria = criteria.ToList()
+            });
+        }
+        if (!hasChecks)
+            Add("missing-quality-gates", "high", "quality", "No project checks configured",
+                "Factory project configuration contains zero executable quality checks.",
+                "Establish deterministic build and test gates for this project",
+                "Configure at least one executable quality check",
+                "Demonstrate a passing and a failing check run",
+                "Document how the checks run in a clean checkout");
+        ct.ThrowIfCancellationRequested();
+        var root = project.Path;
+        var paths = GitOperations.Git(root, "ls-tree", "-r", "-z", "--name-only", commit)
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries);
+        var hasTestDirectory = paths.Any(path => path.IndexOf('/') is var separator && separator > 0 &&
+            path[..separator].Contains("test", StringComparison.OrdinalIgnoreCase));
+        if (!hasTestDirectory)
+            Add("test-discovery", "medium", "testing", "No top-level test directory detected",
+                "A top-level directory with 'test' in its name was not found. This heuristic does not establish the absence of tests.",
+                "Audit automated test discovery and coverage",
+                "Identify existing test projects and their locations",
+                "Add or document a repeatable test command",
+                "Record demonstrable test results");
+        if (!paths.Contains("README.md", StringComparer.OrdinalIgnoreCase))
+            Add("missing-readme", "low", "documentation", "No root README.md detected",
+                "The repository root does not contain README.md.",
+                "Create an operational README for this repository",
+                "Document prerequisites and chronological setup",
+                "Provide verified build and test commands");
+        if (blockedCount > 0)
+            Add("blocked-jobs", "high", "reliability", "Blocked or failed jobs require review",
+                blockedCount + " recorded jobs are failed or blocked. Review individual checkpoints and evidence before retry.",
+                "Resolve outstanding blocked and failed work safely",
+                "Inspect each unresolved job and classify its failure",
+                "Reconcile uncertain Git side effects and budget liabilities",
+                "Rerun required checks against the correct commit");
+        ct.ThrowIfCancellationRequested();
+        var index = paths.Take(500).ToArray();
+        review.IndexedFiles = index.Length;
+        return (review, index);
     }
 
     public static FactoryGoal CreateDraftGoal(StateStore store, Guid projectId, ReviewGoalInput input)

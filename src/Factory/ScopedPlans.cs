@@ -63,7 +63,7 @@ public sealed partial class StateStore
         using (var read = db.BeginTransaction(deferred: true))
         {
             (scope, snapshot) = ReadPlanPreflight(db, read, verifier, projectId, goalId);
-            grantRevision = ReadPlannerGrantRevision(db, read, scope)
+            grantRevision = ReadPlannerGrantRevision(db, read, scope.SubjectId, scope.Project.Id)
                 ?? throw new ScopedProjectRejected(DraftGoalStatus.Forbidden);
             VerifyGenerationTarget(db, read, scope);
             snapshot.ProviderAssignments = ReadViewerRows(db, read, projectId, """
@@ -103,7 +103,8 @@ public sealed partial class StateStore
 
         void VerifyGenerationTarget(SqliteConnection connection, SqliteTransaction tx, PlanScope current)
         {
-            if (current.SubjectId != scope.SubjectId || ReadPlannerGrantRevision(connection, tx, current) != grantRevision)
+            if (current.SubjectId != scope.SubjectId ||
+                ReadPlannerGrantRevision(connection, tx, current.SubjectId, current.Project.Id) != grantRevision)
                 throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The Planner grant changed. Start a new planning request.");
             VerifyPlanSave(current, expected);
             if (current.Project.Status != "active")
@@ -114,14 +115,14 @@ public sealed partial class StateStore
         }
     }
 
-    private static long? ReadPlannerGrantRevision(SqliteConnection db, SqliteTransaction tx, PlanScope scope)
+    private static long? ReadPlannerGrantRevision(SqliteConnection db, SqliteTransaction tx, Guid subjectId, Guid projectId)
     {
         // Each successful grant writes a new audit row in the same transaction.
         using var query = Command(db, tx, """
             SELECT id FROM viewer_access_audit
             WHERE subject_id=$subject AND project_id=$project AND operation='grant_planner'
             ORDER BY id DESC LIMIT 1;
-            """, ("$subject", scope.SubjectId), ("$project", scope.Project.Id));
+            """, ("$subject", subjectId), ("$project", projectId));
         return query.ExecuteScalar() as long?;
     }
 

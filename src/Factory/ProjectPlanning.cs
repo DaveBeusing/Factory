@@ -32,7 +32,7 @@ public sealed partial class StateStore
             """);
 
     internal DraftGoalResult WriteProjectDraftGoal(string authorization, Guid projectId, Guid? goalId,
-        ProjectDraftGoalInput draft)
+        ProjectDraftGoalInput draft, ReviewGoalInput? review = null)
     {
         var verifier = ReadViewerVerifier(authorization);
         if (verifier is null) return new(DraftGoalStatus.Unauthorized);
@@ -73,9 +73,13 @@ public sealed partial class StateStore
                 return new(DraftGoalStatus.Conflict, Error: "The draft goal changed. Reopen it before saving.");
         }
 
+        var finding = review is null ? null : ResolveScopedReviewFinding(db, tx, projectId, review);
         var input = new GoalInput
         {
-            ProjectId = projectId, Objective = draft.Objective, AcceptanceCriteria = draft.AcceptanceCriteria
+            ProjectId = projectId,
+            Objective = finding is not null && string.IsNullOrWhiteSpace(draft.Objective) ? finding.ProposedGoal : draft.Objective,
+            AcceptanceCriteria = finding is not null && draft.AcceptanceCriteria is not { Count: > 0 }
+                ? finding.AcceptanceCriteria : draft.AcceptanceCriteria
         };
         input.TokenBudget = existing?.Budget ?? draft.TokenBudget ?? input.TokenBudget;
         if (MissionControlManager.GoalValidationError(input) is { } validationError)
@@ -100,6 +104,9 @@ public sealed partial class StateStore
             VALUES($subject, $project, $target, $operation, $at);
             """, ("$subject", subjectId), ("$project", projectId), ("$target", goal.Id),
             ("$operation", goalId.HasValue ? "goal_draft_updated" : "goal_draft_created"), ("$at", DateTimeOffset.UtcNow));
+        if (review is not null)
+            AppendEvent(db, tx, null, "review_goal_created",
+                $"Project {projectId} review {review.ReviewId} finding {review.FindingId} -> goal {goal.Id}");
         tx.Commit();
         return new(DraftGoalStatus.Saved, goal);
     }

@@ -660,7 +660,79 @@ browserTest('plans and adopts only the reviewed revision in the granted project'
   assert.equal(state.jobs[0].title, 'Replacement reviewed package');
   assert.equal(state.jobs[0].projectId, fixture.projectId);
   assert.equal(state.goals.find((item) => item.id === fixture.foreignGoalId).state, 'draft');
-}, async (home) => {
+}, seedProjectPlanning);
+
+browserTest('reviews only the selected project and creates goals from the current finding', async ({ page, nav, form, connection, api, fixture }) => {
+  async function connect(token) {
+    await page.locator('#brand-connection').click();
+    await connection.getByLabel('API token').fill(token);
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await connection.waitFor({ state: 'hidden' });
+    await nav.getByRole('button', { name: 'Project review' }).click();
+  }
+  const route = (id) => new URL('/api/viewer/projects/' + id + '/analysis', page.url()).href;
+  const request = (token, url, method = 'GET', data) => page.request.fetch(url,
+    { method, data, headers: { Authorization: 'Bearer ' + token } });
+  const analyze = page.getByRole('button', { name: 'Analyze project' });
+  const finding = page.locator('.entity-card').filter({ hasText: 'No root README.md detected' });
+  const create = finding.getByRole('button', { name: 'Review & create draft goal' });
+  const own = route(fixture.projectId);
+  const other = route(fixture.otherId);
+  await connect(fixture.planner);
+  await analyze.click();
+  await finding.waitFor();
+  const first = (await (await request(fixture.planner, own)).json()).review;
+  assert.equal(first.projectId, fixture.projectId);
+  const evidence = { reviewId: first.id, findingId: 'missing-readme' };
+  assert.equal((await request(fixture.planner, other, 'POST', {})).status(), 403);
+  assert.equal((await request(fixture.planner, other + '/goals', 'POST', evidence)).status(), 403);
+  const picker = page.getByLabel('Repository', { exact: true });
+  await picker.selectOption(fixture.otherId);
+  await page.getByText('No review loaded').waitFor();
+  assert.equal(await analyze.count(), 0);
+  assert.equal(await finding.count(), 0);
+  await picker.selectOption(fixture.projectId);
+  await create.click();
+  await form.waitFor({ state: 'visible' });
+  assert.equal((await request(fixture.planner, own, 'POST', {})).status(), 200);
+  await form.getByRole('button', { name: 'Create draft goal' }).click();
+  await page.getByText('The review changed. Reopen the current finding.').waitFor();
+  assert.equal((await api('state')).goals.length, 1);
+  await form.getByRole('button', { name: 'Cancel' }).click();
+
+  await connect(fixture.viewer);
+  await finding.waitFor();
+  assert.equal(await analyze.count(), 0);
+  assert.equal(await create.count(), 0);
+  assert.equal((await request(fixture.viewer, other)).status(), 404);
+  assert.equal((await request(fixture.viewer, own, 'POST', {})).status(), 403);
+  assert.equal((await request(fixture.viewer, own + '/goals', 'POST', evidence)).status(), 403);
+  await connect(fixture.planner);
+  await create.click();
+  execFileSync('git', ['-c', 'user.name=Factory Fixture', '-c', 'user.email=fixture@example.invalid',
+    '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=' + path.join(fixture.repo, 'no-hooks'),
+    'commit', '--allow-empty', '-m', 'Advance master'], { cwd: fixture.repo, timeout: 10_000 });
+  await form.getByRole('button', { name: 'Create draft goal' }).click();
+  await page.getByText('Master advanced. Run analysis again.').waitFor();
+  await form.getByRole('button', { name: 'Cancel' }).click();
+  const analyzed = page.waitForResponse(response => response.url() === own && response.request().method() === 'POST');
+  await analyze.click();
+  assert.equal((await analyzed).status(), 200);
+  await page.getByText('Project review saved', { exact: true }).last().waitFor();
+  await create.click();
+  await form.getByRole('button', { name: 'Create draft goal' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await page.getByRole('heading', { name: 'Project goal planner' }).waitFor();
+  await page.getByRole('cell', { name: 'Create an operational README for this repository', exact: true }).waitFor();
+  const state = await api('state');
+  const goal = state.goals.find(item => item.projectId === fixture.projectId);
+  assert.equal(goal.state, 'draft');
+  assert.equal(state.jobs.length, 0);
+  assert.equal(state.goals.filter(item => item.projectId === fixture.otherId).length, 1);
+  assert.ok(state.events.some(event => event.type === 'review_goal_created' && event.message.includes(goal.id)));
+}, seedProjectPlanning);
+
+async function seedProjectPlanning(home) {
   const repo = path.join(home, 'planning-repository');
   await mkdir(repo);
   const git = (...args) => execFileSync('git', args, { cwd: repo, timeout: 10_000 });
@@ -668,9 +740,10 @@ browserTest('plans and adopts only the reviewed revision in the granted project'
   git('-c', 'user.name=Factory Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
     '-c', 'core.hooksPath=' + path.join(home, 'no-hooks'), 'commit', '--allow-empty', '-m', 'Fixture master');
   const dll = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
-  return JSON.parse(execFileSync('dotnet', [dll, '--browser-project-planning-fixture', home, repo],
+  const fixture = JSON.parse(execFileSync('dotnet', [dll, '--browser-project-planning-fixture', home, repo],
     { encoding: 'utf8', timeout: 15_000 }));
-});
+  return { ...fixture, repo };
+}
 
 async function seedProviderEvidence(home, scoped = false) {
   const token = 'b'.repeat(64);

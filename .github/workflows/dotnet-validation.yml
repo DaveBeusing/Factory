@@ -39,7 +39,12 @@ jobs:
           }
       - name: Restore, build, test and publish
         shell: powershell
-        run: .\Build.ps1
+        run: |
+          # Simulate rebuilding over a distribution from before provider-owned assets.
+          New-Item -ItemType Directory -Force -Path 'dist/agents', 'dist/skills/factory-plan' | Out-Null
+          Copy-Item -LiteralPath 'src/Factory/Providers/Codex/Assets/agents/builder.toml' -Destination 'dist/agents/builder.toml'
+          Copy-Item -LiteralPath 'src/Factory/Providers/Codex/Assets/skills/factory-plan/SKILL.md' -Destination 'dist/skills/factory-plan/SKILL.md'
+          .\Build.ps1
       - name: Set up Node.js for browser tests
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:

@@ -46,6 +46,12 @@ if (args is ["--browser-project-jobs-fixture", var projectJobsHome, var projectJ
     return 0;
 }
 
+if (args is ["--browser-project-planning-fixture", var planningHome, var planningRepository])
+{
+    Console.WriteLine(Json.Stringify(BrowserRecoveryFixture.SeedProjectPlanning(planningHome, planningRepository)));
+    return 0;
+}
+
 if (args is ["--browser-advance-job-checkpoint", var checkpointHome, var checkpointJob, var nextCheckpoint])
 {
     new StateStore(checkpointHome).UpdateJob(Guid.Parse(checkpointJob), job =>

@@ -563,6 +563,115 @@ browserTest('controls and reconciles only jobs in the selected Operator project'
   return { ...fixture, worktree, home };
 });
 
+browserTest('plans and adopts only the reviewed revision in the granted project', async ({ page, nav, form, inspector, connection, api, fixture }) => {
+  async function connect(token) {
+    await page.locator('#brand-connection').click();
+    await connection.getByLabel('API token').fill(token);
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await connection.waitFor({ state: 'hidden' });
+    await nav.getByRole('button', { name: 'Goal planner' }).click();
+  }
+  const route = (project) => new URL('/api/viewer/projects/' + project, page.url()).href;
+  const request = (token, resource, options = {}) => page.request.fetch(resource,
+    { ...options, headers: { Authorization: 'Bearer ' + token } });
+  const create = page.getByRole('button', { name: 'Create draft goal', exact: true });
+  await connect(fixture.viewer);
+  await page.getByText('Planner access required to change goals or review plans.').waitFor();
+  assert.equal(await create.count(), 0);
+  const forbidden = await request(fixture.viewer, route(fixture.projectId) + '/goals',
+    { method: 'POST', data: { objective: 'Viewer cannot create this goal' } });
+  assert.equal(forbidden.status(), 403);
+
+  await connect(fixture.planner);
+  await create.click();
+  await form.getByLabel('Outcome / objective').fill('Plan a scoped change');
+  await form.getByLabel('Acceptance criteria (one per line)').fill('Record the verified outcome');
+  await form.getByRole('button', { name: 'Create draft goal' }).click();
+  await form.waitFor({ state: 'hidden' });
+  const goalRow = page.getByRole('row').filter({ hasText: 'Plan a scoped change' });
+  await goalRow.waitFor();
+  const goal = (await api('state')).goals.find((item) => item.projectId === fixture.projectId);
+  const planRoute = route(fixture.projectId) + '/plans/' + goal.id;
+  const foreign = await request(fixture.planner, route(fixture.projectId) + '/plans/' + fixture.foreignGoalId);
+  assert.equal(foreign.status(), 404);
+  const foreignSave = await request(fixture.planner, route(fixture.projectId) + '/plans/' + fixture.foreignGoalId,
+    { method: 'PUT', data: { packages: [] } });
+  assert.equal(foreignSave.status(), 404);
+  const selector = page.getByLabel('Project', { exact: true });
+  await selector.selectOption(fixture.otherId);
+  await page.getByText('Other project goal', { exact: true }).waitFor();
+  assert.equal(await create.count(), 0);
+  assert.equal(await page.getByRole('button', { name: 'Edit plan' }).count(), 0);
+  assert.equal(await goalRow.count(), 0);
+  await selector.selectOption(fixture.projectId);
+  await goalRow.getByRole('button', { name: 'Edit draft goal' }).click();
+  const criteria = form.getByLabel('Acceptance criteria (one per line)');
+  assert.equal(await criteria.inputValue(), 'Record the verified outcome');
+  const readDraft = await (await request(fixture.planner, planRoute)).json();
+  const goalRoute = route(fixture.projectId) + '/goals/' + goal.id;
+  const concurrent = await request(fixture.planner, goalRoute, { method: 'PUT',
+    data: { objective: goal.objective, acceptanceCriteria: ['Keep the newer criteria'], goalRevision: readDraft.goalRevision } });
+  assert.equal(concurrent.status(), 200);
+  await criteria.fill('Outdated change from the first dialog');
+  await form.getByRole('button', { name: 'Update draft goal' }).click();
+  await page.getByText('The draft goal changed. Reopen it before saving.').waitFor();
+  assert.deepEqual((await api('state')).goals.find((item) => item.id === goal.id).acceptanceCriteria, ['Keep the newer criteria']);
+  await form.getByRole('button', { name: 'Cancel' }).click();
+  await goalRow.getByRole('button', { name: 'Edit draft goal' }).click();
+  await form.waitFor({ state: 'visible' });
+  assert.equal(await criteria.inputValue(), 'Keep the newer criteria');
+  await criteria.fill('Record the verified outcome\nDocument the project boundary');
+  await form.getByRole('button', { name: 'Update draft goal' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await goalRow.getByRole('button', { name: 'Edit plan' }).click();
+  await inspector.getByRole('button', { name: 'Add package' }).click();
+  await form.getByLabel('Package title').fill('Initial reviewed package');
+  await form.getByLabel('Description / acceptance criteria').fill('Record the scoped result');
+  await form.getByLabel('Expected file paths, one per line').fill('scoped.txt');
+  await form.getByRole('button', { name: 'Save changes' }).click();
+  await inspector.getByRole('button', { name: 'Save plan' }).click();
+  await inspector.getByText('Initial reviewed package', { exact: true }).waitFor();
+  await inspector.getByRole('button', { name: 'Adopt reviewed plan' }).click();
+  const prior = await (await request(fixture.planner, planRoute)).json();
+  await form.getByText(prior.plan.revision, { exact: true }).waitFor();
+  const packageUpdate = { ...prior.plan.packages[0], title: 'Replacement reviewed package' };
+  const replacement = await request(fixture.planner, planRoute, { method: 'PUT',
+    data: { packages: [packageUpdate], goalRevision: prior.goalRevision, revision: prior.plan.revision } });
+  assert.ok(replacement.ok(), await replacement.text());
+  const nextPlan = await replacement.json();
+  await form.getByRole('button', { name: 'Adopt reviewed plan' }).click();
+  await page.getByText('Confirm the review before adopting this revision.').waitFor();
+  await form.getByLabel(/I reviewed this revision/).check();
+  await form.getByRole('button', { name: 'Adopt reviewed plan' }).click();
+  await page.getByText('Review the current saved plan revision.').waitFor();
+  assert.equal((await api('state')).jobs.length, 0);
+  await form.getByRole('button', { name: 'Cancel' }).click();
+  await inspector.getByRole('button', { name: 'Close inspector' }).click();
+  await goalRow.getByRole('button', { name: 'Review plan' }).click();
+  await inspector.getByText('Replacement reviewed package', { exact: true }).waitFor();
+  await inspector.getByRole('button', { name: 'Adopt reviewed plan' }).click();
+  await form.getByText(nextPlan.revision, { exact: true }).waitFor();
+  await form.getByLabel(/I reviewed this revision/).check();
+  await form.getByRole('button', { name: 'Adopt reviewed plan' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await goalRow.getByText('active', { exact: true }).waitFor();
+  const state = await api('state');
+  assert.equal(state.jobs.length, 1);
+  assert.equal(state.jobs[0].title, 'Replacement reviewed package');
+  assert.equal(state.jobs[0].projectId, fixture.projectId);
+  assert.equal(state.goals.find((item) => item.id === fixture.foreignGoalId).state, 'draft');
+}, async (home) => {
+  const repo = path.join(home, 'planning-repository');
+  await mkdir(repo);
+  const git = (...args) => execFileSync('git', args, { cwd: repo, timeout: 10_000 });
+  git('init', '-b', 'master');
+  git('-c', 'user.name=Factory Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+    '-c', 'core.hooksPath=' + path.join(home, 'no-hooks'), 'commit', '--allow-empty', '-m', 'Fixture master');
+  const dll = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
+  return JSON.parse(execFileSync('dotnet', [dll, '--browser-project-planning-fixture', home, repo],
+    { encoding: 'utf8', timeout: 15_000 }));
+});
+
 async function seedProviderEvidence(home, scoped = false) {
   const token = 'b'.repeat(64);
   const fixture = { env: { FACTORY_REMOTE_EXECUTOR_TOKEN: token }, receipt: null, receiptRequests: 0 };

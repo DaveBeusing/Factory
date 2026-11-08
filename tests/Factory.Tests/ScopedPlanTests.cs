@@ -132,8 +132,10 @@ internal static class ScopedPlanTests
             var legacyPath = Planning.PathFor(store, goal.Id);
             Directory.CreateDirectory(Path.GetDirectoryName(legacyPath)!);
             File.WriteAllText(legacyPath, Json.Stringify(legacy));
-            var reviewedLegacy = JsonSerializer.Deserialize<ScopedPlanView>(
-                await Request(alice.Token, HttpMethod.Get, path, HttpStatusCode.OK), Json.Options)!.Plan!;
+            var legacyView = JsonSerializer.Deserialize<ScopedPlanView>(
+                await Request(alice.Token, HttpMethod.Get, path, HttpStatusCode.OK), Json.Options)!;
+            Require(legacyView.IsLegacy, "Legacy plan was not identified as requiring a new revision");
+            var reviewedLegacy = legacyView.Plan!;
             Require(reviewedLegacy.Packages.Single().Title == "Reviewed legacy package", "Legacy plan was not readable");
             legacy.Packages[0].Title = "Changed after review";
             File.WriteAllText(legacyPath, Json.Stringify(legacy));

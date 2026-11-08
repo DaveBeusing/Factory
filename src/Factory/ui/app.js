@@ -37,6 +37,7 @@ let settings={}, usage=null, providerData=null, projectReview=null, analysisProj
 let connectionRevision=0, loadingStateRevision=null;
 const projectAccess=()=>token.startsWith('factory-viewer-');
 let recoveryRequest=0, projectRecovery={projects:[],selected:'',loading:false};
+let scopedPlanning={projects:[],selected:''}, scopedPlanEditor=null, scopedPlanRequest=0;
 async function api(path,method='GET',body){if(!token)throw new Error('Connect your API token first');if(projectAccess()&&!path.startsWith('viewer/'))throw new Error('This action requires an administrator connection');const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});if(!res.ok){let msg='Request failed ('+res.status+')';try{let obj=await res.json();msg=obj.error||obj.title||msg}catch{}const error=new Error(msg);error.status=res.status;throw error}if(res.status===204||res.status===202)return null;return res.json()}
 const notify=(message,error=false)=>{const el=document.createElement('div');el.className='toast'+(error?' error':'');el.innerHTML=`<span class="toast-icon">${ico(error?'shield':'check')}</span><span>${esc(message)}</span>`;$('toast-stack').append(el);setTimeout(()=>el.remove(),5500)};
 function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.classList.toggle('hidden',!val)); }
@@ -86,6 +87,7 @@ async function connect(nextToken){
    health=null;
    recoveryRequest++;
    projectRecovery={projects:[],selected:'',loading:false};
+   scopedPlanning={projects:[],selected:''};
    streamController?.abort();
    closeInspector();
    $('inspector-body').replaceChildren();
@@ -390,6 +392,149 @@ function renderProjectJobOperations(jobs){
  return card('Project job operations','Control jobs and review interrupted local executions.',
   rows?table(['Work package','State','Execution mode','Actions'],rows):empty('layers','No jobs','This project has no work packages.'));
 }
+async function loadScopedPlanning(selected=scopedPlanning.selected){
+ closeInspector();
+ const context={projects:scopedPlanning.projects,selected,loading:true};
+ scopedPlanning=context;
+ render();
+ try{
+  const projects=await api('viewer/projects');
+  if(scopedPlanning!==context)return;
+  const project=projects.find(item=>item.id===selected)||projects[0];
+  Object.assign(context,{projects,selected:project?.id||'',project});
+  if(project){
+   const summary=await api('viewer/projects/'+encodeURIComponent(project.id));
+   if(scopedPlanning!==context)return;
+   context.goals=summary.goals;
+  }
+ }catch(error){
+  if(scopedPlanning!==context)return;
+  if(error.status===401)Object.assign(context,{projects:[],selected:'',project:null});
+  context.error=error.message;
+ }finally{
+  if(scopedPlanning===context){context.loading=false;render();}
+ }
+}
+function renderScopedPlanning(){
+ const {projects,selected,project,goals,loading,error}=scopedPlanning;
+ const options=projects.map(item=>`<option value="${esc(item.id)}" ${item.id===selected?'selected':''}>${esc(item.name)}</option>`).join('');
+ let result=header('Project goal planner','Plan work packages and adopt a reviewed revision in the selected project.');
+ result+=card('Project planning','Writing and reviewing plan revisions requires a Planner grant.',
+  options?`<div class="field"><label for="scoped-plan-project">Project</label><select id="scoped-plan-project">${options}</select></div>`:'',
+  null,'<button class="button button-muted" data-act="scoped-plan-refresh">Refresh planning</button>');
+ if(loading)return result+'<p role="status">Loading project goals…</p>';
+ if(error)return result+`<p role="alert">${esc(error)}</p>`;
+ if(!project)return result+empty('folder','No granted projects','Ask an administrator for project access.');
+ const rows=goals.map(goal=>{
+  const buttons=project.canPlan?`<button class="tiny-button" data-act="scoped-plan-open" data-id="${esc(goal.id)}">Review plan</button>
+   ${goal.state==='draft'?`<button class="tiny-button" data-act="scoped-plan-edit" data-id="${esc(goal.id)}">Edit plan</button>
+   <button class="tiny-button" data-act="scoped-goal-edit" data-id="${esc(goal.id)}">Edit draft goal</button>`:''}`:'';
+  return `<tr><td><strong>${esc(goal.objective)}</strong></td><td>${badge(goal.state)}</td><td>${number(goal.tokenBudget)}</td>
+   <td><div class="tiny-actions">${buttons}</div></td></tr>`;
+ }).join('');
+ return result+card('Project goals',project.canPlan?'Draft goals and their work packages.':'Planner access required to change goals or review plans.',
+  rows?table(['Goal','State','Token budget','Actions'],rows):empty('target','No project goals','Draft goals appear here.'),
+  null,project.canPlan?'<button class="button button-primary" data-act="scoped-goal-create">Create draft goal</button>':'');
+}
+function scopedPlanningIsCurrent(context){return projectAccess()&&view==='plans'&&scopedPlanning===context;}
+function requireScopedPlanning(context){
+ if(!scopedPlanningIsCurrent(context)||context.loading||!context.project?.canPlan)
+  throw Error('The selected planning project changed. Reload and review it again.');
+}
+function scopedPlanPath(context,goalId){return 'viewer/projects/'+encodeURIComponent(context.project.id)+'/plans/'+encodeURIComponent(goalId);}
+function openScopedGoalForm(context,goal,details){
+ const prefix='viewer/projects/'+encodeURIComponent(context.project.id)+'/goals';
+ openForm(goal?'Edit draft goal':'Create draft goal',context.project.name,
+  field('objective','Outcome / objective',details?.objective||'','textarea')+
+  field('criteria','Acceptance criteria (one per line)',details?.acceptanceCriteria.join('\n')||'','textarea')+
+  (goal?'':field('tokenBudget','Token budget',100000,'number')),
+  async form=>{
+   requireScopedPlanning(context);
+   const input=values(form);
+   const payload={objective:input.objective.trim(),acceptanceCriteria:lines(input.criteria)};
+   if(goal)payload.goalRevision=details.goalRevision;
+   else{
+    payload.tokenBudget=Number(input.tokenBudget);
+    if(!input.tokenBudget||!Number.isSafeInteger(payload.tokenBudget)||payload.tokenBudget<0)throw Error('Enter a valid token budget');
+   }
+   await api(goal?prefix+'/'+encodeURIComponent(goal.id):prefix,goal?'PUT':'POST',payload);
+   if(scopedPlanningIsCurrent(context))await loadScopedPlanning(context.project.id);
+  },goal?'Update draft goal':'Create draft goal');
+}
+function showScopedPlan(context,goal,details){
+ const plan=details.plan;
+ const adoptable=details.state==='draft'&&!details.isLegacy&&plan?.revision&&plan.preflight&&plan.goalRevision===details.goalRevision;
+ const controls=details.state==='draft'?
+  `<div class="head-actions"><button class="button button-muted" data-act="scoped-plan-edit" data-id="${esc(goal.id)}">Edit plan</button>
+   <button class="button button-muted" data-act="scoped-plan-generate" data-id="${esc(goal.id)}">${plan?'Regenerate plan':'Generate plan'}</button>
+   ${adoptable?`<button class="button button-primary" data-act="scoped-plan-adopt" data-id="${esc(goal.id)}" data-revision="${esc(plan.revision)}">Adopt reviewed plan</button>`:''}</div>`:'';
+ inspectorPanel('Plan details',planGoalContext(details)+preflightDetails(plan?.preflight)+
+  (plan?`<h3>Proposed work packages</h3><p>Revision <code>${esc(plan.revision||'Legacy plan')}</code></p>
+   <div class="plan-packages">${planPackageDetails(plan)}</div>`:'<p>No saved plan revision.</p>')+
+  (plan&&details.state==='draft'&&!adoptable?'<p>Save or regenerate a revision for the current goal before adoption.</p>':'')+controls);
+}
+async function handleScopedPlanning(action,id,revision){
+ const context=scopedPlanning;
+ requireScopedPlanning(context);
+ const goal=context.goals.find(item=>item.id===id);
+ if(action==='scoped-goal-create'){openScopedGoalForm(context);return;}
+ if(!goal)return;
+ const path=scopedPlanPath(context,id);
+ if(action==='scoped-plan-adopt'){
+  if(!revision)return;
+  openForm('Adopt reviewed plan',context.project.name+' · '+goal.objective,
+   `<p>Revision <code>${esc(revision)}</code></p>`+
+   field('mode','Execution mode','local','select',[['local','Local'],['remote','Remote']])+
+   field('reviewed','I reviewed this revision, existing master code, and relevant open PRs and issues for duplicate work',false,'checkbox'),
+   async form=>{
+    requireScopedPlanning(context);
+    if(!form.elements.reviewed.checked)throw Error('Confirm the review before adopting this revision.');
+    await api(path+'/adopt','POST',{mode:values(form).mode,reviewedExistingWork:true,planRevision:revision});
+    if(scopedPlanningIsCurrent(context)){notify('Reviewed plan adopted');await loadScopedPlanning(context.project.id);}
+   },'Adopt reviewed plan');
+  return;
+ }
+ closeInspector();
+ const request=++scopedPlanRequest;
+ const details=await api(path);
+ if(!scopedPlanningIsCurrent(context)||request!==scopedPlanRequest)return;
+ if(action==='scoped-goal-edit'){openScopedGoalForm(context,goal,details);return;}
+ if(action==='scoped-plan-edit'){
+  if(details.state!=='draft')throw Error('Only draft goals can be planned');
+  scopedPlanEditor={context,goal,details,path};
+  planDraftGoal=details;
+  planDraft={packages:structuredClone(details.plan?.packages||[])};
+  renderPlanEditor();
+  return;
+ }
+ if(action==='scoped-plan-generate'){
+  openForm('Generate plan',context.project.name+' · '+details.objective,
+   '<p>The configured Planner provider uses the project and goal budgets. Saving replaces the current revision.</p>',
+   async ()=>{
+    requireScopedPlanning(context);
+    const plan=await api(path+'/generate','POST',{goalRevision:details.goalRevision,revision:details.plan?.revision});
+    if(scopedPlanningIsCurrent(context)&&request===scopedPlanRequest)showScopedPlan(context,goal,{...details,plan,isLegacy:false});
+   },'Generate plan');
+  return;
+ }
+ showScopedPlan(context,goal,details);
+}
+async function saveScopedPlan(){
+ const editor=scopedPlanEditor;
+ if(!editor||editor.saving)return;
+ requireScopedPlanning(editor.context);
+ if(!planDraft.packages.length)throw Error('Add at least one work package');
+ editor.saving=true;
+ try{
+  const {context,goal,details,path}=editor;
+  const plan=await api(path,'PUT',{packages:planDraft.packages,goalRevision:details.goalRevision,revision:details.plan?.revision});
+  if(scopedPlanningIsCurrent(context)&&scopedPlanEditor===editor){
+   scopedPlanEditor=null;
+   showScopedPlan(context,goal,{...details,plan,isLegacy:false});
+   notify('Plan revision saved');
+  }
+ }finally{editor.saving=false;}
+}
 function renderProjectRecovery(){
  const {projects,selected,loading,error,summary,goals,providers,receipts}=projectRecovery;
  const project=projects.find(item=>item.id===selected);
@@ -552,13 +697,14 @@ function render(){
  document.body.classList.toggle('project-access',scoped);
  if(!token){renderedMain=null;$('main').innerHTML=`<div class="loading-screen"><div style="text-align:center">${ico('shield')}<h2>Connect to Mission Control</h2><p class="muted">Enter the API token to manage your Factory workspace.</p><button class="button button-primary" data-act="open-connection">Connect</button></div></div>`;return}
  if(scoped){
-  const next=renderProjectRecovery();
+  const next=view==='plans'?renderScopedPlanning():renderProjectRecovery();
   if(next!==renderedMain){
-   const restoreFocus=document.activeElement===$('recovery-project');
+   const focused=document.activeElement?.id;
    $('main').innerHTML=next;
    renderedMain=next;
    $('recovery-project')?.addEventListener('change',event=>loadProjectRecovery(event.target.value));
-   if(restoreFocus)$('recovery-project')?.focus();
+   $('scoped-plan-project')?.addEventListener('change',event=>loadScopedPlanning(event.target.value));
+   if(focused==='recovery-project'||focused==='scoped-plan-project')$(focused)?.focus();
   }
   document.querySelectorAll('[data-count]').forEach(el=>el.textContent='');
   return;
@@ -965,7 +1111,7 @@ async function reconcileGoalBudget(goalId){
 }
 
 function showInspector(){inspector=true;$('inspector').classList.add('open');$('inspector').setAttribute('aria-hidden','false');$('inspector-backdrop').classList.add('open')}
-function closeInspector(){inspectorKey=null;inspector=null;$('inspector').classList.remove('open');$('inspector').setAttribute('aria-hidden','true');$('inspector-backdrop').classList.remove('open')}
+function closeInspector(){scopedPlanEditor=null;scopedPlanRequest++;inspectorKey=null;inspector=null;$('inspector').classList.remove('open');$('inspector').setAttribute('aria-hidden','true');$('inspector-backdrop').classList.remove('open')}
 function inspectorPanel(title,body){inspectorKey=null;$('inspector-title').textContent=title;$('inspector-body').innerHTML=body;showInspector()}
 function inspect(type,id){const entity=(type==='project'?state.projects:type==='goal'?state.goals:type==='worker'?state.workers:state.jobs).find(x=>(type==='worker'?x.id: x.id)===id);if(!entity)return;let body='';const kv=(label,v)=>`<div class="kv"><small>${esc(label)}</small><strong>${esc(v)}</strong></div>`;
  if(type==='job'){const j=entity;body=`${badge(j.state)}<div class="job-info-grid" style="margin-top:18px">${kv('Priority',j.priority)}${kv('Risk',j.risk)}${kv('Execution mode',j.mode)}${kv('Stage',j.stage)}${kv('Attempt',j.attempt)}${kv('Tokens',Number(j.tokensIn||0)+Number(j.tokensOut||0))}</div><h3>Description</h3><p class="subtext">${esc(j.description)}</p>${j.error?`<div class="badge danger">${esc(j.error)}</div>`:''}${kv('Branch',j.branch||'—')}${kv('Worktree',j.worktree||'—')}${kv('Head commit',j.headSha||'—')}${kv('Dependencies',j.dependsOn.join(', ')||'None')}${safeUrl(j.prUrl)?`<p><a href="${esc(safeUrl(j.prUrl))}" rel="noopener noreferrer" target="_blank">View pull request ↗</a></p>`:''}<hr class="panel-divider"><h3>Controls</h3><div class="queue-controls">${['queued'].includes(j.state)?`<button class="button button-primary" data-act="job-start" data-id="${j.id}" ${j.mode==='remote'?'disabled':''}>Run now</button><button class="button button-muted" data-control="job:${j.id}:pause">Pause</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop</button>`:''}${['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state)?`<button class="button button-muted" data-control="job:${j.id}:pause">Pause local</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop local</button>`:''}${['paused','stopped','blocked','failed'].includes(j.state)?`<button class="button button-primary" data-control="job:${j.id}:resume">Review & requeue</button>`:''}${['pr_ready','completed_local'].includes(j.state)?`<button class="button button-muted" data-act="verify" data-id="${j.id}">Verify integration</button>`:''}</div>`;
@@ -981,6 +1127,11 @@ function inspect(type,id){const entity=(type==='project'?state.projects:type==='
   inspectorKey=type+':'+id;
   if(type==='goal')renderGoalBudget(id);
   if(type==='job'){renderJobQuality(id);renderJobProviderTurns(id);}
+}
+function planPackageDetails(plan){
+ return plan.packages.map((p,i)=>'<div class="package-row"><span class="package-num">'+(i+1)+'</span><div><strong>'+
+  esc(p.title)+'</strong><small>'+esc(p.description)+'</small><small>Depends on '+esc(p.dependsOn.map(n=>plan.packages[n]?.title).join(', ')||'none')+
+  '</small><small>Paths '+esc(p.files.join(', '))+'</small></div></div>').join('');
 }
 function preflightDetails(preflight){
  if(!preflight)return '<p class="subtext">Save or regenerate the plan to capture master and open work.</p>';
@@ -1036,9 +1187,7 @@ async function act(action,id,index,revision){switch(action){case'open-connection
  case'plan-view':{
  const plan=plansCache.get(id);if(!plan)return;
  const goal=planGoals.get(id);
- const packages=plan.packages.map((p,i)=>'<div class="package-row"><span class="package-num">'+(i+1)+'</span><div><strong>'+
-  esc(p.title)+'</strong><small>'+esc(p.description)+'</small><small>Depends on '+esc(p.dependsOn.map(n=>plan.packages[n]?.title).join(', ')||'none')+
-  '</small><small>Paths '+esc(p.files.join(', '))+'</small></div></div>').join('');
+ const packages=planPackageDetails(plan);
  const adoptable=plan.revision&&plan.preflight&&plan.goalRevision===goal?.goalRevision;
  const adopt=goal?.state!=='draft'?'':adoptable
   ?'<button class="button button-primary" data-act="plan-adopt" data-id="'+id+'" data-revision="'+esc(plan.revision)+'">Adopt reviewed plan</button>'
@@ -1070,7 +1219,17 @@ function showPalette(){const commands=[['Overview','overview','overview'],['Proj
 document.addEventListener('click',async e=>{const btn=e.target.closest('[data-view],[data-act],[data-inspect],[data-edit],[data-control]');if(!btn)return;try{
  if(projectAccess()){
   const action=btn.dataset.act;
-  if(btn.dataset.view==='recovery'){nav('recovery');await loadProjectRecovery();}
+  if(btn.dataset.view==='plans'){nav('plans');await loadScopedPlanning();return;}
+  if(btn.dataset.view==='recovery'){closeInspector();nav('recovery');await loadProjectRecovery();return;}
+  if(view==='plans'){
+   if(action==='scoped-plan-refresh')await loadScopedPlanning();
+   else if(action?.startsWith('scoped-'))await handleScopedPlanning(action,btn.dataset.id,btn.dataset.revision);
+   else if(scopedPlanEditor&&!scopedPlanEditor.saving){
+    if(action==='plan-save')await saveScopedPlan();
+    else if(['plan-close','package-add','package-edit','package-remove'].includes(action))await act(action,btn.dataset.id,btn.dataset.index);
+   }
+   return;
+  }
   if(action==='refresh-project-recovery')await loadProjectRecovery();
   if(action==='project-job-operation')formProjectJobOperation(btn.dataset.id,btn.dataset.index);
   if(action==='settle-project-goal'||action==='settle-project-provider'||action==='recover-project-receipt')
@@ -1100,6 +1259,6 @@ document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLower
 setInterval(statusFromHealth,1100);
 setInterval(()=>{if(token&&Date.now()-lastStateUpdate>11000)refreshState()},10000);
 setInterval(refreshUsage,60000);
-setInterval(()=>{if(view==='plans'&&token)loadPlans();if(view==='workers'&&token)fetchManagedWorkers()},15000);
+setInterval(()=>{if(view==='plans'&&token&&!projectAccess())loadPlans();if(view==='workers'&&token)fetchManagedWorkers()},15000);
 document.querySelectorAll('[data-icon]').forEach(el=>{el.innerHTML=ico(el.dataset.icon)});
 render();statusFromHealth();if(token)connect();else setTimeout(()=>$('connection-modal').showModal(),350);

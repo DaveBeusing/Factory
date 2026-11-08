@@ -2,6 +2,25 @@ using Factory;
 
 internal static class BrowserRecoveryFixture
 {
+    public static object SeedProjectPlanning(string home, string repository)
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "Planner project", Path = repository };
+        var other = new ProjectInfo { Name = "Viewer project" };
+        var foreign = new FactoryGoal { ProjectId = other.Id, Objective = "Other project goal" };
+        store.Change(state =>
+        {
+            state.Projects.AddRange([project, other]);
+            state.Goals.Add(foreign);
+        });
+        var planner = store.CreateViewer("Browser planner");
+        var viewer = store.CreateViewer("Browser planning viewer");
+        store.SetViewerGrant(planner.SubjectId, project.Id, grant: true, planner: true);
+        store.SetViewerGrant(planner.SubjectId, other.Id, grant: true);
+        store.SetViewerGrant(viewer.SubjectId, project.Id, grant: true);
+        return new { planner = planner.Token, viewer = viewer.Token, projectId = project.Id, otherId = other.Id, foreignGoalId = foreign.Id };
+    }
+
     public static void SeedProviderEvidence(string directory, string executorUrl)
     {
         var store = new StateStore(directory);

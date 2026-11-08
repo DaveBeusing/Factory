@@ -7,7 +7,8 @@ internal sealed class ScopedProjectRejected(DraftGoalStatus status, string? mess
     internal DraftGoalStatus Status { get; } = status;
 }
 
-internal sealed record ScopedPlanView(string GoalRevision, FactoryPlan? Plan);
+internal sealed record ScopedPlanView(string GoalRevision, FactoryPlan? Plan, string Objective,
+    List<string> AcceptanceCriteria, string State, bool IsLegacy);
 
 public sealed class ScopedPlanGenerationInput
 {
@@ -29,7 +30,8 @@ public sealed partial class StateStore
         using var db = Open();
         using var tx = db.BeginTransaction(deferred: true);
         var scope = ReadPlanScope(db, tx, verifier, projectId, goalId);
-        return new(Planning.GoalRevision(scope.Goal), scope.Plan);
+        return new(Planning.GoalRevision(scope.Goal), scope.Plan, scope.Goal.Objective, scope.Goal.AcceptanceCriteria,
+            scope.Goal.State, scope.StoredPlan is null && scope.LegacyPlan is not null);
     }
 
     internal FactoryPlan SaveScopedPlan(string authorization, Guid projectId, Guid goalId, FactoryPlan draft)
@@ -215,12 +217,7 @@ public sealed partial class StateStore
         };
         var goal = new FactoryGoal { Id = goalId, ProjectId = projectId, Objective = row.GetString(4), State = row.GetString(5) };
         row.Close();
-        using var criteria = Command(db, tx, """
-            SELECT value FROM goals_acceptance_criteria WHERE owner_id=$goal ORDER BY position;
-            """, ("$goal", goalId));
-        using var values = criteria.ExecuteReader();
-        while (values.Read()) goal.AcceptanceCriteria.Add(values.GetString(0));
-        values.Close();
+        goal.AcceptanceCriteria = ReadPlanningGoalCriteria(db, tx, goalId);
         var stored = ReadStoredPlanRevision(db, tx, goalId);
         var legacy = stored is null ? MissionControlManager.ReadLegacyPlan(this, goalId) : null;
         var plan = stored ?? legacy;

@@ -8,6 +8,7 @@ public sealed class ProjectDraftGoalInput
     public string Objective { get; set; } = "";
     public List<string> AcceptanceCriteria { get; set; } = [];
     public long? TokenBudget { get; set; }
+    public string? GoalRevision { get; set; }
 }
 
 internal enum DraftGoalStatus { Saved, Unauthorized, NotFound, Forbidden, Invalid, Conflict }
@@ -59,6 +60,18 @@ public sealed partial class StateStore
             return new(DraftGoalStatus.Conflict, Error: "Goals with work packages retain their adopted scope.");
         if (existing is not null && draft.TokenBudget is { } budget && budget != existing.Value.Budget)
             return new(DraftGoalStatus.Invalid, Error: "An existing goal budget cannot be changed through this route.");
+        if (existing is { } current)
+        {
+            if (string.IsNullOrWhiteSpace(draft.GoalRevision))
+                return new(DraftGoalStatus.Invalid, Error: "Include the revision of the draft goal you opened.");
+            var currentGoal = new FactoryGoal
+            {
+                Objective = current.Objective,
+                AcceptanceCriteria = ReadPlanningGoalCriteria(db, tx, current.Id)
+            };
+            if (draft.GoalRevision != Planning.GoalRevision(currentGoal))
+                return new(DraftGoalStatus.Conflict, Error: "The draft goal changed. Reopen it before saving.");
+        }
 
         var input = new GoalInput
         {
@@ -108,16 +121,27 @@ public sealed partial class StateStore
         return access.CanPlan ? null : DraftGoalStatus.Forbidden;
     }
 
-    private static (Guid Id, int Position, string State, long Budget, DateTimeOffset CreatedAt, bool HasJobs)? ReadDraftTarget(
+    private static List<string> ReadPlanningGoalCriteria(SqliteConnection db, SqliteTransaction tx, Guid goalId)
+    {
+        using var criteria = Command(db, tx, """
+            SELECT value FROM goals_acceptance_criteria WHERE owner_id=$goal ORDER BY position;
+            """, ("$goal", goalId));
+        using var values = criteria.ExecuteReader();
+        var result = new List<string>();
+        while (values.Read()) result.Add(values.GetString(0));
+        return result;
+    }
+
+    private static (Guid Id, int Position, string State, long Budget, DateTimeOffset CreatedAt, bool HasJobs, string Objective)? ReadDraftTarget(
         SqliteConnection db, SqliteTransaction tx, Guid projectId, Guid goalId)
     {
         using var query = Command(db, tx, """
-            SELECT position, state, token_budget, created_at, EXISTS(SELECT 1 FROM jobs WHERE goal_id=g.id)
+            SELECT position, state, token_budget, created_at, EXISTS(SELECT 1 FROM jobs WHERE goal_id=g.id), objective
             FROM goals g WHERE project_id=$project AND id=$id;
             """, ("$project", projectId), ("$id", goalId));
         using var row = query.ExecuteReader();
         if (!row.Read()) return null;
         return (goalId, row.GetInt32(0), row.GetString(1), row.GetInt64(2),
-            (DateTimeOffset)FromDb(row.GetString(3), typeof(DateTimeOffset))!, row.GetBoolean(4));
+            (DateTimeOffset)FromDb(row.GetString(3), typeof(DateTimeOffset))!, row.GetBoolean(4), row.GetString(5));
     }
 }

@@ -39,10 +39,11 @@ const projectAccess=()=>token.startsWith('factory-viewer-');
 let recoveryRequest=0, projectRecovery={projects:[],selected:'',loading:false};
 let scopedPlanning={projects:[],selected:''}, scopedPlanEditor=null, scopedPlanRequest=0;
 let scopedAnalysis={projects:[],selected:''};
+let scopedActivity={projects:[],selected:'',entries:[]}, activityController=null;
 async function api(path,method='GET',body){if(!token)throw new Error('Connect your API token first');if(projectAccess()&&!path.startsWith('viewer/'))throw new Error('This action requires an administrator connection');const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});if(!res.ok){let msg='Request failed ('+res.status+')';try{let obj=await res.json();msg=obj.error||obj.title||msg}catch{}const error=new Error(msg);error.status=res.status;throw error}if(res.status===204||res.status===202)return null;return res.json()}
 const notify=(message,error=false)=>{const el=document.createElement('div');el.className='toast'+(error?' error':'');el.innerHTML=`<span class="toast-icon">${ico(error?'shield':'check')}</span><span>${esc(message)}</span>`;$('toast-stack').append(el);setTimeout(()=>el.remove(),5500)};
 function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.classList.toggle('hidden',!val)); }
-function nav(v){view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=({plans:'Goal planner',analysis:'Project review'})[v]||v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
+function nav(v){if(view==='events'&&v!=='events'&&projectAccess())stopProjectActivity();view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=({plans:'Goal planner',analysis:'Project review'})[v]||v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
 function statusFromHealth(){
  const since=lastHeartbeat?Date.now()-lastHeartbeat:Infinity;
  const status=projectAccess()?(connected?'connected':'offline'):!token?'offline':!lastHeartbeat?(connected?'connecting':'offline'):connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
@@ -90,6 +91,8 @@ async function connect(nextToken){
    projectRecovery={projects:[],selected:'',loading:false};
    scopedPlanning={projects:[],selected:''};
    scopedAnalysis={projects:[],selected:''};
+   stopProjectActivity();
+   scopedActivity={projects:[],selected:'',entries:[]};
    streamController?.abort();
    closeInspector();
    $('inspector-body').replaceChildren();
@@ -353,6 +356,79 @@ function renderPlans(){
 function renderJobs(){const items=filtered(state.jobs,['title','description','state','risk']);return header('Jobs','Inspect execution, manage priority and safely control work packages.','create-job','Create job')+`<section class="card">${toolbar('jobs',['queued','preparing','building','gating','reviewing','reworking','awaiting_approval','pr_ready','completed_local','integrated','paused','stopped','failed','blocked'])}${items.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(items.slice().reverse())):empty('layers','No matching jobs','Create a work package or adopt an approved plan.','create-job','Create job')}</section>`}
 function renderWorkers(){const w=state.workers;return header('Workers','Monitor health and control remote-worker admission. Drain/disable never force-kills a running process.','create-worker','Register worker')+`<div class="grid metrics-grid">${metric('Registered',w.length,'Known workers','cpu')}${metric('Online',w.filter(workerActive).length,'Heartbeat < 20 seconds','activity')}${metric('Draining',w.filter(x=>x.draining).length,'No new work assigned','pause')}${metric('Available',w.filter(x=>x.enabled&&!x.draining&&workerActive(x)).length,'Eligible for claims','check')}</div><div class="cards-list">${w.length?w.map(x=>`<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('cpu')}</span><div><div class="entity-name">${esc(x.id)}</div><div class="entity-sub">${esc(x.platform)}</div></div></div><div class="entity-body"><div class="worker-heartbeat"><span class="live-dot ${workerActive(x)?'':'offline'}"></span>${workerActive(x)?'Live heartbeat':'Heartbeat unavailable'} · ${esc(relative(x.heartbeat))}</div><p>Admission: ${x.enabled?(x.draining?'Draining':'Enabled'):'Disabled'}</p></div><div class="entity-foot">${badge(!x.enabled?'disabled':x.draining?'draining':workerActive(x)?'online':'offline')}<div class="tiny-actions"><button class="tiny-button" data-inspect="worker:${encodeURIComponent(x.id)}">Inspect</button><button class="tiny-button" data-act="worker-edit" data-id="${encodeURIComponent(x.id)}">Edit</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${managedWorkers.includes(x.id)?'stop':'start'}">${managedWorkers.includes(x.id)?'Stop local':'Start local'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${x.draining||!x.enabled?'enable':'drain'}">${x.draining||!x.enabled?'Enable':'Drain'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:disable" ${!x.enabled?'disabled':''}>Disable</button></div></div></div>`).join(''):empty('cpu','No registered workers','Register a remote worker, then start it with the same ID to track its heartbeat.','create-worker','Register worker')}</div>`}
 function renderQueue(){const queued=state.jobs.filter(j=>j.state==='queued');const active=state.jobs.filter(j=>['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state));const waiting=queued.filter(j=>j.dependsOn.some(dep=>!state.jobs.some(o=>o.id===dep&&o.integrated)));return header('Queue & scheduling','Control admission, prioritize work and inspect dependency blockers.')+`<div class="overview-hero"><div class="overview-hero-left"><div class="hero-orb">${ico('queue')}</div><div><h2>${state.paused?'Queue paused':'Scheduler ready'}</h2><p>${queued.length} queued · ${active.length} active · ${waiting.length} waiting for dependencies</p></div></div><div class="queue-controls"><button class="button button-primary" data-act="queue-run">${ico('play')} Run</button><button class="button button-muted" data-act="queue-pause">${ico('pause')} Pause</button><button class="button button-muted" data-act="queue-resume">${ico('refresh')} Resume</button><button class="button button-danger" data-act="queue-stop">${ico('stop')} Stop</button></div></div><div class="grid metrics-grid">${metric('Ready or queued',queued.length,'Eligible after constraints','layers')}${metric('Active',active.length,'Working or validating','activity')}${metric('Waiting dependencies',waiting.length,'Must integrate predecessors','route')}${metric('Global concurrency',settings.maxParallel??'—','Configured worker slots','cpu')}</div>${card('Work schedule','Prioritized by eligibility and conflict',queued.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(queued.slice().sort((a,b)=>b.priority-a.priority))):empty('check','Queue is empty','No pending jobs. Add a job or adopt a plan.','create-job','Add job'))}<div style="margin-top:17px">${card('In flight','Active jobs continue during queue pause',active.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(active)):empty('activity','Nothing running','Start the queue when jobs are ready.'))}</div>`}
+function stopProjectActivity(){
+ activityController?.abort();
+ activityController=null;
+ scopedActivity={projects:[],selected:scopedActivity.selected,entries:[]};
+}
+async function loadProjectActivity(selected=scopedActivity.selected){
+ const projects=scopedActivity.projects;
+ stopProjectActivity();
+ const controller=new AbortController(),credential=token;
+ activityController=controller;
+ const context={projects,selected,entries:[],loading:true};
+ scopedActivity=context;
+ const current=()=>activityController===controller&&projectAccess()&&view==='events';
+ render();
+ try{
+  const granted=await api('viewer/projects');
+  if(!current())return;
+  const project=granted.find(item=>item.id===selected)||granted[0];
+  Object.assign(context,{projects:granted,selected:project?.id||''});
+  if(!project){context.loading=false;render();return;}
+  const response=await fetch('/api/viewer/projects/'+encodeURIComponent(project.id)+'/events/stream',{
+   headers:{Authorization:'Bearer '+credential},cache:'no-store',signal:controller.signal
+  });
+  if(!current())return;
+  if(response.status===401||response.status===403||response.status===404){revoke();return;}
+  if(!response.ok||!response.body)throw Error('Unable to open the project activity stream.');
+  const reader=response.body.getReader(),decoder=new TextDecoder();
+  let buffer='';
+  while(current()){
+   const {done,value}=await reader.read();
+   if(!current())return;
+   if(done)throw Error('The project activity stream disconnected.');
+   buffer+=decoder.decode(value,{stream:true});
+   let boundary;
+   while((boundary=buffer.indexOf('\n\n'))>=0){
+    const frame=buffer.slice(0,boundary).split('\n');
+    buffer=buffer.slice(boundary+2);
+    if(frame[0]==='event: access-revoked'){revoke();return;}
+    if(frame[0]!=='event: activity')continue;
+    context.entries=JSON.parse(frame[1].slice('data: '.length));
+    context.loading=false;
+    render();
+   }
+  }
+ }catch(error){
+  if(!current())return;
+  if(error.status===401){revoke();return;}
+  Object.assign(context,{entries:[],loading:false,error:error.message});
+  render();
+ }finally{
+  controller.abort();
+  if(activityController===controller)activityController=null;
+ }
+ function revoke(){
+  Object.assign(context,{projects:[],selected:'',entries:[],loading:false,error:'Project access changed. Refresh to check your current grants.'});
+  render();
+ }
+}
+function renderProjectActivity(){
+ const {projects,selected,entries,loading,error}=scopedActivity;
+ const options=projects.map(project=>`<option value="${esc(project.id)}" ${project.id===selected?'selected':''}>${esc(project.name)}</option>`).join('');
+ const picker=options?`<div class="field"><label for="activity-project">Project</label><select id="activity-project">${options}</select></div>`:'';
+ const rows=entries.map(entry=>`<tr><td><strong>${esc(entry.jobTitle)}</strong></td><td>${esc(entry.type.replaceAll('_',' '))}</td>
+  <td><time datetime="${esc(entry.at)}">${esc(dateTime(entry.at))}</time></td></tr>`).join('');
+ let body=header('Project activity','Live job events for the selected project.');
+ body+=card('Project stream','Recent job activity with project-scoped access.',picker,null,
+  '<button class="button button-muted" data-act="project-activity-refresh">Refresh activity</button>');
+ if(loading)return body+'<p role="status">Connecting to project activity…</p>';
+ if(error)return body+`<p role="alert">${esc(error)}</p>`;
+ if(!selected)return body+empty('folder','No granted projects','Ask an administrator for project access.');
+ return body+card('Recent job events','Most recent events appear first',
+  rows?table(['Work package','Event','Time'],rows):empty('activity','No project activity yet','New job events will appear here.'));
+}
 function renderEvents(){return header('Activity & audit trail','Recent persisted lifecycle events, decisions and operational changes.')+card('Event stream','Most recent events appear first',eventItems(state.events,250))}
 function renderUsage(){
  const usd=new Intl.NumberFormat(undefined,{style:'currency',currency:'USD',maximumFractionDigits:6});
@@ -764,7 +840,7 @@ function render(){
  document.body.classList.toggle('project-access',scoped);
  if(!token){renderedMain=null;$('main').innerHTML=`<div class="loading-screen"><div style="text-align:center">${ico('shield')}<h2>Connect to Mission Control</h2><p class="muted">Enter the API token to manage your Factory workspace.</p><button class="button button-primary" data-act="open-connection">Connect</button></div></div>`;return}
  if(scoped){
-  const next=view==='plans'?renderScopedPlanning():view==='analysis'?renderScopedAnalysis():renderProjectRecovery();
+  const next=view==='plans'?renderScopedPlanning():view==='analysis'?renderScopedAnalysis():view==='events'?renderProjectActivity():renderProjectRecovery();
   if(next!==renderedMain){
    const focused=document.activeElement?.id;
    $('main').innerHTML=next;
@@ -772,7 +848,8 @@ function render(){
    $('recovery-project')?.addEventListener('change',event=>loadProjectRecovery(event.target.value));
    $('scoped-plan-project')?.addEventListener('change',event=>loadScopedPlanning(event.target.value));
    $('scoped-analysis-project')?.addEventListener('change',event=>loadScopedAnalysis(event.target.value));
-   if(['recovery-project','scoped-plan-project','scoped-analysis-project'].includes(focused))$(focused)?.focus();
+   $('activity-project')?.addEventListener('change',event=>loadProjectActivity(event.target.value));
+   if(['recovery-project','scoped-plan-project','scoped-analysis-project','activity-project'].includes(focused))$(focused)?.focus();
   }
   document.querySelectorAll('[data-count]').forEach(el=>el.textContent='');
   return;
@@ -1287,6 +1364,8 @@ function showPalette(){const commands=[['Overview','overview','overview'],['Proj
 document.addEventListener('click',async e=>{const btn=e.target.closest('[data-view],[data-act],[data-inspect],[data-edit],[data-control]');if(!btn)return;try{
  if(projectAccess()){
   const action=btn.dataset.act;
+  if(btn.dataset.view==='events'){closeInspector();nav('events');await loadProjectActivity();return;}
+  if(action==='project-activity-refresh'&&view==='events'){await loadProjectActivity();return;}
   if(btn.dataset.view==='plans'){nav('plans');await loadScopedPlanning();return;}
   if(btn.dataset.view==='analysis'){closeInspector();nav('analysis');await loadScopedAnalysis();return;}
   if(btn.dataset.view==='recovery'){closeInspector();nav('recovery');await loadProjectRecovery();return;}

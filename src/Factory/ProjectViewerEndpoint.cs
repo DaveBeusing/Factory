@@ -18,6 +18,8 @@ internal sealed class ProjectViewerEndpoint
                 PlanResponse(() => store.ReconcileProjectProviderHold(context.Request.Headers.Authorization.ToString(),
                     projectId, reservationId, input))).WithMetadata(viewer);
         const string projectRoute = "/api/viewer/projects/{projectId:guid}";
+        app.MapGet(projectRoute + "/events/stream", (HttpContext context, Guid projectId) =>
+            StreamProjectActivity(context, store, projectId)).WithMetadata(viewer);
         const string reviewRoute = projectRoute + "/analysis";
         app.MapGet(reviewRoute, (HttpContext context, Guid projectId) =>
             PlanResponse(() => new { review = store.ReadScopedProjectReview(context.Request.Headers.Authorization.ToString(), projectId) }))
@@ -130,6 +132,50 @@ internal sealed class ProjectViewerEndpoint
                     return Results.NotFound();
                 }
             }).WithMetadata(viewer);
+    }
+
+    private static async Task StreamProjectActivity(HttpContext context, StateStore store, Guid projectId)
+    {
+        var authorization = context.Request.Headers.Authorization.ToString();
+        var ct = context.RequestAborted;
+        ProjectActivityBatch batch;
+        try { batch = store.ReadProjectActivity(authorization, projectId, null); }
+        catch (ScopedProjectRejected ex)
+        {
+            await PlanFailure(ex).ExecuteAsync(context);
+            return;
+        }
+        context.Response.ContentType = "text/event-stream";
+        context.Response.Headers.CacheControl = "no-store";
+        context.Response.Headers["X-Accel-Buffering"] = "no";
+        try
+        {
+            await SendSnapshot(batch);
+            while (true)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), ct);
+                ProjectActivityBatch next;
+                try { next = store.ReadProjectActivity(authorization, projectId, batch); }
+                catch (ScopedProjectRejected)
+                {
+                    await Send("event: access-revoked\ndata: {}\n\n");
+                    return;
+                }
+                if (batch.Entries.SequenceEqual(next.Entries)) await Send(": keepalive\n\n");
+                else await SendSnapshot(next);
+                batch = next;
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+
+        Task SendSnapshot(ProjectActivityBatch current) =>
+            Send("event: activity\ndata: " + Json.Stringify(current.Entries).Replace("\r", "").Replace("\n", "") + "\n\n");
+
+        async Task Send(string frame)
+        {
+            await context.Response.WriteAsync(frame, ct);
+            await context.Response.Body.FlushAsync(ct);
+        }
     }
 
     private static IResult WriteDraft(StateStore store, HttpContext context, Guid projectId, Guid? goalId,

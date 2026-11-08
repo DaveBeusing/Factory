@@ -732,6 +732,67 @@ browserTest('reviews only the selected project and creates goals from the curren
   assert.ok(state.events.some(event => event.type === 'review_goal_created' && event.message.includes(goal.id)));
 }, seedProjectPlanning);
 
+browserTest('streams only selected project activity and closes a revoked connection', async ({ page, nav, connection, fixture, home }) => {
+  await page.locator('#brand-connection').click();
+  await connection.getByLabel('API token').fill(fixture.viewer);
+  await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+  await connection.waitFor({ state: 'hidden' });
+  await nav.getByRole('button', { name: 'Activity' }).click();
+  const main = page.locator('#main');
+  const picker = main.getByLabel('Project', { exact: true });
+  const row = (title) => main.getByRole('row').filter({ hasText: title });
+  await row('First activity job').waitFor();
+  assert.equal(await row('Second activity job').count(), 0);
+  assert.doesNotMatch(await main.innerText(), /Hidden activity|private internal fixture message|global event/);
+  await picker.selectOption(fixture.secondId);
+  await row('Second activity job').waitFor();
+  assert.equal(await row('First activity job').count(), 0);
+  await picker.selectOption(fixture.firstId);
+  await row('First activity job').waitFor();
+
+  const streamUrl = (id) => new URL('/api/viewer/projects/' + id + '/events/stream', page.url());
+  const headers = { Authorization: 'Bearer ' + fixture.viewer };
+  const foreign = await fetch(streamUrl(fixture.hiddenId), { headers, signal: AbortSignal.timeout(10_000) });
+  assert.equal(foreign.status, 404);
+  const global = await fetch(new URL('/api/events/stream', page.url()), { headers, signal: AbortSignal.timeout(10_000) });
+  assert.equal(global.status, 401);
+  const stream = await fetch(streamUrl(fixture.firstId), { headers, signal: AbortSignal.timeout(20_000) });
+  assert.equal(stream.status, 200);
+  assert.match(stream.headers.get('content-type'), /^text\/event-stream/);
+  const reader = stream.body.getReader(), decoder = new TextDecoder();
+  let wire = '';
+  while (!wire.includes('\n\n')) {
+    const part = await reader.read();
+    assert.equal(part.done, false);
+    wire += decoder.decode(part.value, { stream: true });
+  }
+  assert.match(wire, /First activity job/);
+  assert.doesNotMatch(wire, /Second activity job|Hidden activity job|private internal|global event/);
+
+  const tests = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
+  execFileSync('dotnet', [tests, '--browser-append-project-activity', home, fixture.firstJobId], { timeout: 15_000 });
+  await row('First activity job').filter({ hasText: 'job control' }).waitFor();
+  assert.doesNotMatch(await main.innerText(), /private live event details/);
+  const factory = path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll');
+  execFileSync('dotnet', [factory, 'viewer', 'revoke', '--subject', fixture.subjectId, '--project', 'First activity project'],
+    { env: { ...process.env, FACTORY_HOME: home }, timeout: 15_000 });
+  for (;;) {
+    const part = await reader.read();
+    if (part.done) break;
+    wire += decoder.decode(part.value, { stream: true });
+  }
+  assert.match(wire, /event: access-revoked/);
+  await main.getByText(/Project access changed/).waitFor();
+  assert.equal(await row('First activity job').count(), 0);
+  assert.equal((await fetch(streamUrl(fixture.firstId), { headers, signal: AbortSignal.timeout(10_000) })).status, 404);
+  await main.getByRole('button', { name: 'Refresh activity' }).click();
+  await row('Second activity job').waitFor();
+  assert.deepEqual(await picker.locator('option').allTextContents(), ['Second activity project']);
+}, async (home) => {
+  const dll = path.join(root, 'tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll');
+  return JSON.parse(execFileSync('dotnet', [dll, '--browser-project-activity-fixture', home], { encoding: 'utf8', timeout: 15_000 }));
+});
+
 async function seedProjectPlanning(home) {
   const repo = path.join(home, 'planning-repository');
   await mkdir(repo);

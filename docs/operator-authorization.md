@@ -21,7 +21,7 @@ Register each human with a stable server-assigned subject ID. Initially issue a 
 | Current surface | LT-04 handling |
 | --- | --- |
 | `/api/state`, `/api/providers`, `/api/usage`, `/api/health`, `/api/settings` and `/api/workers/managed` | Keep administrative access. Add explicit project projections for operators. Filter each aggregate by project before computing totals. Account quotas, host details and global worker lists remain administrative. |
-| `/api/events/stream` | Keep the existing stream administrative. Add a project stream only after event ownership and revocation during a connection are covered. Unscoped events stay out of project streams. |
+| `/api/events/stream` | Keep the existing stream administrative. `GET /api/viewer/projects/{projectId}/events/stream` streams redacted job events for a granted project and closes on credential or grant changes. Unscoped events stay out of the project stream. |
 | `/api/projects/{id}/analysis` and project settings | Resolve the project on the server. Allow the project-specific analysis actions by role. Keep provider routing and controller-wide configuration administrative in the first release. |
 | `/api/plans/{goalId}`, `/api/goals/{id}/*` and `/api/jobs/{id}/*` | Resolve ownership through the stored goal or job. Authorize the specific operation and verify all referenced IDs, including dependencies, reservations and provider turns. Keep cross-project moves administrative. |
 | `/api/providers/budget-reservations/{id}/*` and receipt recovery | Resolve reservation → usage → project and receipt turn → lease → job → project. Expose a summary and recovery action. Keep raw receipts, grant digests and lease credentials inaccessible to project operators. |

@@ -2,6 +2,31 @@ using Factory;
 
 internal static class BrowserRecoveryFixture
 {
+    public static object SeedProjectActivity(string home)
+    {
+        var store = new StateStore(home);
+        var first = new ProjectInfo { Name = "First activity project" };
+        var second = new ProjectInfo { Name = "Second activity project" };
+        var hidden = new ProjectInfo { Name = "Hidden activity project" };
+        var firstJob = new FactoryJob { ProjectId = first.Id, Title = "First activity job" };
+        var secondJob = new FactoryJob { ProjectId = second.Id, Title = "Second activity job" };
+        var hiddenJob = new FactoryJob { ProjectId = hidden.Id, Title = "Hidden activity job" };
+        store.Change(state =>
+        {
+            state.Projects.AddRange([first, second, hidden]);
+            state.Jobs.AddRange([firstJob, secondJob, hiddenJob]);
+        });
+        store.Event(firstJob.Id, "queued", "private internal fixture message");
+        store.Event(secondJob.Id, "queued", "another project event");
+        store.Event(hiddenJob.Id, "queued", "hidden project event");
+        store.Event(null, "queued", "global event without ownership");
+        var viewer = store.CreateViewer("Browser activity viewer");
+        store.SetViewerGrant(viewer.SubjectId, first.Id, grant: true);
+        store.SetViewerGrant(viewer.SubjectId, second.Id, grant: true);
+        return new { viewer = viewer.Token, viewer.SubjectId, firstId = first.Id, secondId = second.Id,
+            hiddenId = hidden.Id, firstJobId = firstJob.Id, secondJobId = secondJob.Id };
+    }
+
     public static object SeedProjectPlanning(string home, string repository)
     {
         var store = new StateStore(home);

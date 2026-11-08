@@ -182,6 +182,8 @@ public sealed partial class StateStore
                 SELECT 1 FROM budget_reconciler_project_grants WHERE subject_id=$subject AND project_id=p.id
             ),EXISTS(
                 SELECT 1 FROM operator_project_grants WHERE subject_id=$subject AND project_id=p.id
+            ),EXISTS(
+                SELECT 1 FROM planner_project_grants WHERE subject_id=$subject AND project_id=p.id
             )
             FROM granted g JOIN projects p ON p.id=g.project_id
             ORDER BY p.name,p.id;
@@ -189,11 +191,11 @@ public sealed partial class StateStore
         using var row = projects.ExecuteReader();
         var result = new List<ViewerProjectAccess>();
         while (row.Read())
-            result.Add(new(Guid.Parse(row.GetString(0)), row.GetString(1), row.GetBoolean(2), row.GetBoolean(3)));
+            result.Add(new(Guid.Parse(row.GetString(0)), row.GetString(1), row.GetBoolean(2), row.GetBoolean(3), row.GetBoolean(4)));
         return result;
     }
 
-    internal sealed record ViewerProjectAccess(Guid Id, string Name, bool CanReconcileBudget, bool CanOperate);
+    internal sealed record ViewerProjectAccess(Guid Id, string Name, bool CanReconcileBudget, bool CanOperate, bool CanPlan);
 
     private static string? ReadViewerVerifier(string authorization)
     {

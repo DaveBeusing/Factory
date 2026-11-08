@@ -7,7 +7,8 @@ internal sealed class ScopedProjectRejected(DraftGoalStatus status, string? mess
     internal DraftGoalStatus Status { get; } = status;
 }
 
-internal sealed record ScopedPlanView(string GoalRevision, FactoryPlan? Plan);
+internal sealed record ScopedPlanView(string GoalRevision, FactoryPlan? Plan, string Objective,
+    List<string> AcceptanceCriteria, string State, bool IsLegacy);
 
 public sealed class ScopedPlanGenerationInput
 {
@@ -29,7 +30,8 @@ public sealed partial class StateStore
         using var db = Open();
         using var tx = db.BeginTransaction(deferred: true);
         var scope = ReadPlanScope(db, tx, verifier, projectId, goalId);
-        return new(Planning.GoalRevision(scope.Goal), scope.Plan);
+        return new(Planning.GoalRevision(scope.Goal), scope.Plan, scope.Goal.Objective, scope.Goal.AcceptanceCriteria,
+            scope.Goal.State, scope.StoredPlan is null && scope.LegacyPlan is not null);
     }
 
     internal FactoryPlan SaveScopedPlan(string authorization, Guid projectId, Guid goalId, FactoryPlan draft)

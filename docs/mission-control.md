@@ -41,6 +41,12 @@ Start with [Project review and goal planning](project-reviews.md) for the workfl
 
 Use **Projects → Inspect → Configure AI providers** to route operations to enabled profiles. **Capacity** shows attributed usage, Factory-local limits and any account windows reported by the provider. The **Goal Planner** also shows the shared controller Codex allowance next to local project capacity. See [Provider routing and budgets](providers.md) for configuration and accounting. Use the [recovery guide](recovery.md) to review interrupted jobs and settle held usage.
 
+## Project goal planner
+
+Connect with a project token and open **Goal planner**. The project selector lists granted projects. A **Planner** grant in the selected project enables creating and editing draft goals, building work packages, and generating a plan with the configured provider and budget.
+
+Save the plan to create a revision and inspect its master and open-work review before adopting it. The adoption dialog identifies the exact revision and asks for an explicit review acknowledgment and the execution mode. If another planner changes the revision, reopen **Review plan** and review the replacement before adopting.
+
 ## Project recovery
 
 Connect through the sidebar connection control with a project token issued by `factory viewer create`. Mission Control opens **Project recovery** and lists only projects granted to that identity.

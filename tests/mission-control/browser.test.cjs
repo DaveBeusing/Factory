@@ -618,6 +618,7 @@ browserTest('plans and adopts only the reviewed revision in the granted project'
   assert.deepEqual((await api('state')).goals.find((item) => item.id === goal.id).acceptanceCriteria, ['Keep the newer criteria']);
   await form.getByRole('button', { name: 'Cancel' }).click();
   await goalRow.getByRole('button', { name: 'Edit draft goal' }).click();
+  await form.waitFor({ state: 'visible' });
   assert.equal(await criteria.inputValue(), 'Keep the newer criteria');
   await criteria.fill('Record the verified outcome\nDocument the project boundary');
   await form.getByRole('button', { name: 'Update draft goal' }).click();

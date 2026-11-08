@@ -93,8 +93,13 @@ internal static class ProjectPlanningTests
             await Request(bob.Token, HttpMethod.Put, goalUrl, HttpStatusCode.Forbidden, draft);
             await Request(alice.Token, HttpMethod.Put, goalUrl, HttpStatusCode.BadRequest,
                 new { objective = "Budget change", tokenBudget = 10 });
+            await Request(alice.Token, HttpMethod.Put, goalUrl, HttpStatusCode.BadRequest,
+                new { objective = "Revision required" });
+            var goalRevision = Planning.GoalRevision(goal);
             await Request(alice.Token, HttpMethod.Put, goalUrl, HttpStatusCode.OK,
-                new { objective = "Edited draft", acceptanceCriteria = new[] { "Document behavior" }, subjectId = bob.SubjectId });
+                new { objective = "Edited draft", acceptanceCriteria = new[] { "Document behavior" }, subjectId = bob.SubjectId, goalRevision });
+            await Request(alice.Token, HttpMethod.Put, goalUrl, HttpStatusCode.Conflict,
+                new { objective = "Stale edit", goalRevision });
 
             using (var audit = db.CreateCommand())
             {
@@ -115,7 +120,8 @@ internal static class ProjectPlanningTests
                 BEGIN SELECT RAISE(ABORT, 'PRIVATE-AUDIT-FAILURE'); END;
                 """);
             var failure = await Request(alice.Token, HttpMethod.Put, goalUrl, HttpStatusCode.InternalServerError,
-                new { objective = "Must roll back", acceptanceCriteria = new[] { "Must roll back" } });
+                new { objective = "Must roll back", acceptanceCriteria = new[] { "Must roll back" },
+                    goalRevision = Planning.GoalRevision(store.Read().Goals.Single(item => item.Id == goal.Id)) });
             var persisted = store.Read().Goals.Single(item => item.Id == goal.Id);
             Require(persisted.Objective == "Edited draft" && persisted.AcceptanceCriteria.SequenceEqual(["Document behavior"]) &&
                 persisted.TokenBudget == 1234 && ReadAuditCount() == 2, "Audit failure must roll back the goal update");

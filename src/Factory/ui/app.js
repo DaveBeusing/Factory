@@ -452,7 +452,8 @@ function openScopedGoalForm(context,goal,details){
    requireScopedPlanning(context);
    const input=values(form);
    const payload={objective:input.objective.trim(),acceptanceCriteria:lines(input.criteria)};
-   if(!goal){
+   if(goal)payload.goalRevision=details.goalRevision;
+   else{
     payload.tokenBudget=Number(input.tokenBudget);
     if(!input.tokenBudget||!Number.isSafeInteger(payload.tokenBudget)||payload.tokenBudget<0)throw Error('Enter a valid token budget');
    }

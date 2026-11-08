@@ -217,12 +217,7 @@ public sealed partial class StateStore
         };
         var goal = new FactoryGoal { Id = goalId, ProjectId = projectId, Objective = row.GetString(4), State = row.GetString(5) };
         row.Close();
-        using var criteria = Command(db, tx, """
-            SELECT value FROM goals_acceptance_criteria WHERE owner_id=$goal ORDER BY position;
-            """, ("$goal", goalId));
-        using var values = criteria.ExecuteReader();
-        while (values.Read()) goal.AcceptanceCriteria.Add(values.GetString(0));
-        values.Close();
+        goal.AcceptanceCriteria = ReadPlanningGoalCriteria(db, tx, goalId);
         var stored = ReadStoredPlanRevision(db, tx, goalId);
         var legacy = stored is null ? MissionControlManager.ReadLegacyPlan(this, goalId) : null;
         var plan = stored ?? legacy;

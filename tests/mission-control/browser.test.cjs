@@ -607,6 +607,18 @@ browserTest('plans and adopts only the reviewed revision in the granted project'
   await goalRow.getByRole('button', { name: 'Edit draft goal' }).click();
   const criteria = form.getByLabel('Acceptance criteria (one per line)');
   assert.equal(await criteria.inputValue(), 'Record the verified outcome');
+  const readDraft = await (await request(fixture.planner, planRoute)).json();
+  const goalRoute = route(fixture.projectId) + '/goals/' + goal.id;
+  const concurrent = await request(fixture.planner, goalRoute, { method: 'PUT',
+    data: { objective: goal.objective, acceptanceCriteria: ['Keep the newer criteria'], goalRevision: readDraft.goalRevision } });
+  assert.equal(concurrent.status(), 200);
+  await criteria.fill('Outdated change from the first dialog');
+  await form.getByRole('button', { name: 'Update draft goal' }).click();
+  await page.getByText('The draft goal changed. Reopen it before saving.').waitFor();
+  assert.deepEqual((await api('state')).goals.find((item) => item.id === goal.id).acceptanceCriteria, ['Keep the newer criteria']);
+  await form.getByRole('button', { name: 'Cancel' }).click();
+  await goalRow.getByRole('button', { name: 'Edit draft goal' }).click();
+  assert.equal(await criteria.inputValue(), 'Keep the newer criteria');
   await criteria.fill('Record the verified outcome\nDocument the project boundary');
   await form.getByRole('button', { name: 'Update draft goal' }).click();
   await form.waitFor({ state: 'hidden' });

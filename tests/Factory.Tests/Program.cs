@@ -46,6 +46,18 @@ if (args is ["--browser-project-jobs-fixture", var projectJobsHome, var projectJ
     return 0;
 }
 
+if (args is ["--browser-project-activity-fixture", var activityHome])
+{
+    Console.WriteLine(Json.Stringify(BrowserRecoveryFixture.SeedProjectActivity(activityHome)));
+    return 0;
+}
+
+if (args is ["--browser-append-project-activity", var activityEventHome, var activityJobId])
+{
+    new StateStore(activityEventHome).Event(Guid.Parse(activityJobId), "job_control", "private live event details");
+    return 0;
+}
+
 if (args is ["--browser-project-planning-fixture", var planningHome, var planningRepository])
 {
     Console.WriteLine(Json.Stringify(BrowserRecoveryFixture.SeedProjectPlanning(planningHome, planningRepository)));

@@ -41,6 +41,12 @@ Start with [Project review and goal planning](project-reviews.md) for the workfl
 
 Use **Projects → Inspect → Configure AI providers** to route operations to enabled profiles. **Capacity** shows attributed usage, Factory-local limits and any account windows reported by the provider. The **Goal Planner** also shows the shared controller Codex allowance next to local project capacity. See [Provider routing and budgets](providers.md) for configuration and accounting. Use the [recovery guide](recovery.md) to review interrupted jobs and settle held usage.
 
+## Project activity
+
+Open **Activity** with a project token to stream recent job events for a granted project. The view shows work package titles, event types and timestamps. Internal event messages and global events remain available through administrator access.
+
+Switching projects closes the previous stream. The controller rechecks credentials and project grants before every batch. If access changes, the stream closes and Mission Control clears the displayed events. Use **Refresh activity** to reconnect with your current grants.
+
 ## Project review
 
 Open **Project review** with a project token and select a granted repository. Viewers can read its latest project review. Planners can run a deterministic inspection of master and use **Review & create draft goal** on a finding. The draft opens in the selected project's Goal planner. The controller rejects a replaced review or an advanced master. Project-token reviews use the static checks and have their own saved snapshots. The administrator review can also include provider advisory commentary.

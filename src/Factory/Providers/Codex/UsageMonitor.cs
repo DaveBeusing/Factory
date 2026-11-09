@@ -97,7 +97,11 @@ public static class UsageMonitor
         };
     }
 
-    public static async Task<UsageSnapshot> GetAsync(string home, CancellationToken cancellationToken = default)
+    public static Task<UsageSnapshot> GetAsync(string home, CancellationToken cancellationToken = default) =>
+        GetAsync(home, ReadLiveAsync, cancellationToken);
+
+    internal static async Task<UsageSnapshot> GetAsync(string home,
+        Func<CancellationToken, Task<UsageSnapshot>> readLive, CancellationToken cancellationToken = default)
     {
         home = Path.GetFullPath(home);
         var now = DateTimeOffset.UtcNow;
@@ -109,7 +113,7 @@ public static class UsageMonitor
             if (Cached.TryGetValue(home, out cached) && now - cached.At < CacheAge) return cached.Value;
             try
             {
-                var latest = await ReadLiveAsync(cancellationToken);
+                var latest = await readLive(cancellationToken);
                 if (latest.Weekly == null && latest.ShortWindow == null)
                     throw new InvalidDataException("No recognized account allowance windows were returned");
                 Cached[home] = (now, latest);

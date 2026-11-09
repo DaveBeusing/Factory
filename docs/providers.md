@@ -25,6 +25,16 @@ Mixed routing requires a v2 worker and matching executor configuration. The clai
 
 The controller's Codex account windows can be stale and are separate from Factory's local token caps. The current contract exposes no executor-account window. An executor allowance would require a fresh observation tied to an identified account scope.
 
+### LT-05 compatibility and allowance checks
+
+The Windows rehearsal used the current build based on `96c97b0` and the historical build from `8a4eba1` (#30). The current controller client with the historical executor and the historical controller client with the current executor each completed a read-only review over loopback with a synthetic Ollama response. Both directions preserved the lease, observed model and final token counts. When an older receipt has no cost field, the current controller reads the amount as unknown.
+
+The historical executor predates durable receipt recovery. Its executor credential receives HTTP 401 on the current receipt lookup path. Use matching builds when recovery is required. The rehearsal covered review turns and receipt lookup.
+
+After a failed allowance refresh, the controller can return a saved observation up to 15 minutes old with its original timestamp and the stale flag. Older observations and snapshots with no timestamp return unknown percentages. The test exercises both weekly and short windows with a simulated refresh failure.
+
+From the test output directory, run `dotnet Factory.Tests.dll --verify-lt05` to check the historical receipt format and allowance behavior. Append the path to the historical `Factory` executable to exercise both HTTP directions with the actual historical code. Build it from `8a4eba1` and keep its companion files beside the executable. The earlier live pilot (package 05) stays skipped. The authenticated Claude Code cost check remains tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+
 ## Claude Code
 
 Install and authenticate a native Claude Code CLI that supports `--safe-mode` and `--restricted`. Factory discovers the executable under the user profile's `.local/bin` or on an absolute `PATH` entry. Set `FACTORY_CLAUDE_EXECUTABLE` to an absolute executable path to override discovery. Use the provider's own authentication and configure a profile with `"kind": "claude"` and an optional `"model"` such as `"sonnet"`.

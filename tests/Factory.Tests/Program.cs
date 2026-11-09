@@ -1,6 +1,12 @@
 using System.Diagnostics;
 using Factory;
 
+if (args is ["--measure-queue-load"])
+{
+    await QueueLoadBaseline.RunAsync();
+    return 0;
+}
+
 if (args is ["--verify-windows-package", var windowsPackage])
 {
     await WindowsPackageValidation.RunAsync(windowsPackage);

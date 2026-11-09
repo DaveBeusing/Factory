@@ -22,6 +22,14 @@ if (args is ["--verify-remote-restore"])
     return 0;
 }
 
+if (args is ["--verify-lt05", ..])
+{
+    await UsageMonitorTests.RunAsync();
+    await RemoteRestoreTests.VerifyVersionCompatibilityAsync(args.Length == 2 ? Path.GetFullPath(args[1]) : null);
+    Console.WriteLine("PASS allowance freshness and controller–executor compatibility");
+    return 0;
+}
+
 if (args is ["--browser-recovery-fixture", var browserFixtureHome])
 {
     BrowserRecoveryFixture.Seed(browserFixtureHome);
@@ -1825,6 +1833,10 @@ async Task TestAsync(string name, Func<Task> test)
     try { await test(); results.Add((name, true, "")); Console.WriteLine("PASS " + name); }
     catch (Exception ex) { results.Add((name, false, ex.Message)); Console.WriteLine("FAIL " + name + ": " + ex.Message); }
 }
+
+await TestAsync("Account allowance preserves stale observations and expires old values", UsageMonitorTests.RunAsync);
+await TestAsync("Controller and executor preserve the legacy remote receipt contract",
+    () => RemoteRestoreTests.VerifyVersionCompatibilityAsync());
 
 
 await TestAsync("Local queue cannot claim or execute remote jobs", async () =>

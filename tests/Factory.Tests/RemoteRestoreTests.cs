@@ -2,7 +2,10 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Reflection;
+using System.Runtime.Loader;
 using System.Security.Cryptography;
+using System.Text.Json;
 using Factory;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Data.Sqlite;
@@ -10,20 +13,105 @@ using Microsoft.Extensions.Logging;
 
 internal static class RemoteRestoreTests
 {
+    // Receipt shape from the initial mixed-execution implementation (8a4eba1).
+    private sealed record LegacyReceipt(Guid TurnId, Guid LeaseId, string ProviderId, string Role,
+        string InputCommit, string ObservedModel, long InputTokens, long OutputTokens, bool FinalUsage,
+        bool Success, string FinalText, bool FinalTextIsFallback, string OutputTree, byte[] Patch);
+
+    internal static async Task VerifyVersionCompatibilityAsync(string? legacyExecutable = null)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var ct = timeout.Token;
+        var scratch = Directory.CreateTempSubdirectory("factory-executor-versions-");
+        try
+        {
+            const string model = "fixture:1";
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
+            builder.Logging.ClearProviders();
+            await using var provider = builder.Build();
+            provider.Urls.Add("http://127.0.0.1:0");
+            provider.MapPost("/api/generate", () => new
+                { model, done = true, response = "VERDICT: PASS", prompt_eval_count = 30, eval_count = 10 });
+            await provider.StartAsync(ct);
+            var endpoint = provider.Urls.Single();
+            var profile = new ProviderProfile { Id = "version-fixture", Kind = "ollama", Model = model, Endpoint = endpoint };
+            var route = new RemoteProviderRoute("review:code", profile.Id, profile.Kind, "", model, endpoint, 0, 0);
+            var (baseline, head, tree, bundle) = await MakeBundleAsync(scratch.FullName, ct);
+            var grant = new RemoteExecutorGrant(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), 1, route,
+                head, baseline, tree, "example/version-fixture", false, 256, "Review fixture", bundle, ["fixture.txt"], []);
+            var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+            var home = scratch.CreateSubdirectory("current").FullName;
+            var settings = new FactorySettings { EnableRemoteProviderExecutor = true, Providers = [profile] };
+            WriteSettings(home, settings);
+            using var executor = await DashboardProcess.StartAsync(home, token, "http://127.0.0.1:0", ct);
+            using var client = Client(executor.Address, token);
+            using var response = await client.PostAsJsonAsync("api/executor/turn", grant, Json.Options, ct);
+            await RequireStatus(response, HttpStatusCode.OK, "current executor dispatch", ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            using var document = JsonDocument.Parse(body);
+            Check(document.RootElement.TryGetProperty("reportedCostMicros", out _), "Current receipt omitted the optional cost field");
+            var legacy = JsonSerializer.Deserialize<LegacyReceipt>(body, Json.Options);
+            Check(legacy is { Success: true, FinalUsage: true, InputTokens: 30, OutputTokens: 10 } &&
+                legacy.TurnId == grant.TurnId && legacy.LeaseId == grant.LeaseId && legacy.ObservedModel == model,
+                "Legacy controller contract lost current executor evidence");
+
+            var historicalBody = Json.Stringify(legacy);
+            var current = JsonSerializer.Deserialize<RemoteExecutorReceipt>(historicalBody, Json.Options);
+            Check(current is { ReportedCostMicros: null, Success: true, FinalUsage: true, InputTokens: 30, OutputTokens: 10 } &&
+                current.TurnId == grant.TurnId && current.LeaseId == grant.LeaseId && current.ObservedModel == model,
+                "Current controller contract lost legacy evidence or inferred a cost");
+
+            if (legacyExecutable is null) return;
+            var legacyHome = scratch.CreateSubdirectory("legacy").FullName;
+            WriteSettings(legacyHome, settings);
+            using var historicalExecutor = await DashboardProcess.StartAsync(legacyHome, token, "http://127.0.0.1:0", ct, legacyExecutable);
+            var historical = await RemoteProviderExecutor.InvokeAsync(historicalExecutor.Address, token, grant, ct);
+            Check(historical is { ReportedCostMicros: null, Success: true, FinalUsage: true, InputTokens: 30, OutputTokens: 10 } &&
+                historical.TurnId == grant.TurnId && historical.LeaseId == grant.LeaseId && historical.ObservedModel == model,
+                "Historical executor did not return compatible evidence to the current controller client");
+            using var historicalClient = Client(historicalExecutor.Address, token);
+            await PostAsync(historicalClient, "api/executor/receipt",
+                new RemoteProviderExecutor.ReceiptQuery(grant.TurnId, RemoteProviderExecutor.Digest(grant)), HttpStatusCode.Unauthorized, ct);
+
+            // Use the historical controller's real HTTP client and deserializer against the current executor.
+            var assemblyContext = new AssemblyLoadContext("historical-controller", isCollectible: true);
+            try
+            {
+                var assembly = assemblyContext.LoadFromAssemblyPath(Path.ChangeExtension(legacyExecutable, ".dll"));
+                var historicalGrantType = assembly.GetType(typeof(RemoteExecutorGrant).FullName!, throwOnError: true)!;
+                var historicalGrant = JsonSerializer.Deserialize(Json.Stringify(grant with { TurnId = Guid.NewGuid() }),
+                    historicalGrantType, Json.Options);
+                var historicalInvoke = assembly.GetType(typeof(RemoteProviderExecutor).FullName!, throwOnError: true)!
+                    .GetMethod("InvokeAsync", BindingFlags.Static | BindingFlags.NonPublic)!;
+                var call = (Task)historicalInvoke.Invoke(null, [executor.Address, token, historicalGrant, ct])!;
+                await call;
+                var result = call.GetType().GetProperty("Result")!.GetValue(call);
+                var historicalRead = JsonSerializer.Deserialize<LegacyReceipt>(Json.Stringify(result), Json.Options);
+                Check(historicalRead is { Success: true, FinalUsage: true, InputTokens: 30, OutputTokens: 10 } &&
+                    historicalRead.LeaseId == grant.LeaseId && historicalRead.ObservedModel == model,
+                    "Historical controller could not read the current executor receipt");
+            }
+            finally { assemblyContext.Unload(); }
+        }
+        finally { DeleteScratch(scratch); }
+    }
+
     public static async Task RunAsync()
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
         var ct = timeout.Token;
         var scratch = Directory.CreateTempSubdirectory("factory-remote-restore-");
         try { await VerifyAsync(scratch.FullName, ct); }
-        finally
-        {
-            SqliteConnection.ClearAllPools();
-            if (OperatingSystem.IsWindows())
-                foreach (var file in scratch.EnumerateFiles("*", SearchOption.AllDirectories))
-                    if (file.IsReadOnly) file.IsReadOnly = false;
-            scratch.Delete(recursive: true);
-        }
+        finally { DeleteScratch(scratch); }
+    }
+
+    private static void DeleteScratch(DirectoryInfo scratch)
+    {
+        SqliteConnection.ClearAllPools();
+        if (OperatingSystem.IsWindows())
+            foreach (var file in scratch.EnumerateFiles("*", SearchOption.AllDirectories))
+                if (file.IsReadOnly) file.IsReadOnly = false;
+        scratch.Delete(recursive: true);
     }
 
     private static async Task VerifyAsync(string root, CancellationToken ct)

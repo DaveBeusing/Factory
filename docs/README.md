@@ -13,6 +13,7 @@ Start with the [root README](../README.md) for installation, build and CLI comma
 
 ## Development and release
 
+- [Long-term roadmap](roadmap.md) tracks evidence on master, remaining release gates and proposed work.
 - [Queue and SQLite load baseline](queue-load-baseline.md) records the LT-06 workload, measurements and reproduction command.
 - [Mission Control browser tests](../tests/mission-control/README.md) gives the local commands for the Chromium suite used in CI.
 - [Versioning and release policy](versioning.md) covers SemVer, Git-derived builds and provenance.

@@ -33,7 +33,7 @@ The historical executor predates durable receipt recovery. Its executor credenti
 
 After a failed allowance refresh, the controller can return a saved observation up to 15 minutes old with its original timestamp and the stale flag. Older observations and snapshots with no timestamp return unknown percentages. The test exercises both weekly and short windows with a simulated refresh failure.
 
-From the test output directory, run `dotnet Factory.Tests.dll --verify-lt05` to check the historical receipt format and allowance behavior. Append the path to the historical `Factory` executable to exercise both HTTP directions with the actual historical code. Build it from `8a4eba1` and keep its companion files beside the executable. The earlier live pilot (package 05) stays skipped. The authenticated Claude Code cost check remains tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+From the test output directory, run `dotnet Factory.Tests.dll --verify-lt05` to check the historical receipt format and allowance behavior. Append the path to the historical `Factory` executable to exercise both HTTP directions with the actual historical code. Build it from `8a4eba1` and keep its companion files beside the executable. That rehearsal used fixtures. The live pilot is planned in [package 05](roadmap.md#package-05--live-pilot-for-mixed-provider-routing). The authenticated Claude Code cost check remains tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
 
 ## Claude Code
 

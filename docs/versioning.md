@@ -73,7 +73,7 @@ Evidence reviewed on 2026-11-09 at `master` commit `156cf12`. The Windows CI bui
 - **Migration fixtures.** The .NET suite has targeted fixtures for schemas 2–5, 7–12 and fresh schema 18. These exercise specific changes such as fencing, held reservations, unknown historical cost and project access. There is no dedicated starting fixture for schema 6 or 13–17 in the current suite. Choose the supported starting versions before filling the matrix.
 - **Rollback and component compatibility.** Restore a backup compatible with the previous binary when downgrading. The remote restore suite covers coordinated controller and executor backup, replay fencing and credential rotation. LT-05 verified read-only turns across two versions and found that the historical executor rejects the later receipt lookup. The current package tests do not cover a previous binary starting against its restored backup after a schema 18 upgrade rehearsal. They also do not establish a clean, non-mutating rejection of newer schema versions. The public CLR signature test checks one entry point by reflection. A separately compiled consumer and a supported worker version matrix are still pending. See [recovery procedures](recovery.md#restore-or-upgrade-state) and [provider compatibility](providers.md#lt-05-compatibility-and-allowance-checks).
 
-Package 05 remains skipped. Authenticated Claude Code ledger verification remains tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+The live pilot is planned in [package 05](roadmap.md#package-05--live-pilot-for-mixed-provider-routing). Authenticated Claude Code ledger verification remains tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
 
 ## Windows preview package validation
 
@@ -111,7 +111,7 @@ The packaged executable initialized a fresh state directory at schema 11. The ex
 
 The [master CI log](https://github.com/DaveBeusing/Factory/actions/runs/42271003259) emitted `DEP0040` during setup and post-setup for `actions/setup-node@v5`. Upstream traced it to a transitive dependency of `@actions/cache` and shipped the fix with `setup-node` v6.2.0. A local Node 24.22.1 comparison reproduced the warning in both v5 entry points and ran the pinned v6.5.0 entry points without it. The workflow update keeps Node 22 for Chromium. Verification of the updated workflow on the GitHub Windows runner is pending. [Upstream diagnosis and fix](https://github.com/actions/setup-node/pull/1449) · [Pinned release](https://github.com/actions/setup-node/releases/tag/v6.5.0)
 
-The live remote pilot, package 05, remains skipped. The authenticated Claude Code ledger test remains open in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+This preview rehearsal used fixtures. The live pilot is planned in [package 05](roadmap.md#package-05--live-pilot-for-mixed-provider-routing). The authenticated Claude Code ledger test remains open in [#22](https://github.com/DaveBeusing/Factory/issues/22).
 
 ## Parallel development and provenance
 

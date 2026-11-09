@@ -51,6 +51,8 @@ internal static class RemoteProviderLeaseTests
             store = new StateStore(scratch.FullName);
             Check(store.Job(job.Id).GoalId == goal.Id, "Schema 9 migration lost the existing job");
             Check(WorkerProtocol.Claim(store, settings, worker) is null, "Old protocol bypassed routing");
+            Check(WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion + 1) is null,
+                "Unknown protocol version bypassed routing");
             settings.EnableRemoteProviderRouting = false;
             Check(WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion) is null,
                 "Disabled mixed routing accepted a claim");
@@ -108,7 +110,8 @@ internal static class RemoteProviderLeaseTests
             var architecture = Begin(Request("review:architecture", Head));
             Reject(() => Begin(Request("review:security", Head)), "oversubscribed concurrent reviews");
             Check(code.ExpectedInputTree == Tree && code.BaseCommit == Base, "Review was not bound to builder tree and base");
-            Check(Record(code, Receipt(code) with { ReportedCostMicros = -1 }) && Record(architecture, Receipt(architecture)),
+            Check(Record(code, Receipt(code) with { ReportedCostMicros = -1 }) &&
+                Record(architecture, Receipt(architecture) with { ReportedCostMicros = 0 }),
                 "Reviews did not settle");
             foreach (var role in new[] { "review:security", "review:ux" })
             {
@@ -121,8 +124,13 @@ internal static class RemoteProviderLeaseTests
                 Attempt = claim.Job.Attempt, State = JobStates.PrReady, HeadSha = Head };
             var completedSnapshot = store.Read();
             var reportedCosts = completedSnapshot.ProviderUsages.Select(u => u.ReportedCostMicros).ToArray();
-            Check(reportedCosts.Count(cost => cost is null) == 4 && reportedCosts.Contains(125_000L),
+            Check(reportedCosts.Count(cost => cost is null) == 3 && reportedCosts.Contains(125_000L) &&
+                reportedCosts.Contains(0L),
                 "Remote cost was lost, replaced by replay, or inferred for an unknown amount");
+            var zeroUsageId = completedSnapshot.RemoteProviderTurns.Single(t => t.Id == architecture.TurnId).UsageId;
+            Check(completedSnapshot.ProviderUsages.Single(u => u.Id == zeroUsageId) is
+                { ProviderId: "review-fixture", ReportedCostMicros: 0 } zeroUsage && zeroUsage.ProjectId == project.Id,
+                "Reported zero did not reach the correct project and provider");
             Check(!RemoteProviderRouting.VerifyCompletion(completedSnapshot, completedSnapshot.RemoteProviderLeases.Single(),
                 Head, Base), "Unverified GitHub tree was accepted");
             Check(await WorkerProtocol.CompleteAsync(store, status, new FixtureVerifier(), settings: settings) &&

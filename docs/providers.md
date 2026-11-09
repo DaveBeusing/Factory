@@ -10,6 +10,21 @@ Factory has a provider-independent routing boundary with three currently impleme
 
 The Ollama adapter uses the native .NET HTTP client, does not invoke repository commands, and accepts only an unauthenticated HTTP loopback endpoint. It connects directly with redirects and proxies disabled. It receives the bounded context embedded in the prompt; it cannot browse the repository independently. A route that does not satisfy the role's capabilities fails closed, particularly for builder assignments.
 
+## Provider evidence contract
+
+This matrix describes the current remote worker claim protocol (`remote-provider:v2`) and the local evidence available alongside it. A configured model is the requested model. For a remote turn, the executor must report the matching model and final token counts before the turn can qualify as successful.
+
+| Adapter | Observed model evidence | Final token evidence | Reported USD | Account allowance |
+| --- | --- | --- | --- | --- |
+| Codex `exec` (local) | No remote model verification | CLI turn completion usage | Unavailable | Controller account, via Codex app-server |
+| Codex `app-server` (local and remote) | Model in the thread response | App-server usage events | Unavailable | Controller account only |
+| Claude Code (local read-only) | No remote model verification | CLI result usage | CLI `total_cost_usd` when supplied. Live check pending in [#22](https://github.com/DaveBeusing/Factory/issues/22). | Unavailable |
+| Ollama (local and remote review) | Model in the generation response | Completed generation with both counters | Unavailable | Unavailable |
+
+Mixed routing requires a v2 worker and matching executor configuration. The claim rejects a missing or different worker protocol version for a mixed job. The v2 worker claim version does not negotiate the controller–executor API version. Use the same Factory build on controller and executor for mixed execution. The current build can read older saved receipts that omit `reportedCostMicros`. Such receipts retain an unknown cost, while an explicit zero remains a reported amount. Replaying a completed or reconciled turn cannot replace its amount or debit it again.
+
+The controller's Codex account windows can be stale and are separate from Factory's local token caps. The current contract exposes no executor-account window. An executor allowance would require a fresh observation tied to an identified account scope.
+
 ## Claude Code
 
 Install and authenticate a native Claude Code CLI that supports `--safe-mode` and `--restricted`. Factory discovers the executable under the user profile's `.local/bin` or on an absolute `PATH` entry. Set `FACTORY_CLAUDE_EXECUTABLE` to an absolute executable path to override discovery. Use the provider's own authentication and configure a profile with `"kind": "claude"` and an optional `"model"` such as `"sonnet"`.

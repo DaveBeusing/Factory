@@ -250,9 +250,13 @@ internal static class RemoteRestoreTests
     {
         public string Address { get; } = address;
 
-        public static async Task<DashboardProcess> StartAsync(string home, string token, string url, CancellationToken ct)
+        public static async Task<DashboardProcess> StartAsync(string home, string token, string url, CancellationToken ct,
+            string? executable = null)
         {
-            var start = Commands.StartInfo("dotnet", [typeof(DashboardHost).Assembly.Location, "dashboard", "--listen", url], home);
+            string[] arguments = ["dashboard", "--listen", url];
+            var start = executable is null
+                ? Commands.StartInfo("dotnet", [typeof(DashboardHost).Assembly.Location, .. arguments], home)
+                : Commands.StartInfo(executable, arguments, home);
             start.Environment["FACTORY_HOME"] = home;
             start.Environment["FACTORY_REMOTE_EXECUTOR_TOKEN"] = token;
             start.Environment["Logging__LogLevel__Microsoft.Hosting.Lifetime"] = "Information";

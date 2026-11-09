@@ -1,7 +1,10 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Factory;
 using Microsoft.Data.Sqlite;
 
@@ -103,6 +106,7 @@ internal static class WindowsPackageValidation
             VerifyUpgradedState(restored, project.Id, settings);
             Require(ReadSchema(backup) == 8, "Restoring the backup modified its original schema");
             Console.WriteLine("PASS Windows package restore and re-upgrade from the preserved schema 8 backup");
+            await VerifyOperatorMigrationAsync(executable, restored, project, settings);
         }
         finally
         {
@@ -111,6 +115,87 @@ internal static class WindowsPackageValidation
             foreach (var file in scratch.EnumerateFiles("*", SearchOption.AllDirectories))
                 if (file.IsReadOnly) file.IsReadOnly = false;
             scratch.Delete(recursive: true);
+        }
+    }
+
+    private static async Task VerifyOperatorMigrationAsync(string executable, string home, ProjectInfo project, byte[] oldSettings)
+    {
+        const string listen = "http://127.0.0.1:0";
+        const string projectIndex = "api/viewer/projects";
+        using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var ct = deadline.Token;
+        var original = JsonSerializer.Deserialize<FactorySettings>(oldSettings, Json.Options)!;
+        using (var database = OpenDatabase(home))
+        using (var query = database.CreateCommand())
+        {
+            query.CommandText = "SELECT COUNT(*) FROM viewer_subjects;";
+            Require(Convert.ToInt64(query.ExecuteScalar()) == 0, "Migration granted access to an unexpected project identity");
+        }
+        var foreign = new ProjectInfo { Name = "Unassigned migration fixture" };
+        new StateStore(home).Change(state => state.Projects.Add(foreign));
+        string viewerToken;
+        Guid subject;
+        string initialGrants;
+        using (var dashboard = await RemoteRestoreTests.DashboardProcess.StartAsync(home, "", listen, ct, executable))
+        using (var client = OpenClient(dashboard.Address))
+        {
+            await Check(client, original.ApiToken, "api/state", HttpStatusCode.OK);
+            await Check(client, original.ApiToken, projectIndex, HttpStatusCode.Unauthorized);
+            using var created = JsonDocument.Parse(await RunFactoryAsync(executable, home, "viewer", "create", "--name", "LT-04 migration fixture"));
+            viewerToken = created.RootElement.GetProperty("token").GetString()!;
+            subject = created.RootElement.GetProperty("subjectId").GetGuid();
+            Require(await Check(client, viewerToken, projectIndex, HttpStatusCode.OK) == "[]",
+                "A new project identity started with grants");
+            await RunFactoryAsync(executable, home, "viewer", "grant-planner", "--subject", subject.ToString(), "--project", project.Name);
+            initialGrants = await Check(client, viewerToken, projectIndex, HttpStatusCode.OK);
+            using var grants = JsonDocument.Parse(initialGrants);
+            var allowed = grants.RootElement.EnumerateArray().Single();
+            Require(allowed.GetProperty("id").GetGuid() == project.Id && allowed.GetProperty("canPlan").GetBoolean(),
+                "The explicit Planner grant was not applied");
+            await Check(client, viewerToken, "api/state", HttpStatusCode.Unauthorized);
+            await Check(client, viewerToken, projectIndex + "/" + foreign.Id, HttpStatusCode.NotFound);
+        }
+        Console.WriteLine("PASS administrator-only migration preserves admin access and requires explicit project grants");
+
+        var settingsPath = Path.Combine(home, "settings.json");
+        var recoverySettings = JsonNode.Parse(File.ReadAllText(settingsPath))!.AsObject();
+        Require(recoverySettings.Remove("apiToken"), "Missing administrator credential in recovery fixture");
+        File.WriteAllText(settingsPath, recoverySettings.ToJsonString());
+        await RunFactoryAsync(executable, home, "providers");
+        var recovered = JsonSerializer.Deserialize<FactorySettings>(File.ReadAllText(settingsPath), Json.Options)!;
+        Require(recovered.ApiToken.Length > 0 && recovered.ApiToken != original.ApiToken &&
+            recovered.WorkerTokenKey == original.WorkerTokenKey, "Local recovery did not replace only the administrator credential");
+
+        using (var dashboard = await RemoteRestoreTests.DashboardProcess.StartAsync(home, "", listen, ct, executable))
+        using (var client = OpenClient(dashboard.Address))
+        {
+            await Check(client, original.ApiToken, "api/state", HttpStatusCode.Unauthorized);
+            await Check(client, recovered.ApiToken, "api/state", HttpStatusCode.OK);
+            Require(await Check(client, viewerToken, projectIndex, HttpStatusCode.OK) == initialGrants,
+                "Administrator recovery changed project grants");
+            Console.WriteLine("PASS offline administrator recovery replaces the lost token and preserves project grants");
+
+            using var rotated = JsonDocument.Parse(await RunFactoryAsync(executable, home, "viewer", "rotate", "--subject", subject.ToString()));
+            var newToken = rotated.RootElement.GetProperty("token").GetString()!;
+            Require(rotated.RootElement.GetProperty("subjectId").GetGuid() == subject && newToken != viewerToken,
+                "Viewer rotation did not preserve identity and replace the credential");
+            await Check(client, viewerToken, projectIndex, HttpStatusCode.Unauthorized);
+            Require(await Check(client, newToken, projectIndex, HttpStatusCode.OK) == initialGrants,
+                "Viewer rotation changed project grants");
+            await Check(client, newToken, projectIndex + "/" + foreign.Id, HttpStatusCode.NotFound);
+            await Check(client, newToken, "api/state", HttpStatusCode.Unauthorized);
+        }
+        Console.WriteLine("PASS live project token rotation rejects the old token and preserves scoped access");
+
+        static HttpClient OpenClient(string address) => new(new HttpClientHandler { UseProxy = false }) { BaseAddress = new Uri(address) };
+
+        async Task<string> Check(HttpClient client, string token, string route, HttpStatusCode expected)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, route);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var response = await client.SendAsync(request, ct);
+            Require(response.StatusCode == expected, $"{route} returned {response.StatusCode} instead of {expected}");
+            return await response.Content.ReadAsStringAsync(ct);
         }
     }
 

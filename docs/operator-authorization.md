@@ -1,6 +1,6 @@
 # LT-04 operator authorization design
 
-Status is proposed. The starting point is `master` at `ee922ba`, with LT-03 recovery tests passing. The dashboard currently accepts the administrator bearer for its operator routes. Remote workers and the executor have separate credentials. Worker project grants already constrain execution. Human project authorization will add a separate identity and access model to the dashboard.
+Mission Control supports project-scoped human credentials alongside administrator access. Remote workers and the executor use separate credentials. The Windows package validation exercises the migration from a synthetic administrator-only installation, local administrator recovery and live project-token rotation.
 
 ## Roles and permissions
 
@@ -59,6 +59,14 @@ Send the viewer token as an `Authorization: Bearer` header on these API requests
 - `GET /api/viewer/projects/{projectId}/jobs/{jobId}/quality` returns quality status and the verification timestamp when available. The projection omits raw reports, free-text findings, check names, and host paths.
 
 Invalid viewer credentials return HTTP 401. A valid viewer outside the project grant, or a request for another project's job, receives HTTP 404.
+
+## Local administrator recovery and audit retention
+
+If the administrator token is lost or must be replaced, stop the controller. From a trusted local administrator shell, select its `FACTORY_HOME` and save a protected backup of `settings.json` and the controller database. Remove only the `apiToken` property from `settings.json`, then run `factory providers` locally to generate and persist a replacement. Restart the controller and reconnect with the new token from that file. The worker key and existing project grants stay in place. Treat the settings file and its backup as credentials.
+
+To rotate a project token, run `factory viewer rotate --subject SUBJECT_GUID` from the same local shell. The replacement token keeps the subject and its grants. The previous token fails authentication as soon as rotation commits.
+
+The controller retains the latest 20,000 operational events. Project Activity shows a redacted selection of the latest 100 job events for the selected project. Dedicated access, planning, job operation and budget audit tables live in the controller database and have no automatic age-based pruning. Include the database in backups and apply the installation's audit retention and access policy to those backups.
 
 ## Project planning
 

@@ -62,6 +62,8 @@ Invalid viewer credentials return HTTP 401. A valid viewer outside the project g
 
 ## Local administrator recovery and audit retention
 
+The operator confirmed the manual Mission Control playtest on 2026-11-09 using the isolated two-project activity fixture. The Windows package rehearsal separately passed schema 8 to 18 migration, backup restore, administrator access recovery and project-token rotation on a running controller.
+
 If the administrator token is lost or must be replaced, stop the controller. From a trusted local administrator shell, select its `FACTORY_HOME` and save a protected backup of `settings.json` and the controller database. Remove only the `apiToken` property from `settings.json`, then run `factory providers` locally to generate and persist a replacement. Restart the controller and reconnect with the new token from that file. The worker key and existing project grants stay in place. Treat the settings file and its backup as credentials.
 
 To rotate a project token, run `factory viewer rotate --subject SUBJECT_GUID` from the same local shell. The replacement token keeps the subject and its grants. The previous token fails authentication as soon as rotation commits.

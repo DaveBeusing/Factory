@@ -29,9 +29,9 @@ All durations are milliseconds. Percentiles use nearest rank within each round.
 
 All 384 measured claims persisted once. Eight callers drained the batch faster in each round and had higher p95 claim latency. The idle SQLite writer acquired the transaction in 0.01 ms at p50 and 0.02 ms at p95. The held writer released after 250.11–251.85 ms, measured from the second caller's attempt. The second writer acquired after 300.94–301.07 ms. All three attempts completed within the timeout.
 
-A second invocation also persisted all 384 claims exactly once. The drain times ranged from 2.07 to 4.73 seconds with one caller and from 1.11 to 1.52 seconds with eight. The contended SQLite acquisitions took 301.49–301.82 ms.
+A second invocation also persisted all 384 claims exactly once. The drain times ranged from 2.07 to 4.73 seconds with one caller and from 1.11 to 1.52 seconds with eight. The highest per-round claim p95 was 140.19 ms with one caller and 604.66 ms with eight. The contended SQLite acquisitions took 301.49–301.82 ms.
 
-These are local comparison values for this fixed workload. They leave production capacity and alert thresholds open. Package 05 remains skipped and the authenticated Claude Code check stays tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+These measurements support the provisional comparison limits below. Package 05 remains skipped and the authenticated Claude Code check stays tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
 
 ## Provider holds, receipt recovery and storage
 
@@ -50,3 +50,31 @@ Durations are in milliseconds. SQLite sizes are the controller database file len
 The seeded database started at 436 KiB and grew by 184 KiB after 48 recoveries. SQLite WAL and SHM files were absent at the sampled boundaries after connections closed. Peak WAL size during writes remains unmeasured. With 16 receipts per batch, nearest-rank p95 equals the slowest receipt in that batch.
 
 All 48 expired turns entered quarantine and settled exactly once. Replaying the receipts with a changed cost preserved the original amounts and token counts. Settlement released provider reservations, kept goal reservations held and left jobs blocked at the fenced generation.
+
+## Provisional operating limits and warnings
+
+Reviewed against `master` at `2adcb8e`. The measured queue envelope is one controller process, one project and bursts of 64 eligible remote jobs with disjoint paths, at one and eight claim callers. The measured recovery envelope is three batches of 16 expired jobs, with four concurrent receipt recoveries per batch and 48 turns retained in the database. Queue and recovery ran separately. Use these configurations for comparisons. Larger queues, overlapping workloads and additional concurrency require their own measurements.
+
+For comparable runs, the warning levels add roughly 25% headroom to the highest observed sample and round up. Flag a breach and repeat the same configuration on a comparable host. A repeated breach warrants investigation. These are manual regression signals for the fixture. Production alert levels remain open.
+
+| Signal | Highest observed | Warn above |
+| --- | ---: | ---: |
+| Drain 64 jobs, one caller | 4.78 s | 6 s |
+| Drain 64 jobs, eight callers | 1.58 s | 2 s |
+| Claim p95, one caller | 142.05 ms | 180 ms |
+| Claim p95, eight callers | 604.66 ms | 800 ms |
+| SQLite write acquisition with a 250 ms hold target | 301.82 ms | 400 ms |
+| Quarantine 16 expired jobs | 34.91 ms | 45 ms |
+| Recover 16 receipts with four callers | 264.30 ms | 350 ms |
+| Slowest receipt in a 16-receipt batch | 181.27 ms | 230 ms |
+| Controller SQLite file growth after 48 recoveries | 184 KiB | 240 KiB |
+| Retained synthetic receipt files after 48 recoveries | 29,664 bytes | 37 KiB |
+
+Treat any SQLite write timeout, duplicate or missing claim, lost hold, duplicate debit or broken lease fence as a failed run on first occurrence. Hold age and backlog need separate thresholds because the fixture creates expired jobs in batches and immediately recovers every available receipt. Storage growth thresholds compare the same starting database and retained workload.
+
+### Evidence needed for production values
+
+- **Queue and claims.** Measure sustained arrival rates, bursts and queue age across projects, including dependencies, overlapping paths, worker polling and HTTP. Sweep caller counts around saturation. Collect enough samples to estimate tail latency and correlate it with throughput, worker count and SQLite retries.
+- **Holds and recovery.** Run recovery while claims and other writes continue. Include unavailable executors, missing and delayed receipts, retries, and realistic receipt payloads. Measure hold age, backlog, recovery success and drain time. Use the results to set a recovery objective and an escalation point for accumulating holds.
+- **SQLite and disk.** Run longer tests with representative retained history on target storage. Sample the peak WAL during writes, checkpoint behavior with long-lived readers, free disk, and growth under the configured retention policy. Repeat with backup and restore activity and measure bytes for controller data and executor receipts separately.
+- **Alert calibration.** Repeat across target deployment sizes and resource profiles. Record latency distributions, error rates and saturation alongside CPU, memory and disk I/O. Set thresholds and evaluation windows against the agreed service objectives, then validate alert behavior with representative healthy load and controlled failures.

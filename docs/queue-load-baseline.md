@@ -32,3 +32,21 @@ All 384 measured claims persisted once. Eight callers drained the batch faster i
 A second invocation also persisted all 384 claims exactly once. The drain times ranged from 2.07 to 4.73 seconds with one caller and from 1.11 to 1.52 seconds with eight. The contended SQLite acquisitions took 301.49–301.82 ms.
 
 These are local comparison values for this fixed workload. They leave production capacity and alert thresholds open. Package 05 remains skipped and the authenticated Claude Code check stays tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+
+## Provider holds, receipt recovery and storage
+
+The same command also reports `recovery`. This measurement starts from `master` at `0ac267a` with the extended fixture applied and ran on the Windows and .NET configuration above. It adds three batches of 16 expired remote jobs to one controller database. Each job has an active provider turn, a goal reservation and a synthetic receipt in a separate executor directory. Prior batches remain in the database.
+
+The quarantine timer covers one production `JobRecovery.QuarantineExpired` call. Four callers then read the saved receipts through `RemoteProviderExecutor.ReadReceiptAsync` and settle them through `RemoteProviderRouting.SettleRecoveredReceipt`. Recovery latency covers the file read and settlement. The batch timer includes dispatching the four callers. Fixture setup, assertions and replay checks are outside the timed sections. The workload uses synthetic evidence and local files. HTTP transport, executor dispatch and real provider calls are outside its scope.
+
+Durations are in milliseconds. SQLite sizes are the controller database file length after quarantine and after recovery. Executor receipt files are reported separately.
+
+| Cumulative turns | Quarantine per batch | Recovery per batch | Receipt p50 | Receipt p95 | SQLite held, KiB | SQLite recovered, KiB | Receipt bytes |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | 31.92 | 206.27 | 21.02 | 181.27 | 468 | 472 | 9,888 |
+| 32 | 30.76 | 203.99 | 22.33 | 181.25 | 536 | 548 | 19,776 |
+| 48 | 34.91 | 264.30 | 32.52 | 180.63 | 608 | 620 | 29,664 |
+
+The seeded database started at 436 KiB and grew by 184 KiB after 48 recoveries. SQLite WAL and SHM files were absent at the sampled boundaries after connections closed. Peak WAL size during writes remains unmeasured. With 16 receipts per batch, nearest-rank p95 equals the slowest receipt in that batch.
+
+All 48 expired turns entered quarantine and settled exactly once. Replaying the receipts with a changed cost preserved the original amounts and token counts. Settlement released provider reservations, kept goal reservations held and left jobs blocked at the fenced generation.

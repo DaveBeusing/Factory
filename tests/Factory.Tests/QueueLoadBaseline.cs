@@ -27,11 +27,12 @@ internal static class QueueLoadBaseline
             }
 
             var sqlite = await MeasureWriterAsync(scratch.CreateSubdirectory("writer").FullName);
+            var recovery = await RecoveryLoadBaseline.MeasureAsync(scratch.CreateSubdirectory("recovery"));
             Console.WriteLine(Json.Stringify(new
             {
                 environment = new { os = RuntimeInformation.OSDescription, architecture = RuntimeInformation.ProcessArchitecture.ToString(),
                     runtime = RuntimeInformation.FrameworkDescription, logicalProcessors = Environment.ProcessorCount },
-                jobsPerRound = Jobs, rounds, sqlite
+                jobsPerRound = Jobs, rounds, sqlite, recovery
             }));
         }
         finally { scratch.Delete(recursive: true); }
@@ -136,7 +137,7 @@ internal static class QueueLoadBaseline
         }
     }
 
-    private static object Percentiles(IEnumerable<double> samples)
+    internal static object Percentiles(IEnumerable<double> samples)
     {
         var sorted = samples.Order().ToArray();
         double At(double fraction) => Math.Round(sorted[(int)Math.Ceiling(sorted.Length * fraction) - 1], 2);

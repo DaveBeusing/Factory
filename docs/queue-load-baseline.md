@@ -31,7 +31,7 @@ All 384 measured claims persisted once. Eight callers drained the batch faster i
 
 A second invocation also persisted all 384 claims exactly once. The drain times ranged from 2.07 to 4.73 seconds with one caller and from 1.11 to 1.52 seconds with eight. The highest per-round claim p95 was 140.19 ms with one caller and 604.66 ms with eight. The contended SQLite acquisitions took 301.49–301.82 ms.
 
-These measurements support the provisional comparison limits below. Package 05 remains skipped and the authenticated Claude Code check stays tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+These measurements support the provisional comparison limits below. The live pilot is planned in [package 05](roadmap.md#package-05--live-pilot-for-mixed-provider-routing). The authenticated Claude Code check stays tracked in [#22](https://github.com/DaveBeusing/Factory/issues/22).
 
 ## Provider holds, receipt recovery and storage
 

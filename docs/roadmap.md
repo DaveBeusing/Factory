@@ -6,7 +6,7 @@ Verified on 2026-11-09 against `master` at `037f2a1`. The [master CI run](https:
 
 Master requires `build-and-test` from GitHub Actions app `15368` on an up-to-date branch and blocks force-pushes. The separate review rule requires one approval and has a PR-only bypass for the repository owner. The required check has no bypass actor. See [integration policy](planning-preflight.md#lt-02-test-results).
 
-Project review, goal planning, master-first adoption, provider attribution, local limits, remote lease verification and Mission Control recovery are available. The current Windows x64 preview is framework-dependent. Codex account windows apply to the controller account. Remote Codex and Ollama report token usage but no USD amount. The earlier live remote pilot, package 05, stays skipped. Issue #22 retains ownership of the authenticated Claude Code cost verification and depends on account access.
+Project review, goal planning, master-first adoption, provider attribution, local limits, remote lease verification and Mission Control recovery are available. The current Windows x64 preview is framework-dependent. Codex account windows apply to the controller account. Remote Codex and Ollama report token usage but no USD amount. Package 05 is back in the roadmap as a staged Codex and Ollama pilot. Issue #22 retains ownership of the authenticated Claude Code cost verification and depends on account access.
 
 ## Execution order
 
@@ -17,6 +17,7 @@ Horizons describe milestones. The implementation layers are sequential because t
 | Verified preview | LT-01 → LT-02 | A Windows package from a known commit can be verified and restored. The integration policy has been exercised. |
 | Operable remote installation | LT-03 → LT-04 | Recovery is repeatable under interruption and credential changes. Project access is enforced for human operators. |
 | Evidence for broader support | LT-05 → LT-06 → LT-07 | Adapter claims, upgrade compatibility and operating limits have recorded evidence. |
+| Live remote evidence | Package 05 after LT-03 through LT-05 baselines | A bounded staging pilot verifies the real Codex and Ollama paths before LT-08 makes any support claim for mixed remote execution. |
 | Release candidate and stable decision | LT-08 | The supported feature and platform matrix has explicit sign-off. |
 
 ## Status on master
@@ -51,7 +52,7 @@ Horizons describe milestones. The implementation layers are sequential because t
 - **Depends on LT-02.** Establish a controller and executor recovery procedure with explicit storage and credential ownership.
 - **Scope.** `src/Factory/RemoteProviderExecutor.cs`, `src/Factory/RemoteProviderRouting.cs`, `src/Factory/JobRecovery.cs`, `src/Factory/StateStore.cs`, `tests/Factory.Tests/RemoteProviderLeaseTests.cs` and `docs/recovery.md`.
 - **Acceptance.** Document a consistent backup of controller state and executor receipts. Separate receipt retention from duplicate-dispatch protection. A receipt involved in an unresolved hold remains recoverable, and cleanup never makes a spent grant runnable again. Document executor credential rotation, expired lease handling and failure modes when receipt storage is unavailable.
-- **Validation.** Fault-injection tests cover executor restart, response loss, stale lease and disk failure. Restore rehearsals demonstrate one debit per turn, recoverable holds and no duplicate provider dispatch. This uses fixtures while the real pilot remains skipped.
+- **Validation.** Fault-injection tests cover executor restart, response loss, stale lease and disk failure. Restore rehearsals demonstrate one debit per turn, recoverable holds and no duplicate provider dispatch. These rehearsals use fixtures. Package 05 adds evidence from real providers in staging.
 
 ## LT-04 · Human operator authorization
 
@@ -85,7 +86,7 @@ Horizons describe milestones. The implementation layers are sequential because t
 
 - **Depends on LT-07.** Prepare a release candidate from an exact commit and document the support scope, release evidence and rollback procedure.
 - **Scope.** `Directory.Build.props`, release provenance and artifact verification, CI packaging and `docs/versioning.md`.
-- **Acceptance.** The release review covers compatibility, security, licensing, artifact integrity, support ownership and recovery. Decide artifact signing and distribution. Every capability advertised for stable has corresponding acceptance evidence. If the mixed remote pilot remains skipped or #22 remains open, label the affected capabilities with the status supported by the available evidence.
+- **Acceptance.** The release review covers compatibility, security, licensing, artifact integrity, support ownership and recovery. Decide artifact signing and distribution. Every capability advertised for stable has corresponding acceptance evidence. Record the package 05 result and #22 status when defining the support scope.
 - **Validation.** Run the release-scope matrix on the candidate artifacts and repeat the restore drill. The RC transition, stable transition and publication are separate approval decisions.
 
 ## Proposed roadmap extensions
@@ -99,4 +100,27 @@ Horizons describe milestones. The implementation layers are sequential because t
 | Proposed LT-09 | Measure production-like capacity and operational alerts. | Run sustained mixed workloads on representative storage. Record queue age, recovery backlog, SQLite retries, peak WAL and retention growth. Set alert windows only after agreeing on service objectives and validating them against healthy and failing runs. |
 | Proposed LT-10 | Establish dependency and release maintenance. | Define a supported-version and end-of-support policy, an update cadence for .NET, SQLite and provider CLIs, and ownership for security fixes and reproducible patch releases. |
 
-Start with LT-07A because the current package rehearsal uses synthetic input and the rollback path determines which prior versions can be supported. LT-07B can proceed once the target Windows images and runtime versions are selected. Keep package 05 skipped. Revisit the authenticated Claude Code test through [#22](https://github.com/DaveBeusing/Factory/issues/22) when account access is available.
+Start with LT-07A because the current package rehearsal uses synthetic input and the rollback path determines which prior versions can be supported. LT-07B can proceed once the target Windows images and runtime versions are selected. Prepare the live pilot in parallel with LT-07. LT-08 can include mixed remote execution in its support scope once the pilot evidence is reviewed.
+
+## Package 05 · Live pilot for mixed provider routing
+
+**Status.** Planned. Run two goal-funded remote jobs in a dedicated staging repository. The first proves the normal path through `pr_ready`. The second exercises an interrupted turn and receipt recovery. Use Codex `app-server` for the builder and an explicitly tagged Ollama model for the four review roles. The [mixed execution setup](providers.md#set-up-mixed-remote-execution) defines the available routes and settings. The authenticated Claude Code cost check remains separate in [#22](https://github.com/DaveBeusing/Factory/issues/22).
+
+### Prerequisites
+
+- Record the green `master` SHA and verify the package manifest. Run that same Factory build on the controller, worker and executor. Use separate state directories and a trusted HTTPS executor on a separate host. Verify access to the staging repository's `master` and to the GitHub App check required on the exact PR head.
+- Verify authenticated Codex `app-server` access on the executor and load the pinned Ollama model on the executor's loopback API. Record the model names and CLI versions. Configure matching provider profiles on the controller and executor. Register one project-scoped worker with `remote-provider:v2` and the required runtime, Git and check capabilities.
+- Approve the staging repository, the harmless test changes and the token ceiling before the run. Start with one active job, a 24,576-token reservation and ceiling per job, a 4,096-token per-turn ceiling, and a 49,152-token goal budget across both jobs. Proposed project profile caps are 16,384 for Codex and 32,768 for Ollama. Confirm these values against the selected models and account access. Treat them as local budget controls. Actual final usage can exceed a reservation and must be reconciled.
+- Provision an executor credential shared only by the controller and executor. Use distinct administrator and worker credentials. Take coordinated baseline backups of controller state, settings and executor dispatch and receipt directories. Assign an operator to stop claims and review recovery evidence. See [remote recovery procedures](recovery.md#back-up-and-restore-remote-execution-state).
+
+### Execution and acceptance
+
+| Check | Pass evidence |
+| --- | --- |
+| Route and model binding | The worker obtains a v2 lease scoped to the staging project. Record the lease ID, generation, turn IDs, roles, provider profiles, requested and observed models, and input commit. Builder evidence comes from Codex and all four review receipts come from Ollama. Model identity matches the bound route for every accepted turn. |
+| Budget and accounting | Record goal, job, profile and per-turn allocations before dispatch. Each receipt's final input and output tokens appear once in the appropriate ledgers and unused capacity is released on normal completion. Compare the receipt totals with Mission Control. Unsupported USD and executor account allowance remain unknown. |
+| GitHub evidence | The builder output stays within the approved paths. Reviews and the required GitHub Actions check apply to the verified PR head. The controller reaches `pr_ready` only after verifying the result. Keep the pilot PR available for inspection. |
+| Interrupted turn | In staging, deliberately drop the executor response after the durable receipt is written and before the controller records it. Let the lease expire and quarantine it. Verify that the job and provider reservations remain held and the stale generation cannot finalize. Recover through Mission Control after an independent evidence review. Replay the recovery and verify one debit, no second provider invocation, and a job that remains blocked for a separate decision. |
+| Evidence and stop conditions | Retain a sanitized record with package SHA, host roles, job, lease and turn IDs, PR head, check result, token totals and recovery outcome. Stop new claims on route mismatch, unresolved accounting discrepancy, missing durable evidence or an unexpected Git side effect. Preserve holds, dispatch markers and receipts. Mark the pilot passed only after both scenarios meet their criteria. |
+
+The pilot tests one bounded staging topology. Production capacity and the supported deployment matrix remain tracked in LT-09 and LT-07 respectively.

@@ -33,3 +33,97 @@
 .project-access #open-search {
   display: none;
 }
+
+/* Consistent workspace spacing and interaction details. */
+.stacked-card { margin-top: 17px; }
+.planner-filter-card { margin-bottom: 17px; }
+.planner-filter-card > .card-body { padding-top: 20px; }
+.planner-filter-card .field:last-child { margin-bottom: 0; }
+.overview-allowance { margin-bottom: 17px; }
+.settings-edit-button { margin-top: 20px; }
+.capacity-note { margin: 17px 0 0; line-height: 1.6; }
+
+.top-create-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 40px;
+  width: 40px;
+  min-width: 40px;
+  height: 40px;
+  min-height: 40px;
+  padding: 0;
+  line-height: 0;
+}
+.top-create-button svg { display: block; width: 18px; height: 18px; stroke-width: 2.2; }
+
+.overview-home-hero .head-actions { gap: 12px; flex-shrink: 0; }
+.overview-home-hero .head-actions .button {
+  position: relative;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 12px;
+  white-space: nowrap;
+  transition: transform .2s ease, background .2s ease, border-color .2s ease, box-shadow .2s ease;
+}
+.overview-home-hero .head-actions .button-muted {
+  color: #e3e6ff;
+  background: rgba(24, 30, 47, .78);
+  border-color: #626080;
+}
+.overview-home-hero .head-actions .button-muted:hover,
+.overview-home-hero .head-actions .button-muted:focus-visible {
+  background: #303350;
+  border-color: #8784bc;
+  transform: translateY(-2px);
+}
+.overview-home-hero .head-actions .button-primary {
+  isolation: isolate;
+  overflow: hidden;
+  color: #181329;
+  border-color: #d1baff;
+  background: linear-gradient(110deg, #9994ff, #c2a3ff 58%, #a5d3ff);
+  box-shadow: 0 5px 18px rgba(159, 138, 255, .28), inset 0 1px 0 rgba(255, 255, 255, .28);
+}
+.overview-home-hero .head-actions .button-primary::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  transform: translateX(-130%);
+  background: linear-gradient(100deg, transparent 18%, rgba(255, 255, 255, .42) 50%, transparent 80%);
+}
+.overview-home-hero .head-actions .button-primary:hover,
+.overview-home-hero .head-actions .button-primary:focus-visible {
+  background: linear-gradient(110deg, #aca7ff, #d1b6ff 58%, #b5dcff);
+  box-shadow: 0 9px 28px rgba(159, 138, 255, .45), 0 0 0 1px rgba(221, 199, 255, .28);
+  transform: translateY(-2px);
+}
+.overview-home-hero .head-actions .button-primary:hover::before,
+.overview-home-hero .head-actions .button-primary:focus-visible::before {
+  animation: mc-overview-sheen .7s ease-out both;
+}
+.overview-home-hero .head-actions .button-primary svg {
+  width: 17px;
+  height: 17px;
+  transition: transform .2s ease;
+}
+.overview-home-hero .head-actions .button-primary:hover svg,
+.overview-home-hero .head-actions .button-primary:focus-visible svg {
+  transform: translateX(2px);
+}
+@keyframes mc-overview-sheen { to { transform: translateX(130%); } }
+@media (max-width: 900px) {
+  .overview-home-hero { flex-wrap: wrap; }
+  .overview-home-hero .head-actions { width: 100%; }
+}
+@media (max-width: 620px) {
+  .overview-home-hero .head-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .overview-home-hero .head-actions .button { padding: 0 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .overview-home-hero .head-actions .button:hover,
+  .overview-home-hero .head-actions .button:focus-visible,
+  .overview-home-hero .head-actions .button-primary:hover svg,
+  .overview-home-hero .head-actions .button-primary:focus-visible svg { transform: none; }
+  .overview-home-hero .head-actions .button-primary::before { display: none; }
+}

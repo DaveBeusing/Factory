@@ -1,5 +1,10 @@
 # Factory versioning and release governance
 
+[← Documentation](README.md) · [CLI](cli.md) · [Configuration](configuration.md)
+
+> [!NOTE]
+> Product SemVer, the generated build manifest and SQLite **schema 18** are separate version domains. Dated LT-01/LT-07 measurements below apply to the tested revisions, not to every future release.
+
 Factory uses SemVer 2.0. The checked-in product baseline lives **only** in the repository-root `Directory.Build.props`. Development branches must not compete to change this file. The standalone `.NET 10` versioning CLI works offline without GitHub, tags, npm or a hosted version service.
 
 ## Version components

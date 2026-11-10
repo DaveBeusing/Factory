@@ -4,6 +4,11 @@ description: Inspect master and existing implementations before planning develop
 ---
 # Master-first planning
 
+> [!IMPORTANT]
+> Adoption is a separate human decision. A completed preflight cannot silently grant permissions to implement, push, or merge.
+
+## Procedure
+
 Every work package starts from **current master**. Do not use another PR's branch as the implementation base or assume that absence on master means the work does not exist in an open PR.
 
 1. Register the project with `--base master` and ensure the project checkout is a **clean master checkout** before generating a plan.

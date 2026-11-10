@@ -1,5 +1,10 @@
 # WP-04: Master-first preflight and completion-first work packages
 
+[← Work-package archive](README.md) · [Current documentation](../README.md)
+
+> [!NOTE]
+> **Historical contract (Master-first existing-work preflight).** Preserve the original base, scope and at-the-time status below. Draft/partial labels are archival snapshots, not live PR or release status. Inspect current `master`, evidence and open work before proposing changes.
+
 - **Status:** Implemented in draft PR #21; integration pending
 - **Target:** `master`
 - **Baseline commit:** `2f8777c65cdf9eb38e5ff6c54ccfad90bf7774bd`

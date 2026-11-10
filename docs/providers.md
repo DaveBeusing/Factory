@@ -1,5 +1,10 @@
 # Provider routing and token budgets
 
+[← Documentation](README.md) · [Configuration](configuration.md) · [Remote workers](remote-workers.md)
+
+> [!NOTE]
+> Role compatibility, actual final usage and account allowance are **different evidence**. Factory rejects unsupported builder routes, tracks reservations separately from consumption, and never fabricates unknown provider-account capacity.
+
 Factory has a provider-independent routing boundary with three currently implemented adapters:
 
 | Adapter | Execution | Read-only tasks | Token reporting | Account allowance |
@@ -43,7 +48,7 @@ Factory starts independent print-mode turns, disables session persistence, and r
 
 ## Setup
 
-Install a functioning Codex CLI as described in the root [README](../README.md). Optionally install and start Ollama separately. Download a suitable model using Ollama's own documented procedures.
+Install a functioning Codex CLI as described in the root [Getting started](getting-started.md). Optionally install and start Ollama separately. Download a suitable model using Ollama's own documented procedures.
 
 Modify the existing `~/.factory/settings.json` **without replacing controller credentials**, adding provider profiles like:
 
@@ -95,7 +100,7 @@ Legacy remote claims are refused for projects with explicit provider assignments
 1. **Controller** — Set `allowPush` and `enableRemoteProviderRouting` to `true`. Set `remoteProviderExecutorUrl` to the executor's root HTTPS URL, with no path beyond `/`. HTTP is available on loopback. Set `remoteProviderTurnTokens` to a value from 256 to 65,536 and leave enough capacity in the goal and job limits. Start the dashboard with an authenticated GitHub CLI that can read the repository, its branch rules and its checks. Configure required GitHub checks that run on the PR head and match the project check names.
 2. **Executor** — Use a separate `FACTORY_HOME` and enable `enableRemoteProviderExecutor`. Run the dashboard on the configured HTTPS endpoint and install the provider runtimes on this host. Configure the same profile IDs, explicit models and runtimes as the controller. Codex uses `app-server`. Ollama can handle review roles with a model pinned to an explicit non-`latest` tag and a matching loopback endpoint. Claude Code remains available for local read-only roles. The executor needs Git access to the project's `master` ref. It stores dispatch markers in `executor-dispatches` and new receipts in `executor-receipts` under its state directory. Back up both directories as described in the [recovery guide](recovery.md#back-up-and-restore-remote-execution-state).
 3. **Executor credential** — Set the same independently generated 32-byte hex `FACTORY_REMOTE_EXECUTOR_TOKEN` in the controller and executor service environments. Keep it distinct from the administrator token and worker token key. Workers receive only their scoped worker credential.
-4. **Worker and project** — Register and start the worker using the [worker setup](../README.md#12-security-and-distributed-operation). Grant it the project and attest `remote-provider:v2` alongside the runtime, Git and check capabilities required by the project. Require `remote-provider:v2` on the project or job. Use a goal-funded remote job and configure its builder and review routes in Mission Control. The worker runs checks and submits GitHub evidence. The executor runs provider turns, and the controller verifies the PR against GitHub.
+4. **Worker and project** — Register and start the worker using the [worker setup](remote-workers.md). Grant it the project and attest `remote-provider:v2` alongside the runtime, Git and check capabilities required by the project. Require `remote-provider:v2` on the project or job. Use a goal-funded remote job and configure its builder and review routes in Mission Control. The worker runs checks and submits GitHub evidence. The executor runs provider turns, and the controller verifies the PR against GitHub.
 5. **Inspect or recover** — Open **Jobs → Inspect → Remote provider turns** to see the route, lease generation, models, reserved and consumed tokens, reported USD and any hold reason. Follow [remote receipt recovery](recovery.md#recover-a-remote-executor-receipt) after an interrupted turn.
 
 ### Account windows and reported costs

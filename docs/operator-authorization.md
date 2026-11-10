@@ -1,12 +1,17 @@
 # LT-04 operator authorization design
 
+[← Documentation](README.md) · [Remote workers](remote-workers.md) · [Architecture](architecture.md)
+
+> [!NOTE]
+> This began as an **LT-04 design and acceptance record**. Current source contains project-scoped viewer/planner/operator/budget-reconciler routes and credential rotation, but the historical contract below is not proof of complete enterprise RBAC. Review each supported route and current evidence before granting access.
+
 Mission Control supports project-scoped human credentials alongside administrator access. Remote workers and the executor use separate credentials. The Windows package validation exercises the migration from a synthetic administrator-only installation, local administrator recovery and live project-token rotation.
 
 ## Roles and permissions
 
 The initial grants are per human subject and project. A subject may hold multiple roles within the same project. The API resolves membership on the server for every request.
 
-| Role | Proposed permission |
+| Role | LT-04 permission contract |
 | --- | --- |
 | Viewer | Read the project's goals, jobs, review summaries, usage totals and redacted execution evidence. |
 | Planner | Viewer access plus draft goals, saved plans, project review and reviewed plan adoption. Provider-backed planning must continue to respect the existing budget gates. |

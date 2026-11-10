@@ -1,5 +1,10 @@
 # Master-first work-package preflight
 
+[← Documentation](README.md) · [First project](getting-started.md#plan-run-and-verify) · [Quality](quality.md)
+
+> [!NOTE]
+> Preflight reports candidates and uncertainty, **not** proof of completeness. Unavailable GitHub PR/issue listings must not be read as zero overlapping work; review existing code and open work before acknowledging adoption.
+
 Work packages **must be based on current `master`**, never on another open PR or feature branch. Before proposing changes, Factory checks existing code, recorded jobs, supporting tests and available open GitHub PRs and issues. Partially implemented functionality should be **finished, repaired and verified** before creating an independent implementation.
 
 ## Sequence

@@ -1,5 +1,10 @@
 # LT-06 queue and SQLite load baseline
 
+[← Documentation](README.md) · [Roadmap](roadmap.md) · [Recovery](recovery.md)
+
+> [!NOTE]
+> **Historical synthetic benchmark, not a production SLO.** Host, fixtures and sampled latency values apply to the LT-06 run. Reproduce on comparable hardware before selecting operating limits.
+
 Measured on 2026-11-09 from `master` at `d02be93` with the measurement fixture applied. The host reported Windows build 26300, x64, 24 logical processors, .NET runtime 10.0.14 and SQLite 3.54.0. The [master CI](https://github.com/DaveBeusing/Factory/actions/runs/42688852253) was green. There were no open pull requests and [#22](https://github.com/DaveBeusing/Factory/issues/22) was the only open issue.
 
 ## Reproduce

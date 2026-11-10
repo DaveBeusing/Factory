@@ -30,7 +30,20 @@ public static class DashboardHost
                 ?? throw new FileNotFoundException("Mission Control asset missing: " + resource);
             return Results.Stream(stream, contentType, enableRangeProcessing: false);
         }
-        app.MapGet("/", () => Asset("Factory.Ui.Index", "text/html; charset=utf-8"));
+        static IResult Index()
+        {
+            using var stream = typeof(DashboardHost).Assembly.GetManifestResourceStream("Factory.Ui.Index")
+                ?? throw new FileNotFoundException("Mission Control asset missing: Factory.Ui.Index");
+            using var reader = new StreamReader(stream);
+            var information = typeof(DashboardHost).Assembly
+                .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion;
+            var version = string.IsNullOrWhiteSpace(information)
+                ? "Version unavailable" : "v" + information.Split('+')[0];
+            var html = reader.ReadToEnd().Replace("{{FACTORY_VERSION}}",
+                System.Net.WebUtility.HtmlEncode(version), StringComparison.Ordinal);
+            return Results.Content(html, "text/html; charset=utf-8");
+        }
+        app.MapGet("/", Index);
         app.MapGet("/ui/app.css", () => Asset("Factory.Ui.Style", "text/css; charset=utf-8"));
         app.MapGet("/ui/app.js", () => Asset("Factory.Ui.Script", "text/javascript; charset=utf-8"));
         app.MapGet("/readyz", () => Results.Ok(new { ready = true, at = DateTimeOffset.UtcNow }));

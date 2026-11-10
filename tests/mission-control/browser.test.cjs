@@ -111,6 +111,64 @@ browserTest('connects through the sidebar and opens planning and capacity views'
   await page.getByRole('heading', { name: 'Provider capacity' }).waitFor();
 });
 
+browserTest('keeps Mission Control layout, actions and version aligned', async ({ page, nav }) => {
+  const dll = path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll');
+  const expectedVersion = execFileSync('dotnet', [dll, 'version'], { encoding: 'utf8' }).trim().split('+')[0];
+  assert.equal(await page.locator('#sidebar-version-number').innerText(), 'v' + expectedVersion);
+
+  const createGeometry = await page.locator('#top-create').evaluate(button => {
+    const outer = button.getBoundingClientRect();
+    const glyph = button.querySelector('svg').getBoundingClientRect();
+    return {
+      width: outer.width, height: outer.height,
+      offsetX: Math.abs((outer.left + outer.right - glyph.left - glyph.right) / 2),
+      offsetY: Math.abs((outer.top + outer.bottom - glyph.top - glyph.bottom) / 2)
+    };
+  });
+  assert.equal(createGeometry.width, createGeometry.height);
+  assert.ok(createGeometry.offsetX < 1 && createGeometry.offsetY < 1, 'Create glyph must be centered');
+
+  assert.equal(await page.locator('.page-head .head-actions').count(), 0, 'Do not render an empty header action group');
+  assert.equal(await page.locator('.overview-intelligence').evaluate(element => getComputedStyle(element).marginTop), '17px');
+  const runQueue = page.locator('.overview-home-hero [data-act="queue-run"]');
+  assert.match(await runQueue.evaluate(element => getComputedStyle(element).backgroundImage), /linear-gradient/);
+  await runQueue.hover();
+  assert.equal(await runQueue.evaluate(element => getComputedStyle(element, '::before').animationName), 'mc-overview-sheen');
+
+  await nav.getByRole('button', { name: 'Goal planner' }).click();
+  assert.equal(await page.locator('.planner-filter-card > .card-body').evaluate(element => getComputedStyle(element).paddingTop), '20px');
+  await nav.getByRole('button', { name: 'Capacity' }).click();
+  assert.equal(await page.locator('section.card').filter({ hasText: 'Project allocations' }).count(), 0,
+    'Unreported project allocations must not create a dead card');
+  assert.ok(await page.locator('#main').evaluate(main =>
+    [...main.querySelectorAll('.stacked-card')].every(element => element.parentElement === main)),
+    'Capacity spacing should not rely on wrapper elements');
+  assert.equal(await page.locator('.capacity-note').count(), 1);
+
+  await nav.getByRole('button', { name: 'Settings' }).click();
+  assert.equal(await page.locator('.settings-edit-button').evaluate(element => getComputedStyle(element).marginTop), '20px');
+
+  await nav.getByRole('button', { name: 'Queue' }).click();
+  const inFlight = page.locator('#main > .stacked-card').filter({ has: page.getByRole('heading', { name: 'In flight' }) });
+  assert.equal(await inFlight.count(), 1);
+  assert.equal(await inFlight.evaluate(element => getComputedStyle(element).marginTop), '17px');
+  assert.equal(await page.locator('#main > section.card').count(), 2, 'Queue must not need spacing-only wrappers');
+
+  await nav.getByRole('button', { name: 'Overview' }).click();
+  await page.setViewportSize({ width: 390, height: 780 });
+  const fits = await page.locator('.overview-home-hero').evaluate(hero => {
+    const bounds = hero.getBoundingClientRect();
+    return [...hero.querySelectorAll('.head-actions .button')].every(button => {
+      const rect = button.getBoundingClientRect();
+      return rect.left >= bounds.left && rect.right <= bounds.right + 1;
+    });
+  });
+  assert.ok(fits, 'Overview actions must remain inside the hero on mobile');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await runQueue.hover();
+  assert.equal(await runQueue.evaluate(element => getComputedStyle(element, '::before').display), 'none');
+});
+
 browserTest('creates a goal from project findings and rejects adoption of a stale plan', async ({ page, nav, form, inspector, api, home }) => {
   const repo = path.join(home, 'repository');
   await mkdir(repo);

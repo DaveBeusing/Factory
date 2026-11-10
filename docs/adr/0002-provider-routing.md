@@ -1,5 +1,10 @@
 # ADR-0002: Role-scoped AI provider routing and accountable token reservations
 
+[← ADR index](README.md) · [Provider guide](../providers.md)
+
+> [!IMPORTANT]
+> **Proposal, not a retroactive approval.** Provider routing has subsequent code and test evidence, but this ADR retains its original proposed status until a separate maintainer decision changes it. Read the current guide for supported routes.
+
 - **Status:** Proposed for maintainer review
 - **Date:** 2026-11-06
 - **Scope:** Runtime adapters, project routing, provider usage, quotas, budgets, security and persistence

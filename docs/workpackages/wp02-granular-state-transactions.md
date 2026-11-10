@@ -1,5 +1,10 @@
 # WP-02: Focused SQLite state transactions
 
+[← Work-package archive](README.md) · [Current documentation](../README.md)
+
+> [!NOTE]
+> **Historical contract (Transactional SQLite and recovery).** Preserve the original base, scope and at-the-time status below. Draft/partial labels are archival snapshots, not live PR or release status. Inspect current `master`, evidence and open work before proposing changes.
+
 - **Status:** Partial implementation, pending CI and independent review
 - **Base:** `d53ca74e547b62c33d9b195ee6c9addfe0ad9e1c`
 - **Risk:** High (persistence, lease fencing)

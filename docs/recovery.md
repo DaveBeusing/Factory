@@ -1,5 +1,10 @@
 # Recover interrupted work and budget reservations
 
+[← Documentation](README.md) · [Configuration](configuration.md) · [Providers](providers.md)
+
+> [!NOTE]
+> **Reconcile before retrying.** Missing heartbeat alone does not prove that Git, a remote agent or a provider call did not complete. Preserve worktrees, leases, holds and dispatch/receipt data before re-execution.
+
 Use **Recovery** to inspect interrupted jobs and **Capacity** to reconcile provider turns. A held reservation protects capacity while usage is uncertain. Releasing unused tokens and returning a job to the queue are separate operator actions. See [Provider routing and token budgets](providers.md#budget-semantics) for how the ledgers count consumption and reservations.
 
 ## Quarantine expired leases

@@ -2,600 +2,138 @@
 
 **Plan with intent. Execute in dedicated worktrees. Validate with evidence.**
 
+[![Factory .NET validation](https://github.com/DaveBeusing/Factory/actions/workflows/dotnet-validation.yml/badge.svg?branch=master)](https://github.com/DaveBeusing/Factory/actions/workflows/dotnet-validation.yml)
 ![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?logo=dotnet&logoColor=white)
 ![Windows x64](https://img.shields.io/badge/platform-Windows%20x64-0078D4)
 ![Development preview](https://img.shields.io/badge/status-development%20preview-D97706)
-![Native frontend](https://img.shields.io/badge/Mission%20Control-native%20web%20UI-475569)
 
-**Factory** is a local-first software engineering orchestrator built in **C# / .NET 10**. It turns repository goals and bounded work packages into coordinated implementation jobs, executable quality checks, review evidence, and changes ready for controlled integration. Operate it through the CLI or the embedded **Mission Control** web interface.
+Factory is a **local-first software engineering orchestrator** written in C# and .NET 10. It turns project goals and reviewed work packages into bounded jobs, coordinates local and authorized remote execution, runs quality checks, and produces evidence for **human-controlled integration**. Use the CLI or the embedded [Mission Control](docs/mission-control.md) workspace.
 
 > [!IMPORTANT]
-> **Development preview, not a production security certification.** Local and remote orchestration features exist, but a complete team-grade identity/RBAC system and enforceable OS-level agent isolation are not yet provided. Factory never automatically merges or deploys changes. Operators must independently assess credentials, remote-worker environments, checks, and release readiness.
+> **Development preview, not a production security certification.** Factory does not automatically merge or deploy. Worker/project grants and project-scoped human operations exist, but full team identity/RBAC and enforceable OS-level isolation remain incomplete. Treat native agents, plugins, credentials and remote workers according to your own security controls.
 
-## At a glance
+## What Factory does
 
-| Capability | Current behavior |
-| --- | --- |
-| **Plan** | Inspect `master` and existing work, propose plans, and require explicit adoption before execution |
-| **Coordinate** | Schedule dependency-aware jobs with path ownership, priorities, budgets, and worker leases |
-| **Implement** | Use separate Git branches/worktrees with bounded changes and reviewed scope amendments |
-| **Validate** | Run configured native or container-based checks, followed by code, architecture, security, and UX reviews |
-| **Operate** | Monitor projects, goals, plans, jobs, workers, recovery, activity, and capacity in Mission Control |
-| **Integrate** | Optionally prepare draft PRs; verify integration against Git history and GitHub metadata before unblocking dependencies |
-
-**Technology:** .NET 10 · SQLite · Git · PowerShell · embedded HTML/CSS/JavaScript · no Python or Node.js/npm requirement for the Factory application.
-
-**Start with:** [Requirements](#1-requirements) · [Build](#3-build-and-test) · [Mission Control](#5-start-factory) · [Your first repository](#7-register-a-repository) · [Planning workflow](#8-plan-and-execute-work) · [Operator documentation](docs/README.md)
-
-## Contents
-
-1. [Requirements](#1-requirements)
-2. [Install native dependencies](#2-install-native-dependencies)
-3. [Build and test](#3-build-and-test)
-4. [Configuration and local data](#4-configuration-and-local-data)
-5. [Start Factory](#5-start-factory)
-6. [Configure quality checks](#6-configure-quality-checks)
-7. [Register a repository](#7-register-a-repository)
-8. [Plan and execute work](#8-plan-and-execute-work)
-9. [Verify integration](#9-verify-integration)
-10. [Monitor usage and activity](#10-monitor-usage-and-activity)
-11. [Architecture and capabilities](#11-architecture-and-capabilities)
-12. [Security and distributed operation](#12-security-and-distributed-operation)
-13. [Command reference](#13-command-reference)
-14. [Validation and known limitations](#14-validation-and-known-limitations)
-15. [Versioning and release governance](#15-versioning-and-release-governance)
-16. [Master-first work-package preflight](#16-master-first-work-package-preflight)
-17. [Development status and project direction](#17-development-status-and-project-direction)
-
-## 1. Requirements
-
-| Component | Purpose | Required |
+| Stage | Current implementation | Further reading |
 | --- | --- | --- |
-| Windows x64 | Local build, CLI and dashboard | For the supplied Windows scripts |
-| .NET 10 SDK | Restore, build, test and publish | Yes |
-| Git | Repository inspection, branches and worktrees | Yes |
-| Native agent CLI (`codex.exe`) | Planning, implementation and reviews | Yes |
-| GitHub CLI (`gh`) | GitHub authentication and pull requests | For GitHub workflows |
-| Docker | Optional container-based checks | Only if configured |
-| Project-specific toolchains | Execute configured repository checks | Only if used by your checks |
+| **Discover and plan** | Master-first preflight, repository review, goals and explicit plan adoption | [Planning preflight](docs/planning-preflight.md) |
+| **Coordinate** | Dependency-aware queue, budgets, leases and path-conflict checks | [Architecture](docs/architecture.md) |
+| **Execute** | Per-job Git branch and worktree; native Codex execution; scoped remote workers | [Remote workers](docs/remote-workers.md) |
+| **Validate** | Executable checks, scoped changes, independent reviews and commit-bound evidence | [Quality gates](docs/quality.md) |
+| **Operate** | Mission Control workspaces for projects, jobs, plans, workers, recovery and capacity | [Mission Control](docs/mission-control.md) |
+| **Integrate** | Optional draft PR preparation; manual merge and Git-history verification | [Workflow](docs/getting-started.md#plan-run-and-verify) |
 
-Factory does **not** require Python, Node.js, or npm. It uses native .NET tooling and NuGet to restore its own managed dependencies. External toolchains used in a target repository's checks are independent of Factory's installation.
+## Get started
 
-## 2. Install native dependencies
-
-Open **PowerShell**. Install the tools with Windows Package Manager (`winget`):
+**Prerequisites:** Windows x64, the .NET 10 SDK and Git. Install and authenticate the native Codex CLI for the default planning/implementation adapter. GitHub CLI (`gh`) is needed for GitHub-backed PR workflows. Docker is optional for configured container checks. **Node.js/npm are needed only for browser tests**, not for Factory's runtime or primary build.
 
 ```powershell
 winget install --id Microsoft.DotNet.SDK.10 --exact --source winget
 winget install --id Git.Git --exact --source winget
 winget install --id GitHub.cli --exact --source winget
-```
 
-### Clone the source
-
-Open a **new PowerShell terminal** to pick up the newly installed Git executable, then clone Factory:
-
-```powershell
 git clone https://github.com/DaveBeusing/Factory.git
 Set-Location Factory
-```
-
-Use this repository root for the following commands, including the optional dependency checker. A full Git checkout (not a shallow clone) is required for Git-derived preview versioning.
-
-Install the native agent CLI using its official Windows installer, **only after reviewing the download source and installer content**:
-
-```powershell
-$installerPath = Join-Path $env:TEMP 'codex-install.ps1'
-Invoke-WebRequest -Uri 'https://chatgpt.com/codex/install.ps1' -OutFile $installerPath
-Get-Content $installerPath  # Inspect the downloaded script before execution.
-# Only after reviewing and trusting the script:
-& $installerPath
-```
-
-This is the external CLI's installation mechanism, not a Factory dependency on a JavaScript package manager. If the installer is unavailable for your environment, use the official native executable distribution instead.
-
-Alternatively, the included interactive dependency checker prompts before installing missing tools. The native agent installer is downloaded for inspection before a separate execution confirmation:
-
-```powershell
-.\Install-Dependencies.ps1
-```
-
-No machine-wide execution policy change is required. If a local script execution policy blocks the checker, run it in a separate PowerShell process (only for scripts you have reviewed and trust):
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Install-Dependencies.ps1
-```
-
-An organization-enforced execution policy may still block scripts. Open a **new terminal** after installation, then verify the tools:
-
-```powershell
-dotnet --list-sdks
-git --version
-codex --version
-gh --version
-```
-
-Sign in explicitly where needed:
-
-```powershell
-codex login
-gh auth login
-```
-
-> [!NOTE]
-> `gh` is optional for local-only operation. Installation and authentication are separate steps. Factory never authenticates to an external account on your behalf.
-
-## 3. Build and test
-
-In the extracted Factory root directory, run:
-
-```powershell
 .\Build.ps1
-```
 
-The PowerShell build script restores managed packages, validates local SemVer rules, computes an effective preview version from complete Git history, builds the solution in Release mode, runs the bundled test application, publishes a framework-dependent Windows x64 executable, copies the skills and agent definitions to `dist/`, and writes `dist/build-manifest.json` with commit and SHA-256 provenance. It stops immediately on a failed step and returns a nonzero exit code.
-
-If your local execution policy blocks scripts, run the build in an isolated PowerShell process:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Build.ps1
-```
-
-For a manual build or troubleshooting:
-
-```powershell
-dotnet restore .\Factory.slnx
-dotnet build .\Factory.slnx --configuration Release --no-restore
-dotnet run --project .\tests\Factory.Tests\Factory.Tests.csproj --configuration Release --no-restore
-dotnet publish .\src\Factory\Factory.csproj --configuration Release --runtime win-x64 --self-contained false --output .\dist
-```
-
-The resulting executable is `dist\Factory.exe`. A compatible .NET runtime is required because the publish step is **framework-dependent**. For release-grade provenance and the correct derived preview sequence, use `Build.ps1` instead of the manual individual commands above.
-
-`dist/` is generated by `Build.ps1` and is intentionally excluded from version control. After cloning Factory, run the build before invoking any `dist\Factory.exe` command. Distribute compiled binaries through release artifacts rather than committing build output.
-
-### Optional: add Factory to the current terminal's PATH
-
-From the repository root, after a successful build:
-
-```powershell
-$env:PATH = "$(Resolve-Path .\dist);$env:PATH"
-Factory.exe --help
-```
-
-This affects **only the current PowerShell session**. Rebuild after pulling changes; the executable is not installed or updated globally.
-
-## 4. Configuration and local data
-
-Factory stores its own state under one directory:
-
-```text
-%USERPROFILE%\.factory\
-```
-
-| Path | Purpose |
-| --- | --- |
-| `.factory/settings.json` | Runtime selection, capacity limits, model routing and API authentication |
-| `.factory/factory.sqlite3` | Repository registrations, goals, jobs, outcomes and events |
-| `.factory/usage.json` | Cached account-level usage information (no login credentials) |
-| `.factory/plugins.json` | Approved .NET plugin assemblies |
-| `.factory/worktrees/` | Isolated Git working trees |
-| `.factory/plans/` | Legacy plan files, read as fallback until a revision is saved in SQLite |
-| `.factory/evidence/` | Commit-bound check and review evidence |
-
-To override the default location for the current terminal session:
-
-```powershell
-$env:FACTORY_HOME = '<absolute-directory>'
-```
-
-Factory uses a **relational SQLite schema (database version 11)** with separate tables for projects, goals, jobs, workers, events, knowledge, graph nodes, releases and evaluations. Ordered child tables store dependencies, expected paths, acceptance criteria, check commands and arguments, protected paths, imports, symbols and failure records. The schema uses foreign keys, useful query indexes, WAL and atomic transactions. The existing StateStore snapshot API is preserved while only changed entities are persisted.
-
-**Breaking storage change:** Earlier versions stored all state as a single JSON document inside `factory_state`. Legacy JSON data is not automatically imported into the relational schema. Back up the existing `%USERPROFILE%\.factory\factory.sqlite3` (and any SQLite WAL/SHM files after stopping Factory), then set `FACTORY_HOME` to a new directory before running this version. A legacy or unknown database is rejected without overwriting its data. Do not delete an existing state database until you have verified that a clean start is acceptable for your goals/jobs/history.
-
-Factory supports in-place relational schema upgrades from versions 2–10 to version 11. Earlier single-row JSON state remains unsupported; there is no JSON importer. Back up `.factory` before replacing an installation or changing machines. Do not commit its configuration, tokens, or state files into a repository. Existing configurations retain their administrator token and receive a new independent worker key on first launch.
-
-### Important settings
-
-| Setting | Description | Default |
-| --- | --- | --- |
-| `maxParallel` | Maximum simultaneous jobs | `3` |
-| `maxAgentSessions` | Maximum simultaneous agent sessions | `6` |
-| `maxReviewRounds` | Maximum build/review attempts | `3` |
-| `leaseSeconds` | Worker lease duration | `120` |
-| `runtime` | Agent adapter: `exec` or `app-server` | `exec` |
-| `model`, `modelRoutes` | Model selection by risk | Provider defaults |
-| `allowPush` | Permit remote branch publication | `false` |
-| `autoMerge` | Reserved setting; no automatic merge operation | `false` |
-| `workspaceRoot` | Root directory for worktrees | `.factory/worktrees` |
-| `apiToken` | Mission Control administrator credential; never share with workers | Generated locally |
-| `workerTokenKey` | Controller-only key used to derive a distinct credential per worker ID | Generated locally |
-
-The native agent CLI may maintain its own provider-defined directories. Those directories do **not** replace Factory's `.factory` root. `FACTORY_AGENT_EXECUTABLE` can explicitly select the native agent executable when it is not available on `PATH`.
-
-### Troubleshoot a missing native agent executable
-
-If the dashboard reports `Live account usage unavailable` with `The system cannot find the file specified` when starting `codex`, the Factory process cannot locate the **executable**. This happens before account usage is requested. Check the current PowerShell session:
-
-```powershell
-Get-Command codex -CommandType Application -ErrorAction SilentlyContinue
-where.exe codex
-codex --version
-```
-
-The standalone Windows CLI normally installs to `$env:LOCALAPPDATA\Programs\OpenAI\Codex\bin\codex.exe`. Factory now searches this location, `CODEX_INSTALL_DIR`, native user locations, and `PATH` automatically. If your executable is installed elsewhere, set an explicit path **before launching Factory**:
-
-```powershell
-$env:FACTORY_AGENT_EXECUTABLE = 'C:\path\to\codex.exe'
-& $env:FACTORY_AGENT_EXECUTABLE --version
 .\dist\Factory.exe doctor
-.\dist\Factory.exe usage
-```
-
-To persist the setting for future terminals:
-
-```powershell
-[Environment]::SetEnvironmentVariable('FACTORY_AGENT_EXECUTABLE', 'C:\path\to\codex.exe', 'User')
-```
-
-Restart the running Factory dashboard after changing the environment. A functioning graphical Codex application does not necessarily mean the standalone CLI is on the process `PATH`. Do not point the setting at the GUI application or a PowerShell alias. Never add secrets to the executable path or application logs.
-
-## 5. Start Factory
-
-Run these commands from the Factory root:
-
-```powershell
-.\dist\Factory.exe doctor
-.\dist\Factory.exe install-skills
 .\dist\Factory.exe dashboard
 ```
 
-Mission Control listens at **http://127.0.0.1:8787** by default. Administrator API endpoints require the generated `apiToken` from `.factory/settings.json`; the browser does not receive that token automatically. Supply the credential in the dashboard's connection workflow. The token remains in browser tab session storage and is not transmitted in query strings. Remote workers instead authenticate with credentials derived for their individual worker IDs and cannot access administrator endpoints.
+Open **http://127.0.0.1:8787** and connect with the locally generated administrator token from `%USERPROFILE%\.factory\settings.json`. The browser does not receive that token automatically; never paste it into a URL or commit it to Git. Keep the controller bound to loopback unless a deployment has reviewed TLS and authorization.
 
-### Mission Control: operations workspace
+> [!NOTE]
+> Build from a **complete Git checkout** to derive a preview version. `Build.ps1` runs the .NET test application, publishes `dist/Factory.exe`, and writes source/checksum provenance to `dist/build-manifest.json`. The package is framework-dependent and requires a compatible .NET runtime.
 
-The [Mission Control operator guide](docs/mission-control.md) covers workspace navigation, creation shortcuts, connection health and browser validation. To turn a repository finding into a reviewed plan, follow [Project review and goal planning](docs/project-reviews.md).
+For installation alternatives, Codex CLI discovery, `PATH`, state configuration and troubleshooting, follow [Getting started](docs/getting-started.md).
 
-**Enforced work-package boundaries:** Every job must declare nonempty `ExpectedPaths` (1–100 relative file or directory paths). File entries permit that exact path; directory entries permit that path and descendants. Factory uses the same normalized scope rules for scheduling conflicts and execution. After the agent runs, before any commit, and again at quality/release gates, Factory checks the complete Git change set: committed changes from the project base, staged and unstaged tracked changes, deletions, both paths of renames, and untracked non-ignored files. Out-of-scope changes, unsafe declarations, and incomplete Git path listings fail closed with `blocked` / `scope`. The worktree is preserved and no commit, push or PR is prepared for the offending attempt. Protected project paths remain prohibited even after an amendment.
+### First project
 
-**Contract amendments:** A blocked scope violation must not be retried unchanged. An administrator must inspect the worktree, assess affected parallel work, and explicitly approve new `ExpectedPaths` with a reason of 10–1000 characters and `reviewed: true` via `POST /api/jobs/{id}/scope-amendment` (administrator authentication). Factory logs the prior and approved scope and prevents approvals that overlap currently active jobs or protected paths. The job stays blocked until a separate reviewed retry/resume request; ordinary job editing cannot silently expand scope after an attempt has started. This records the human approval but does not replace project-based identity/RBAC, which is a separate planned control. For remote PRs, the controller independently inspects GitHub's paginated PR changed-file list, including rename sources, before accepting `pr_ready`; incomplete listings fail closed.
-
-See [Provider routing and token budgets](docs/providers.md#budget-semantics) for the goal ledger, local provider caps and account windows. Follow the [recovery guide](docs/recovery.md) for queue controls, expired leases and held usage.
-
-**Security:** API mutations require a bearer token. The UI uses a restrictive Content Security Policy, no inline JavaScript, HTML escaping for untrusted repository content, and explicit confirmation for sensitive changes. Never expose the dashboard publicly without TLS, authenticated access and a security review. The supplied HTTP listener is intended for local use.
-
-Use `install-skills --overwrite` only when you intend to replace previously installed Factory skills. The command installs the Codex assets bundled under `dist/providers/codex/` into Codex's native user locations. Claude Code has its own native adapter and executable configuration.
-
-## 6. Configure quality checks
-
-A repository must have at least one executable check before Factory can run implementation jobs. Check definitions are JSON and are stored independently of the Factory source. They execute in the job's Git worktree and can include builds, tests, linters and custom native tools.
-
-### Included check templates
-
-| Template | Checks included | Requirements in the target repository |
-| --- | --- | --- |
-| [`examples/checks-dotnet.json`](examples/checks-dotnet.json) | Release build, automated tests | .NET SDK and an unambiguous solution/project at repository root |
-| [`examples/checks-dotnet-strict.json`](examples/checks-dotnet-strict.json) | Formatting verification, build, automated tests | .NET SDK, restored dependencies and compatible formatting rules |
-| [`examples/checks-cmake.json`](examples/checks-cmake.json) | Configure, build, CTest | CMake, a supported compiler/toolchain, configured tests |
-
-The templates are deliberately generic. Copy a template to a location you control and adjust its commands to match your repository. A check template is **not** a dependency installer. None of these examples invokes npm or a JavaScript package manager.
-
-A check object follows this schema:
-
-```json
-{
-  "checks": [
-    {
-      "name": "build",
-      "executable": "dotnet",
-      "arguments": ["build", "--configuration", "Release"],
-      "timeoutSeconds": 1200
-    }
-  ]
-}
-```
-
-- `name`: readable identifier for reports.
-- `executable`: installed executable name or absolute path.
-- `arguments`: individual argument tokens, **not** a shell command string.
-- `timeoutSeconds`: maximum execution time for this check.
-- `containerImage`: optional Docker image for a more restricted execution mode; omit for native execution.
-
-Factory passes arguments directly to the process; avoid embedding pipeline expressions, untrusted text, or credentials in these files. For native checks, all required executables must already be installed on the worker. Checks must return a nonzero exit code when a validation fails. Container checks mount the worktree read-only; choose commands that can run with those restrictions.
-
-> [!CAUTION]
-> A successful example check does not guarantee adequate test coverage or application security. Review and tailor the checks before relying on them as merge gates. Build artifacts may be written inside a temporary worktree; do not rely on those artifacts being committed.
-
-## 7. Register a repository
-
-Supply the **actual Git repository root**, a unique Factory project key, an existing base branch and the path to your chosen checks file:
+Register the **Git repository root** and checks appropriate to the target project:
 
 ```powershell
-.\dist\Factory.exe init '<repository-root>' --name '<project-key>' --base master --checks-json '.\examples\checks-dotnet.json'
-```
-
-Factory normalizes Windows path case and directory separators when identifying repository roots and supports Git worktrees. The base branch must exist. The registration records repository-specific check commands but does not change the source repository's configuration.
-
-To inspect the registered repositories and current jobs:
-
-```powershell
-.\dist\Factory.exe status
-```
-
-## 8. Plan and execute work
-
-### Goal-driven planning
-
-```powershell
-.\dist\Factory.exe goal add --project '<project-key>' --objective '<objective>' --criteria '<criterion-one>;<criterion-two>'
+.\dist\Factory.exe init '<repository-root>' --name 'my-project' --base master --checks-json '.\examples\checks-dotnet.json'
+.\dist\Factory.exe goal add --project 'my-project' --objective '<outcome>' --criteria '<criterion-one>;<criterion-two>'
 .\dist\Factory.exe plan --goal '<goal-guid>'
 ```
 
-Factory inspects the local `master` commit before planning and checks it against the configured remote when reachable. Preflight also checks existing source, recorded jobs and matching issues and PR heads in the configured GitHub repository. The planner requires a **clean master checkout**. Existing or partially implemented functionality should be finished and verified rather than reimplemented. Open PR data is explicitly marked unverified if GitHub CLI access is unavailable.
-
-Review the proposed scope, already existing implementations, related PRs, priorities, dependencies and affected paths. **Plan generation does not authorize execution.** After independently confirming that overlapping work will not be duplicated, explicitly acknowledge that review and adopt the plan:
+Review the proposed plan, master-source findings, open work, expected paths, dependencies and validation evidence **before** adopting it.
 
 ```powershell
-.\dist\Factory.exe adopt --goal '<goal-guid>' --plan-revision '<revision-guid>' --mode local --reviewed-existing-work
+.\dist\Factory.exe adopt --goal '<goal-guid>' --plan-revision '<reviewed-revision-guid>' --mode local --reviewed-existing-work
 .\dist\Factory.exe run
-```
-
-Use the `revision` from the reviewed plan output. Factory checks for dependency cycles and rejects adoption when the saved plan, goal objective, acceptance criteria or base commit has changed.
-
-### Directly queue a task
-
-Direct jobs also run a master-source and existing-work preflight. Review matching source, known work packages and relevant PRs first, then explicitly acknowledge that review with `--reviewed-existing-work`.
-
-```powershell
-.\dist\Factory.exe enqueue --project '<project-key>' --title '<title>' --description '<requirements>' --mode local --paths '<relative-file-or-directory>' --reviewed-existing-work
-.\dist\Factory.exe run
-```
-
-The default branch mode is `local`. Remote branch publication requires an explicit mode and the configured permission to push. Git worktrees isolate independent tasks, while the dependency scheduler limits overlapping paths and resource contention.
-
-When using `test-audit --enqueue`, the same rule applies: inspect the existing master-based test implementation and outstanding work first, then add `--reviewed-existing-work`. Read-only audits that do not enqueue jobs are unchanged.
-
-### Pausing and recovery
-
-Use the [recovery guide](docs/recovery.md) to pause new claims, inspect interrupted work and review a job before returning it to the queue.
-
-## 9. Verify integration
-
-After implementation and validation, Factory prepares an integration-ready branch, optionally a draft pull request. **Merging remains a manual decision.** Jobs that depend on another change must not start solely because its branch passed review.
-
-Once the change has been integrated through the repository's normal process, verify it:
-
-```powershell
-.\dist\Factory.exe verify '<job-guid>'
-```
-
-**Integration verification is fail-closed.** When a project has a configured origin, Factory fetches the current base branch directly from that origin into a temporary Git ref. It does not trust the locally writable base branch alone. If the job has a PR URL, Factory additionally requires a **merged GitHub PR** in the expected repository, targeting the configured base branch with the same source branch and exact source commit. GitHub's merge commit must be reachable from the fetched remote base; this also supports squash and rebase merges where the original source commit is no longer an ancestor. Without a PR URL, the job's exact source SHA must be an ancestor of the fetched remote base.
-
-**Before unlocking dependent jobs, update the local base branch** to include the verified remote base (for example with an authorized `git pull --ff-only`). Factory does not automatically move the checked-out branch. If the remote is unavailable, metadata is inconsistent, or the local base is behind, verification refuses to mark the job integrated. For a repository intentionally configured **without an origin**, local-only jobs can still be verified against their local base branch; remote jobs and PRs cannot.
-
-Integration evidence records the verified source, remote-base commit and incorporated commit. When a source commit changes, its previous quality evidence is not automatically transferable to the new commit.
-
-## 10. Monitor usage and activity
-
-Mission Control shows queue and worker status, goal progress, event history, check results and review outcomes. Open **Capacity** for attributed provider usage and any reported account windows. See [Provider routing and token budgets](docs/providers.md#account-windows-and-reported-costs) for the difference between local capacity, Codex allowance and reported cost.
-
-```powershell
-.\dist\Factory.exe providers
-.\dist\Factory.exe usage
-.\dist\Factory.exe analytics
 .\dist\Factory.exe status
 ```
 
-## 11. Architecture and capabilities
+> [!CAUTION]
+> The `--reviewed-existing-work` flag records an explicit review; it does not perform that review for you. A successful job is **not** an integrated change. Merge through the repository's authorized process, then use `Factory.exe verify '<job-guid>'` to confirm integration. Do not infer approval from generated plans or review text.
+
+See [Plan, run and verify](docs/getting-started.md#plan-run-and-verify) for the full workflow and [CLI reference](docs/cli.md) for additional commands.
+
+## Engineering workflow
 
 ```mermaid
-flowchart TD
-    A[Development goal or queued task] --> B[Planning and dependency analysis]
-    B --> C[Approval to adopt plan]
-    C --> D[Scheduler and worker leases]
-    D --> E[Isolated Git worktree]
-    E --> F[Native agent execution]
-    F --> G[Deterministic checks]
-    G -->|Failed| H[Bounded diagnosis and rework]
-    H --> G
-    G -->|Passed| I[Independent reviews]
-    I -->|Changes requested| H
-    I -->|Passed| J[Integration-ready branch or draft PR]
-    J --> K[Manual integration]
-    K --> L[Git-history verification]
-    L --> M[Dependent work can start]
+flowchart LR
+    Goal[Goal or reviewed task] --> Preflight[Master and open-work preflight]
+    Preflight --> Plan[Proposed work packages]
+    Plan --> Approval{Human review}
+    Approval -->|Adopt| Queue[Dependency-aware queue]
+    Approval -->|Revise| Plan
+    Queue --> Worker[Scoped worker and worktree]
+    Worker --> Gates[Build, tests and reviews]
+    Gates -->|Rework| Worker
+    Gates -->|Approved| PR[Integration-ready branch or draft PR]
+    PR --> Merge[Authorized manual merge]
+    Merge --> Verify[Verify remote integration]
 ```
 
-### Agent and model providers
+The diagram describes the normal flow, not an authorization bypass. Unsupported adapter capabilities, unsafe scope, missing checks or uncertain usage can **block** progression.
 
-Provider routing is available today, but not every adapter has the same permissions or execution capabilities. A configured provider must support the assigned role; Factory does not silently substitute a different provider.
+## Product boundaries
 
-| Adapter | Planning / analysis / reviews | Repository implementation | Account allowance |
-| --- | --- | --- | --- |
-| **Codex** (`exec` or `app-server`) | Supported | Supported (workspace-write) | Reported account windows, when available |
-| **Claude Code CLI** | Read-only roles | **Not supported** | Unavailable |
-| **Ollama (local API)** | Read-only, text-based roles | **Not supported** | Unavailable |
+| Area | Supported now | Not implied |
+| --- | --- | --- |
+| **Platform** | .NET 10 with a validated Windows x64 build/package path | Certified cross-platform distribution |
+| **Storage** | Relational SQLite, **schema 18**, with transactional upgrades from supported relational schemas | Automatic migration of legacy single-JSON-row state |
+| **Providers** | Codex builder; Claude Code and Ollama read-only roles | Arbitrary provider execution or equivalent isolation |
+| **Access** | Controller administrator, project-scoped human credentials, separately scoped worker and executor credentials | Finished enterprise IAM/RBAC or OS sandbox |
+| **Usage** | Recorded tokens, local provider budgets, provider-reported allowance when available | Inferred or fabricated account quota |
+| **Release** | Git-derived SemVer previews, build manifest/checksum and Windows package checks | A signed production release, auto-merge or deployment |
 
-The optional Ollama adapter uses a local loopback HTTP endpoint; it does not execute repository commands. Claude Code runs in restricted read-only CLI mode. External inference services can receive task context, and CLI-level restrictions are not OS isolation. See [provider setup, assignment rules, budgets, and mixed remote execution](docs/providers.md).
+Read [Architecture](docs/architecture.md), [Configuration](docs/configuration.md), [Provider routing](docs/providers.md) and [Versioning](docs/versioning.md) for exact contracts and limitations.
 
-### Planning, scheduling and goals
+## Documentation
 
-- Persistent goals with acceptance criteria and token budgets.
-- [Atomic goal reservations and provider accounting](docs/providers.md#goal-budget-and-job-reservations) for concurrent jobs.
-- Read-only repository inspection and proposed task decomposition.
-- Priorities, dependencies, risk classification, and predicted affected paths.
-- Cycle detection, file-path conflict handling, work grouping and per-project capacity limits.
-- Dependent work starts only after verified integration.
-
-### Execution, recovery and workers
-
-- One Git branch and worktree per job.
-- SQLite-backed events and state transitions.
-- Worker leases, heartbeats, timeouts, recovery handling and session limits.
-- Local execution or authenticated remote workers.
-- Native process execution; optional restricted container-based checks.
-
-### Quality engineering and integration
-
-- Deterministic build and test gates before reviews.
-- Independent code, architecture, security and UX reviews require a successful response with exactly `VERDICT: PASS` on the first line. Reviewers receive the full patch for the checked commit. Empty, unavailable or oversized patches and patches with binary content changes stop the review gate.
-- Bounded rework cycles with escalation for unresolved findings.
-- Protected paths, heuristic secret checks and commit-bound evidence.
-- Optional draft pull requests; no automatic merge or deployment.
-- Release manifest preparation, SemVer validation and SHA-256 checksums.
-
-### Knowledge, evaluations and extensibility
-
-- Repository file, import and symbol indexing for heuristic impact analysis.
-- Persistent architecture notes and project knowledge.
-- Test audits and candidate test tasks.
-- Risk-aware agent/model routing.
-- Evaluation suites and per-job execution metrics.
-- Opt-in .NET plugin assemblies through `IFactoryPlugin`.
-
-These components assist engineering decisions; static and agent-generated analyses do not constitute exhaustive semantic proof or a full security audit.
-
-## 12. Security and distributed operation
-
-| Control | Behavior |
+| Start here when you need to… | Guide |
 | --- | --- |
-| Git push | Disabled unless `allowPush` is explicitly enabled |
-| Merge/deployment | Manual; no unattended merge or deployment |
-| Adoption | Explicit approval required |
-| Checks | Executed before review and evidence generation |
-| Remote API | Separate administrator and worker-scoped bearer authentication; HTTPS required outside loopback |
-| Worker identity | Worker requests must carry a valid ID matching the authenticated worker credential |
-| Worker revocation | Disabled workers cannot register, claim jobs, or submit job updates; revoked project grants/capability evidence prevent affected lease renewal and completion |
-| Plugins | Trusted .NET assemblies, not sandboxed plugins |
-| Native checks | Execute with worker-user permissions |
-| Worktrees | Git isolation, **not** OS-level sandboxing |
-| Human project-based RBAC | **Not yet implemented**; worker project grants do not provide user identities or per-user roles |
-| Usage limits | No invented remaining percentages |
+| Install, build, connect or execute a first goal | [Getting started](docs/getting-started.md) |
+| Understand commands and arguments | [CLI reference](docs/cli.md) |
+| Configure local state, settings and credentials | [Configuration and storage](docs/configuration.md) |
+| Navigate or administer the dashboard | [Mission Control](docs/mission-control.md) |
+| Register/build plans and avoid duplicate work | [Project review](docs/project-reviews.md) · [Planning preflight](docs/planning-preflight.md) |
+| Configure adapters, quotas and provider evidence | [Providers and budgets](docs/providers.md) |
+| Manage workers and scoped execution | [Remote workers](docs/remote-workers.md) · [Operator authorization](docs/operator-authorization.md) |
+| Set up checks, scope rules and reviews | [Quality and validation](docs/quality.md) |
+| Recover leases, receipts or held budgets | [Recovery](docs/recovery.md) |
+| Plan releases, upgrades or versioning | [Versioning](docs/versioning.md) · [Roadmap](docs/roadmap.md) |
 
-For mixed provider routes on remote jobs, follow the [controller, executor and worker setup](docs/providers.md#set-up-mixed-remote-execution). The basic worker connection and authorization steps are below.
+**Full navigation:** [Documentation index](docs/README.md), including ADRs, historical work packages, load-test evidence and the browser test suite.
 
-For a remote worker, expose the controller only behind a properly configured TLS endpoint. The administrator provisions one scoped token for each stable worker ID using the **controller installation**:
+## Build, tests and contribution
 
 ```powershell
-.\dist\Factory.exe worker-token --id worker-01
-.\dist\Factory.exe dashboard --listen 'https://0.0.0.0:8443'
-```
-
-Transfer the generated token securely to that specific worker; never distribute `apiToken` or `workerTokenKey`. On the **worker machine**, supply only the worker token in an environment variable (not a command argument):
-
-```powershell
-$env:FACTORY_WORKER_TOKEN = '<token-for-worker-01>'
-.\dist\Factory.exe worker --server 'https://<host>:8443/' --workspace '<worker-directory>' --id worker-01
-```
-
-**Project-scoped remote worker authorization:** An authenticated worker is not automatically authorized to execute any project. New and existing workers have **no project grants or verified capabilities** until the controller administrator provisions them. Authentication, registration, and platform self-reporting do not create or widen these privileges. Claims are filtered inside the controller's atomic scheduler transaction. An eligible remote job requires an active project, an explicit worker-to-project grant, and current controller-trusted evidence for **all** required execution capabilities. Revoking a grant or capability also denies subsequent heartbeats and completions for affected active leases, so an operator must reconcile interrupted work before retrying.
-
-After registering a project and a worker, inspect the project's GUID in the administrator-only `GET /api/state`. The administrator may replace the worker's **entire** authorization set using `PUT /api/workers/{id}/permissions` (administrator bearer token only):
-
-```powershell
-# Run from a trusted controller operator shell with an existing, securely loaded admin token.
-$controller = 'https://<controller-host>:8443'
-$projectId = '<registered-project-guid>'
-$permissions = @{
-    projectIds = @($projectId)
-    reason = 'Operator reviewed worker environment and project assignment'
-    verifiedCapabilities = @(
-        @{ capability = 'native-agent'; evidence = 'Operator reviewed native agent execution on the worker' }
-        @{ capability = 'git-cli'; evidence = 'Operator verified Git availability on the worker' }
-        @{ capability = 'runtime:exec'; evidence = 'Operator verified the configured exec adapter' }
-        @{ capability = 'native-checks'; evidence = 'Operator verified required native build checks' }
-    )
-} | ConvertTo-Json -Depth 6
-Invoke-RestMethod -Method Put -Uri "$controller/api/workers/worker-01/permissions" `
-    -Headers @{ Authorization = "Bearer $adminToken" } `
-    -ContentType 'application/json' -Body $permissions
-```
-
-The example assumes that the controller uses the `exec` runtime and the project has native checks. For `app-server`, attest `runtime:app-server` instead. If any check uses `containerImage`, `container-checks` is additionally required. Each remote claim always requires `native-agent`, `git-cli`, and the selected `runtime:...` capability. Project and job definitions can specify additional `requiredExecutionCapabilities` from this supported set; unknown capability names and missing or stale attestations block claims. Evidence expires **30 days** after administrator verification; re-verification is required. An empty `projectIds` and `verifiedCapabilities` pair revokes all worker authorizations. Provisioning replaces, rather than appends to, existing grants, so include every intended project when updating.
-
-Capability evidence in this version is an **administrator-reviewed attestation**, not a cryptographically verified measurement of the remote host. The controller does not trust capability claims from worker registration, but cannot independently prove OS sandboxing or ongoing tool integrity. Do not attest unsupported capabilities or describe native execution and Git worktrees as security isolation. Use separate OS-level restrictions and review capability evidence before authorizing a worker. Supported relational SQLite schemas upgrade to the current schema; back up `.factory` before upgrading. This worker authorization mechanism is not a replacement for full human project RBAC.
-
-**Remote completion verification:** A worker's credential authenticates its identity, not its PR or quality claims. The controller accepts `pr_ready` only after querying GitHub for the PR's repository, base branch, expected `factory/<job-id>` head, and exact commit, and after checking successful **required GitHub checks** on that PR. Every configured project check name must correspond to a successful required GitHub check. Configure those required checks in GitHub branch protection/rulesets and use matching names; missing, pending, or failed checks block completion rather than implying success. Worker-provided quality evidence must also match the job ID, attempt, commit, check results, and review roles, but its contents remain explicitly labeled as **worker-reported**, not independently attested. Successful verification creates a controller-owned evidence record; rejected or unverifiable results remain blocked for inspection. GitHub CLI (`gh`) must be authenticated on the controller to read the repository and checks. Only GitHub-hosted origins currently support this verification flow. This does not merge, approve, or deploy a PR.
-
-Worker IDs must be 1–100 ASCII letters/digits/dots/underscores/hyphens and start with a letter or digit. The worker sends its ID in `X-Factory-Worker-Id`; the controller checks the derived credential and enforces matching IDs in register, claim, heartbeat, and completion payloads. These four worker operations use `POST /api/worker/{register|claim|heartbeat|complete}`. All other `/api` routes, including `/api/workers/register` and worker management actions, require the administrator token. Managed local workers receive their scoped token automatically. Factory also strips controller and worker API credentials from child agent, Git and quality-check processes.
-
-**Migration:** Older remote processes using `FACTORY_TOKEN` must be reprovisioned with `FACTORY_WORKER_TOKEN` and an explicit `--id` before reconnecting. To revoke one worker, disable it in Mission Control; to invalidate *all* issued worker tokens, rotate `workerTokenKey` in the controller settings and restart the controller, then reprovision workers. Keep both controller secrets restricted to the controller operator. Do not put generated tokens in source control, logs, PRs, or screenshots.
-
-The server must have valid HTTPS certificate configuration. A secure connection to the controller does **not** automatically sandbox the worker's tools or filesystem; use operating-system restrictions where needed. Locally managed workers share the controller's OS account unless isolated by the operator, so worker API permissions do not substitute for OS-level privilege separation.
-
-## 13. Command reference
-
-| Command | Purpose |
-| --- | --- |
-| `doctor` | Inspect available tools and local state |
-| `install-skills [--overwrite]` | Install global agent skills and roles |
-| `init` | Register a Git repository and its checks |
-| `goal add`, `plan`, `adopt` | Create goals, propose plans and authorize work |
-| `enqueue`, `run`, `status` | Queue, execute and inspect tasks |
-| `pause`, `resume` | Pause or resume new claims |
-| `recover`, `reconcile` | Quarantine expired leases and review eligible local jobs for requeueing |
-| `verify` | Confirm that a change was integrated in the base branch |
-| `graph`, `impact`, `knowledge` | Inspect code relationships and store project knowledge |
-| `test-audit` | Analyze testing gaps and optionally queue follow-up work |
-| `analytics`, `eval` | Inspect metrics and run evaluation suites |
-| `release` | Prepare source archives, release notes and checksums |
-| `usage` | Read account-level rate-limit and reset information |
-| `providers` | List project routes, Factory-local provider limits and observed token usage |
-| `dashboard` | Run Mission Control |
-| `worker-token --id ID` | Provision a scoped worker bearer credential on the controller |
-| `worker` | Run an authenticated remote worker using `FACTORY_WORKER_TOKEN` |
-
-Display the current command syntax with:
-
-```powershell
+.\Build.ps1
+.\dist\Factory.exe version
 .\dist\Factory.exe --help
 ```
 
-## 14. Validation and known limitations
+GitHub Actions performs the .NET build/tests, Chromium browser tests, artifact provenance verification and Windows package rehearsal. To run the browser suite locally, see [Mission Control tests](tests/mission-control/README.md). A passing CI run supports the tested revision; it does not prove a deployment is secure or every external provider is available.
 
-The solution includes source-level tests for relational SQLite persistence, schema constraints, ordered collection roundtrips, rollback, concurrent writes, legacy database rejection, scheduling, integration rules, process behavior, local job flows and usage-data interpretation. Execute `Build.ps1` on Windows to confirm compilation and run those tests with the installed .NET 10 SDK.
-
-GitHub Actions also runs the [Mission Control browser suite](tests/mission-control/README.md) in Chromium. The suite exercises the embedded UI against an isolated controller. Node.js used by this **test harness** is not a Factory application build or runtime requirement.
-
-The external agent CLI and GitHub must be validated with real authentication and a controlled test repository before production use. The agent app-server protocol used for weekly usage data is subject to upstream changes. Remote-worker isolation and plugin trust must be evaluated in the intended deployment environment.
-
-Relational upgrades preserve existing records. To downgrade, restore a database backup compatible with the previous binary. Factory-specific configuration, commands, assemblies and runtime storage use the generic name **Factory**, with the provider-specific executable referenced only where integration requires it.
-
-## 15. Versioning and release governance
-
-Factory uses **SemVer 2.0** and separate `preview`, `rc` and `stable` channels. Product version settings are centralized in the repository-root `Directory.Build.props`. Ordinary PRs do not edit that file; a local .NET tool calculates development preview revisions from complete first-parent Git history, so the preview revision advances after an integration without a conflicting version bump commit.
-
-```powershell
-dotnet run --project tools/Factory.Versioning -- build-version
-dotnet run --project tools/Factory.Versioning -- self-test
-.\Build.ps1
-.\dist\Factory.exe version
-```
-
-Dedicated release branches may use `dotnet run --project tools/Factory.Versioning -- bump minor`, `bump patch`, or `channel rc`/`channel stable`; the resulting `Directory.Build.props` change requires review and release-owner approval before merging. No tag, GitHub release, deployment or automatic merge is performed by this tool.
-
-See [the complete versioning and compatibility policy](docs/versioning.md) and [ADR-0001](docs/adr/0001-versioning.md). `dist/build-manifest.json` records the effective version, full source SHA and executable checksum. Database schema and wire contracts remain separately versioned; a product bump does not automatically migrate or validate them.
-
-## 16. Master-first work-package preflight
-
-Every Factory work package starts from the current `master` branch, with a recorded source commit. It must never be stacked on a different unmerged PR branch. The preflight runs before agent-generated and manually saved plans and checks the committed master source tree, relevant existing Factory jobs, and matching open GitHub PR and issue titles when the native `gh` CLI is authenticated and available. Keyword matches are evidence candidates, **not a claim that functionality is finished**.
-
-Factory requires explicit operator review before adopting **every** plan; a keyword scan cannot prove that no overlap exists. If the master commit advances, or a previously verified matching PR or issue inventory changes, the plan must be refreshed. The old worktree is preserved rather than silently reset or overwritten. See the [master-first preflight guide](docs/planning-preflight.md) for workflow, CLI/API details and limitations. This process does not automatically merge PRs or assert that external work was integrated.
-
-## 17. Development status and project direction
-
-Factory is under active development. The table distinguishes working implementation surfaces from approved product goals; documentation and static source inspection are not substitutes for a complete authenticated end-to-end test.
-
-| Area | Current implementation | Further product direction |
-| --- | --- | --- |
-| **Local engineering workflow** | CLI, Mission Control, plans, jobs, worktrees, checks and reviews | Greater end-to-end reliability, accessibility and operator guidance |
-| **Persistence** | Relational SQLite with supported schema upgrades and transaction-backed state | Continue hardening backup, recovery and multi-user concurrency behavior |
-| **Agent ecosystem** | Codex execution; Claude Code and Ollama read-only routes | Provider capabilities and contracts with broader adapter support |
-| **Remote coordination** | Worker-specific authentication, project grants and controller-reviewed capability attestations | Full user identity, project-scoped RBAC and enforceable execution policies |
-| **Planning** | Master-first preflight, explicit plan adoption, scheduling and bounded scope amendments | Versioned adaptive replanning and policy-controlled exceptions |
-| **Integration and releases** | Opt-in push/PR preparation, manual merges, integration verification and build provenance | Signed releases and formal release readiness gates |
+Contributions should be scoped, reviewed and delivered through short-lived branches and pull requests targeting **`master`**. Do not commit directly to the primary branch or commit `.factory/` secrets, SQLite data, build output or generated `dist/` files. Read the relevant [engineering decision records](docs/adr/README.md) before architecture changes.
 
 > [!NOTE]
-> **Open Core is a product direction, not a license grant.** A root open-source license and commercial edition boundaries have not yet been selected in the documented project baseline. Do not assume public source visibility grants permission to redistribute or relicense Factory.
+> **Public source is not a license grant.** The documented Open Core direction has not selected a root license or commercial edition boundaries. Do not assume this repository is already licensed for redistribution.
 
-For detailed operator procedures, see the [documentation index](docs/README.md). For a change proposal, inspect the current `master` source and applicable repository instructions, keep the scope bounded, validate the affected behavior, and submit a pull request targeting **`master`**. No direct commits to the primary branch are part of the prescribed workflow.
+---
+
+**Explore next:** [Documentation](docs/README.md) · [Mission Control](docs/mission-control.md) · [Roadmap](docs/roadmap.md)

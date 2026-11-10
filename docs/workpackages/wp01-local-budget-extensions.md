@@ -1,5 +1,10 @@
 # WP-01: Dynamic goal budget allocations
 
+[← Work-package archive](README.md) · [Current documentation](../README.md)
+
+> [!NOTE]
+> **Historical contract (Goal budget extensions and provider ledgers).** Preserve the original base, scope and at-the-time status below. Draft/partial labels are archival snapshots, not live PR or release status. Inspect current `master`, evidence and open work before proposing changes.
+
 - **Status:** Implemented in a draft PR; review and end-to-end acceptance pending
 - **Base:** `d53ca74e547b62c33d9b195ee6c9addfe0ad9e1c`
 - **Risk:** High (token accounting, worker authority, database migrations)

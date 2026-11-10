@@ -1,6 +1,11 @@
 # Mission Control operator guide
 
-Mission Control is a browser-based operations workspace embedded in the .NET executable. Use the [root README](../README.md#5-start-factory) to start the dashboard. Node.js and npm are used by the browser test suite.
+[← Documentation](README.md) · [Getting started](getting-started.md) · [Project authorization](operator-authorization.md)
+
+> [!NOTE]
+> Layout and the sidebar version reflect the **running Factory executable**. Project-token access hides administrator-only actions; health indicators use actual observations, not simulated connectivity.
+
+Mission Control is a browser-based operations workspace embedded in the .NET executable. Use the [Getting started](getting-started.md#start-mission-control) to start the dashboard. Node.js and npm are used by the browser test suite.
 
 ## Connection controls
 
@@ -16,13 +21,15 @@ The authenticated event stream sends a heartbeat every three seconds. The sideba
 
 ## Topbar actions
 
-An icon-only **+** button is immediately left of Search and opens creation shortcuts for projects, goals, jobs and workers. Open the command palette with Search, Ctrl+K or Cmd+K.
+The centered **+** button beside Search opens creation shortcuts for projects, goals, jobs and workers; project-scoped credentials intentionally hide administrator creation controls. Open the command palette with **Search**, **Ctrl+K** or **Cmd+K**.
+
+On **Overview**, **Manage queue** and **Run queue** have distinct emphasis. The primary action uses a hover/focus gradient sheen, not an artificial connection pulse. Keyboard focus remains visible, and reduced-motion settings disable animated movement. The sidebar footer displays the **current Factory assembly version**, not the .NET runtime version.
 
 ## Workspaces
 
 | Workspace | Available operations |
 | --- | --- |
-| **Overview** | Health, operational KPIs, pipeline, goals, workers and recent events |
+| **Overview** | Health, primary queue actions, KPIs, pipeline, goals, workers, events and observed allowance |
 | **Projects** | Register, edit paths, checks and protected paths, activate, pause, disable or archive repositories |
 | **Goals** | Edit objectives, acceptance criteria and token budgets. Activate, pause, stop, complete or archive goals. |
 | **Goal planner** | Filter by project, check master and open work, edit named dependencies, review budget and adopt a plan |

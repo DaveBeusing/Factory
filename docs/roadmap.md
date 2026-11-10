@@ -1,5 +1,10 @@
 # Factory long-term roadmap
 
+[← Documentation](README.md) · [Architecture](architecture.md) · [Versioning](versioning.md)
+
+> [!NOTE]
+> **Dated planning snapshot.** Milestone statuses below were recorded against named 2026 commits and runs. This is not a live GitHub issue dashboard; verify current master and open issues before treating pending work as delivered.
+
 ## Baseline
 
 Verified on 2026-11-09 against `master` at `037f2a1`. The [master CI run](https://github.com/DaveBeusing/Factory/actions/runs/42707820123) passed the .NET suite, Chromium, provenance checks and Windows package installation, upgrade and backup restore. GitHub listed no open PRs, releases or tags. The only open issue was [#22](https://github.com/DaveBeusing/Factory/issues/22).

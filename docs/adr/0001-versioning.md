@@ -1,5 +1,10 @@
 # ADR-0001: Git-derived preview versions with a central MSBuild release baseline
 
+[← ADR index](README.md) · [Versioning guide](../versioning.md)
+
+> [!NOTE]
+> **Accepted decision.** This record captures the original rationale and trade-offs. For current CLI commands, package validation and schema compatibility, use the live versioning guide.
+
 - **Status:** Accepted for implementation
 - **Date:** 2026-11-02
 - **Scope:** Factory product builds and release preparation

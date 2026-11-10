@@ -4,6 +4,11 @@ description: Run the local .NET Factory job queue with deterministic gates and s
 ---
 # Factory run
 
+> [!WARNING]
+> Source worktrees, active leases and unverified remote effects must be preserved. Do not treat queue readiness as permission to publish or merge.
+
+## Procedure
+
 Use the compiled `Factory` .NET 10 executable, not Python. Locate the installed distribution or ask for its path.
 
 1. Read `Factory doctor` and `Factory status` first.

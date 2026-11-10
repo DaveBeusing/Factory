@@ -38,6 +38,7 @@
 .stacked-card { margin-top: 17px; }
 .planner-filter-card { margin-bottom: 17px; }
 .planner-filter-card > .card-body { padding-top: 20px; }
+.planner-filter-card .field:last-child { margin-bottom: 0; }
 .overview-allowance { margin-bottom: 17px; }
 .settings-edit-button { margin-top: 20px; }
 .capacity-note { margin: 17px 0 0; line-height: 1.6; }

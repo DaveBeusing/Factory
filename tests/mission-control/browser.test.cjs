@@ -144,6 +144,7 @@ browserTest('keeps Mission Control layout, actions and version aligned', async (
     [...main.querySelectorAll('.stacked-card')].every(element => element.parentElement === main)),
     'Capacity spacing should not rely on wrapper elements');
   assert.equal(await page.locator('.capacity-note').count(), 1);
+  assert.equal(await page.locator('.card-actions:empty').count(), 0, 'Do not render empty capacity action containers');
 
   await nav.getByRole('button', { name: 'Settings' }).click();
   assert.equal(await page.locator('.settings-edit-button').evaluate(element => getComputedStyle(element).marginTop), '20px');

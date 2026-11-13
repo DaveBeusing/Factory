@@ -153,10 +153,17 @@ public sealed partial class StateStore
         return results;
     }
 
-    internal static bool IsIntakeGoal(SqliteConnection db, SqliteTransaction tx, Guid goal)
+    internal static bool RequiresIntakePlanAdoption(SqliteConnection db, SqliteTransaction tx, Guid goal)
     {
-        using var query = Command(db, tx, "SELECT 1 FROM issue_intake_goals WHERE goal_id=$goal LIMIT 1;",
-            ("$goal", goal));
+        using var query = Command(db, tx, """
+            SELECT 1 FROM issue_intake_goals g WHERE g.goal_id=$goal AND NOT EXISTS(
+                SELECT 1 FROM lifecycle_audit a
+                JOIN goal_plan_revisions r ON r.revision=a.reference AND r.goal_id=g.goal_id
+                JOIN issue_intake_plan_bindings b ON b.plan_revision=r.revision
+                WHERE a.project_id=g.project_id AND a.entity_id=g.goal_id AND a.entity_kind='plan'
+                    AND a.reason_code='PlanAdopted' AND a.resulting_state='adopted'
+            ) LIMIT 1;
+            """, ("$goal", goal));
         return query.ExecuteScalar() is not null;
     }
 

@@ -1311,6 +1311,18 @@ Test("Issue intake deduplicates concurrent scans and re-evaluates policy and edi
         Assert(Scan(store, issue).GoalId == goal);
         try
         {
+            var unrelated = store.AddJob(new FactoryJob { ProjectId = project.Id, Title = "Unrelated" });
+            try
+            {
+                MissionControlManager.UpdateJob(store, unrelated.Id, new JobInput
+                {
+                    ProjectId = project.Id, GoalId = goal, Title = "Unrelated",
+                    Description = "An existing unrelated job", ExpectedPaths = ["README.md"]
+                });
+                throw new Exception("An unrelated job was assigned before adoption");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("reviewed plan", StringComparison.Ordinal)) { }
+            store.UpdateJob(unrelated.Id, job => job.GoalId = goal);
             MissionControlManager.SetGoalStatus(store, goal!.Value, "activate");
             throw new Exception("Intake goal activated without adoption");
         }
@@ -1322,6 +1334,12 @@ Test("Issue intake deduplicates concurrent scans and re-evaluates policy and edi
             return StateStore.IntakeAllowsPlan(db, tx, plan);
         });
         Assert(allowed);
+        store.Change((_, db, tx) =>
+        {
+            StateStore.RecordPlanAdoption(db, tx, plan, "fixture-operator");
+            return 0;
+        });
+        Assert(MissionControlManager.SetGoalStatus(store, goal!.Value, "activate").State == "active");
         var edit = issue with { Title = "Edited", UpdatedAt = "2026-03-01T10:01:00Z" };
         Assert(Scan(store, edit).GoalId == goal);
         Assert(!store.Change((_, db, tx) => StateStore.IntakeAllowsPlan(db, tx, plan)));

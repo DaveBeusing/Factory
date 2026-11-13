@@ -223,7 +223,18 @@ internal static class ProjectPlanningTests
             await Request(settings.ApiToken, HttpMethod.Post, $"/api/jobs/{running.Id}/action",
                 HttpStatusCode.BadRequest, new { action = "pause" });
             Require(store.Job(running.Id).RequestedState == LocalJobControl.ProjectStopRequest,
-                "A failed administrator pause cleared the accepted operator stop");
+                "A conflicting administrator pause cleared the accepted operator stop");
+
+            var adminJob = new FactoryJob { ProjectId = first.Id };
+            store.Change(state =>
+            {
+                state.Jobs.Add(adminJob);
+                JobRecovery.Assign(adminJob, "another-controller", 120, local: true);
+            });
+            var adminUrl = $"/api/jobs/{adminJob.Id}/action";
+            await Request(settings.ApiToken, HttpMethod.Post, adminUrl, HttpStatusCode.OK, new { action = "stop" });
+            Require(store.Job(adminJob.Id).RequestedState == LocalJobControl.ProjectStopRequest,
+                "Admin control did not persist the lease-bound signal for the other controller");
 
             var budgetJob = new FactoryJob { ProjectId = first.Id, GoalId = active.Id, State = JobStates.Stopped,
                 ExecutionGeneration = 1, TokensIn = 30 };
@@ -352,6 +363,15 @@ internal static class ProjectPlanningTests
             {
                 using var request = new HttpRequestMessage(method, path);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                if (body is not null && path.EndsWith("/action", StringComparison.Ordinal) &&
+                    System.Text.RegularExpressions.Regex.Match(path, @"/jobs/([0-9a-f-]+)/action$") is { Success: true } match &&
+                    Guid.TryParse(match.Groups[1].Value, out var targetId))
+                {
+                    var fields = System.Text.Json.JsonSerializer.SerializeToNode(body)!.AsObject();
+                    if (!fields.ContainsKey("controlRevision"))
+                        fields["controlRevision"] = store.Job(targetId).ControlRevision;
+                    body = fields;
+                }
                 if (body is not null) request.Content = JsonContent.Create(body);
                 var cancellation = deadline ?? timeout.Token;
                 using var response = await client.SendAsync(request, cancellation);

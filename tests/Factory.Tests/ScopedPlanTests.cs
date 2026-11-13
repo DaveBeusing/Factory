@@ -266,6 +266,20 @@ internal static class ScopedPlanTests
             reservationAudit.Parameters.AddWithValue("$actor", alice.SubjectId.ToString("D"));
             Require((long)reservationAudit.ExecuteScalar()! == 4, "Reservation audit is not bound to its actor and usage");
 
+            using (var lifecycle = db.CreateCommand())
+            {
+                lifecycle.CommandText = """
+                    SELECT COUNT(*) FROM lifecycle_audit
+                    WHERE project_id=$project AND entity_id=$goal AND actor=$actor
+                      AND ((entity_kind='plan' AND resulting_state='adopted')
+                        OR (entity_kind='approval' AND resulting_state='approved'));
+                    """;
+                lifecycle.Parameters.AddWithValue("$project", first.Id.ToString());
+                lifecycle.Parameters.AddWithValue("$goal", goal.Id.ToString());
+                lifecycle.Parameters.AddWithValue("$actor", alice.SubjectId.ToString());
+                Require((long)lifecycle.ExecuteScalar()! == 2, "The reviewed plan and approval lack correlated audit records");
+            }
+
             store.SetOperatorGrant(bob.SubjectId, first.Id, grant: true);
             var local = new FactoryJob { ProjectId = first.Id, Title = "Running local fixture", Priority = 100, ExpectedPaths = ["control.txt"] };
             var foreignJob = new FactoryJob { ProjectId = second.Id };
@@ -293,10 +307,16 @@ internal static class ScopedPlanTests
                     new { action = "stop" });
                 Require(store.Job(local.Id).RequestedState == "", "Rejected control left an interrupt request");
                 Execute("DROP TRIGGER reject_operation_audit;");
+                var observed = store.Job(local.Id);
+                var staleRevision = JobLifecycle.ControlRevision(local.Id, observed.ExecutionGeneration,
+                    observed.State, observed.RequestedState, observed.UpdatedAt.AddTicks(-1));
+                await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Conflict,
+                    new { action = "cancel", controlRevision = staleRevision });
+                Require(store.Job(local.Id).RequestedState == "", "Stale cancellation targeted the current lease");
                 var accepted = JsonSerializer.Deserialize<ProjectJobControlResult>(
                     await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Accepted,
-                        new { action = "stop", reason = "Stop fixture" }), Json.Options)!;
-                Require(accepted.RequestedState == JobStates.Stopped, "Active stop response did not expose its requested outcome");
+                        new { action = "cancel", reason = "Cancel fixture", controlRevision = observed.ControlRevision }), Json.Options)!;
+                Require(accepted.RequestedState == JobStates.Cancelled, "Active cancellation did not expose its requested outcome");
                 await executionTask.WaitAsync(timeout.Token);
             }
             finally
@@ -305,8 +325,19 @@ internal static class ScopedPlanTests
                 await executionTask;
             }
             var stopped = store.Job(local.Id);
-            Require(stopped.State == JobStates.Stopped && stopped.LeaseOwner == "" && stopped.RequestedState == "",
-                "The runner did not consume the durable stop request");
+            Require(stopped.State == JobStates.Cancelled && stopped.LeaseOwner == "" && stopped.RequestedState == "",
+                "The runner did not consume the durable cancellation request");
+            await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.OK, new { action = "cancel", controlRevision = stopped.ControlRevision });
+            await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Conflict, new { action = "resume" });
+            using (var lifecycle = db.CreateCommand())
+            {
+                lifecycle.CommandText = """
+                    SELECT COUNT(*) FROM lifecycle_audit WHERE entity_id=$job
+                      AND (reason_code='CancelRequested' OR reason_code='ExecutionCancelled');
+                    """;
+                lifecycle.Parameters.AddWithValue("$job", local.Id.ToString());
+                Require((long)lifecycle.ExecuteScalar()! == 2, "Cancellation replay duplicated or lost a decision");
+            }
 
             var recovery = new FactoryJob { ProjectId = first.Id, ExpectedPaths = ["control.txt"] };
             store.Change(state =>
@@ -358,8 +389,8 @@ internal static class ScopedPlanTests
             operations.Parameters.AddWithValue("$actor", bob.SubjectId.ToString("D"));
             operations.Parameters.AddWithValue("$project", first.Id.ToString("D"));
             using var op = operations.ExecuteReader();
-            Require(op.Read() && Guid.Parse(op.GetString(0)) == local.Id && op.GetString(1) == "stop_requested" &&
-                !op.GetBoolean(2) && op.GetString(3) == "Stop fixture" &&
+            Require(op.Read() && Guid.Parse(op.GetString(0)) == local.Id && op.GetString(1) == "cancel_requested" &&
+                !op.GetBoolean(2) && op.GetString(3) == "Cancel fixture" &&
                 op.Read() && Guid.Parse(op.GetString(0)) == recovery.Id && op.GetString(1) == "reconcile" &&
                 op.GetBoolean(2) && op.GetString(3) == review.reason && !op.Read(),
                 "Active control and recovery audit did not bind the actor, project and evidence");
@@ -374,6 +405,15 @@ internal static class ScopedPlanTests
             {
                 using var request = new HttpRequestMessage(method, url);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                if (body is not null && url.EndsWith("/action", StringComparison.Ordinal) &&
+                    System.Text.RegularExpressions.Regex.Match(url, @"/jobs/([0-9a-f-]+)/action$") is { Success: true } match &&
+                    Guid.TryParse(match.Groups[1].Value, out var targetId))
+                {
+                    var fields = System.Text.Json.JsonSerializer.SerializeToNode(body)!.AsObject();
+                    if (!fields.ContainsKey("controlRevision"))
+                        fields["controlRevision"] = store.Job(targetId).ControlRevision;
+                    body = fields;
+                }
                 if (body is not null) request.Content = JsonContent.Create(body);
                 using var response = await client.SendAsync(request, timeout.Token);
                 var content = await response.Content.ReadAsStringAsync(timeout.Token);

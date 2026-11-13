@@ -2243,7 +2243,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 18, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 19, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -2488,6 +2488,31 @@ Test("Fenced stage transition writes job and event in one transaction", () =>
         Assert(snapshot.Events.Count(e => e.JobId == job.Id && e.Type == "stage" &&
             e.Message == "building/agent") == 1);
 
+        store.SetFencedStage(job.Id, fence, JobStates.Building, "agent");
+        Assert(store.Job(job.Id).UpdatedAt == actual.UpdatedAt, "Replaying the same stage changed its timestamp");
+        var reopened = new StateStore(home);
+        var audit = reopened.Read().Events.Single(e => e.JobId == job.Id && e.Type == "job_lifecycle_transition");
+        using var decision = System.Text.Json.JsonDocument.Parse(audit.Message);
+        Assert(decision.RootElement.GetProperty("projectId").GetGuid() == project.Id);
+        Assert(decision.RootElement.GetProperty("actor").GetString() == fence.Owner);
+        Assert(decision.RootElement.GetProperty("generation").GetInt64() == fence.Generation);
+        Assert(decision.RootElement.GetProperty("reason").GetString() == "ExecutionAdvanced");
+        Assert(decision.RootElement.GetProperty("decision").GetGuid() != Guid.Empty);
+        try
+        {
+            reopened.SetFencedStage(job.Id, fence, JobStates.Integrated, "done");
+            throw new Exception("Execution bypassed integration verification");
+        }
+        catch (InvalidOperationException) { }
+        Assert(reopened.Job(job.Id).State == JobStates.Building);
+        Assert(reopened.Read().Events.Count(e => e.Type == "job_lifecycle_transition") == 1);
+        try
+        {
+            reopened.AdvanceFencedStage(job.Id, fence, job, JobStates.Gating, "commit");
+            throw new Exception("An old stage snapshot was accepted");
+        }
+        catch (LostExecutionLeaseException) { }
+
         try
         {
             store.SetFencedStage(job.Id, fence with { Generation = fence.Generation - 1 },
@@ -2511,7 +2536,7 @@ Test("Fenced stage transition writes job and event in one transaction", () =>
         }
         try
         {
-            store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
+            store.SetFencedStage(job.Id, fence, JobStates.Gating, "commit");
             throw new Exception("Stage mutation survived failed audit insert");
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { }
@@ -2521,10 +2546,98 @@ Test("Fenced stage transition writes job and event in one transaction", () =>
         store.Change(s => s.Jobs.Single().LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
         try
         {
-            store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
+            store.SetFencedStage(job.Id, fence, JobStates.Gating, "commit");
             throw new Exception("Expired execution changed its stage");
         }
         catch (LostExecutionLeaseException) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Schema 18 lifecycle audit upgrade survives event pruning and restart", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-lifecycle-upgrade-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "historical project" };
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        using var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")};Pooling=False");
+        db.Open();
+        using var command = db.CreateCommand();
+        command.CommandText = "DROP TABLE lifecycle_audit; PRAGMA user_version=18;";
+        command.ExecuteNonQuery();
+        var upgraded = new StateStore(home);
+        Assert(upgraded.Job(job.Id).State == JobStates.Queued);
+        MissionControlManager.ControlJob(upgraded, job.Id, new ControlInput { Action = "cancel" });
+        command.CommandText = "DELETE FROM events; PRAGMA integrity_check;";
+        Assert((string?)command.ExecuteScalar() == "ok");
+        Assert(new StateStore(home).Job(job.Id).State == JobStates.Cancelled);
+        command.CommandText = "SELECT COUNT(*) FROM lifecycle_audit WHERE reason_code='ExecutionCancelled';";
+        Assert(Convert.ToInt64(command.ExecuteScalar()) == 1);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Pending stop wins over a fenced stage advance", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-stage-stop-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "stage-stop" };
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "stage-runner", 120, local: true));
+        var observed = store.Job(job.Id);
+        store.Change(s =>
+        {
+            var current = s.Jobs.Single();
+            current.RequestedState = LocalJobControl.ProjectStopRequest;
+            current.UpdatedAt = observed.UpdatedAt.AddTicks(1);
+        });
+        try
+        {
+            store.AdvanceFencedStage(job.Id, fence, observed, JobStates.Building, "agent");
+            throw new Exception("Stage advanced despite a pending stop");
+        }
+        catch (OperationCanceledException) { }
+        store.InterruptFencedStage(job.Id, fence);
+        Assert(store.Job(job.Id).State == JobStates.Stopped);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Competing fenced terminal transitions commit only one decision", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-stage-race-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "stage-race" };
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "stage-runner", 120, local: true));
+        using var start = new System.Threading.ManualResetEventSlim();
+        var writers = new[] { JobStates.Paused, JobStates.Stopped }.Select(target => Task.Run(() =>
+        {
+            start.Wait();
+            try
+            {
+                new StateStore(home).SetFencedStage(job.Id, fence, target, "interrupt");
+                return true;
+            }
+            catch (LostExecutionLeaseException) { return false; }
+        })).ToArray();
+        start.Set();
+        Task.WaitAll(writers);
+        Assert(writers.Count(writer => writer.Result) == 1);
+        var snapshot = new StateStore(home).Read();
+        var audit = snapshot.Events.Single(e => e.JobId == job.Id && e.Type == "job_lifecycle_transition");
+        using var decision = System.Text.Json.JsonDocument.Parse(audit.Message);
+        Assert(decision.RootElement.GetProperty("to").GetString() == snapshot.Jobs.Single().State);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -2748,7 +2861,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 18);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 19);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3248,7 +3361,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 18);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 19);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

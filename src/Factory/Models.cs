@@ -7,9 +7,75 @@ public static class JobStates
         AwaitingApproval = "awaiting_approval", PrReady = "pr_ready",
         CompletedLocal = "completed_local", Integrated = "integrated", Blocked = "blocked",
         Failed = "failed", Paused = "paused";
-    public const string Stopped = "stopped";
+    public const string Stopped = "stopped", Cancelled = "cancelled";
     public static readonly HashSet<string> Active = [Preparing, Building, Gating, Reviewing, Reworking, AwaitingApproval];
 }
+
+internal enum LifecycleReason
+{
+    ExecutionAdvanced,
+    ExecutionBlocked,
+    ExecutionFailed,
+    ExecutionPaused,
+    ExecutionStopped,
+    PullRequestPrepared,
+    ExecutionCancelled,
+    LeaseClaimed,
+    LeaseFenced,
+    RemoteResultVerified,
+    RemoteResultRejected,
+    CancelRequested,
+    PauseRequested,
+    StopRequested,
+    OperatorPaused,
+    OperatorStopped,
+    OperatorResumed,
+    OperatorRetried,
+    Reconciled,
+    IntegrationVerified,
+    PlanProposed,
+    PlanSuperseded,
+    PlanAdopted,
+    ApprovalRequested,
+    ApprovalSuperseded,
+    ApprovalGranted,
+    AwaitingManualIntegration
+}
+
+internal static class JobLifecycle
+{
+    internal static string ControlRevision(Guid id, long generation, string state, string request, DateTimeOffset updatedAt) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            FormattableString.Invariant($"{id:D}\n{generation}\n{state}\n{request}\n{updatedAt.UtcTicks}"))));
+
+    internal static LifecycleReason ControlReason(string action) => action switch
+    {
+        "pause" => LifecycleReason.OperatorPaused,
+        "stop" => LifecycleReason.OperatorStopped,
+        "cancel" => LifecycleReason.ExecutionCancelled,
+        "resume" => LifecycleReason.OperatorResumed,
+        "retry" => LifecycleReason.OperatorRetried,
+        _ => throw new InvalidOperationException("Unknown job control.")
+    };
+
+    internal static LifecycleReason FencedTransition(string from, string to) => (from, to) switch
+    {
+        (_, JobStates.Blocked) => LifecycleReason.ExecutionBlocked,
+        (_, JobStates.Failed) => LifecycleReason.ExecutionFailed,
+        (_, JobStates.Paused) => LifecycleReason.ExecutionPaused,
+        (_, JobStates.Stopped) => LifecycleReason.ExecutionStopped,
+        (_, JobStates.Cancelled) => LifecycleReason.ExecutionCancelled,
+        (JobStates.AwaitingApproval, JobStates.PrReady) => LifecycleReason.PullRequestPrepared,
+        (JobStates.AwaitingApproval, JobStates.CompletedLocal) => LifecycleReason.AwaitingManualIntegration,
+        (JobStates.Preparing, JobStates.Building) or
+        (JobStates.Building or JobStates.Reworking, JobStates.Gating) or
+        (JobStates.Gating, JobStates.Gating or JobStates.Reviewing or JobStates.Reworking) or
+        (JobStates.Reviewing, JobStates.Reworking or JobStates.AwaitingApproval) or
+        (JobStates.AwaitingApproval, JobStates.AwaitingApproval) => LifecycleReason.ExecutionAdvanced,
+        _ => throw new InvalidOperationException($"Illegal fenced job transition: {from} → {to}")
+    };
+}
+
 
 public sealed class FactoryState
 {
@@ -106,6 +172,8 @@ public sealed class FactoryJob
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? FinishedAt { get; set; }
+
+    public string ControlRevision => JobLifecycle.ControlRevision(Id, ExecutionGeneration, State, RequestedState, UpdatedAt);
 }
 
 /// <summary>

@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 18;
+    private const int DatabaseVersion = 19;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -84,7 +84,7 @@ public sealed partial class StateStore
 
     private static PropertyInfo[] Scalars(EntityMap map) =>
         map.Type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
-            .Where(p => !typeof(IList).IsAssignableFrom(p.PropertyType)).ToArray();
+            .Where(p => p.CanWrite && !typeof(IList).IsAssignableFrom(p.PropertyType)).ToArray();
 
     private static PropertyInfo[] Collections(EntityMap map) =>
         map.Type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
@@ -312,7 +312,8 @@ public sealed partial class StateStore
             if (schemaVersion < 15) UpgradeProjectControls(db, tx);
             if (schemaVersion < 16) UpgradeProjectBudgetReconciliation(db, tx);
             if (schemaVersion < 17) UpgradeProjectGoalReconciliation(db, tx);
-            UpgradeProjectReviews(db, tx);
+            if (schemaVersion < 18) UpgradeProjectReviews(db, tx);
+            UpgradeLifecycleAudit(db, tx);
         }
         tx.Commit();
     }
@@ -797,13 +798,80 @@ public sealed partial class StateStore
     /// A superseded, expired, or inactive execution cannot change the job.
     /// </summary>
     public void SetFencedStage(Guid jobId, ExecutionFence fence, string nextState, string stage,
-        string? error = null)
+        string? error = null) => WriteFencedStage(jobId, fence, nextState, stage, error);
+
+    internal void AdvanceFencedStage(Guid jobId, ExecutionFence fence, FactoryJob expected,
+        string nextState, string stage, string? error = null) =>
+        WriteFencedStage(jobId, fence, nextState, stage, error, expected: expected);
+
+    internal void InterruptFencedStage(Guid jobId, ExecutionFence fence) =>
+        WriteFencedStage(jobId, fence, JobStates.Paused, "interrupted", null, interrupted: true);
+
+    private void WriteFencedStage(Guid jobId, ExecutionFence fence, string nextState, string stage,
+        string? error, bool interrupted = false, FactoryJob? expected = null)
     {
         if (string.IsNullOrWhiteSpace(nextState) || string.IsNullOrWhiteSpace(stage))
             throw new ArgumentException("Job state and stage are required");
-        var now = DateTimeOffset.UtcNow;
         using var db = Open();
         using var tx = db.BeginTransaction();
+        var now = DateTimeOffset.UtcNow;
+        string previousState;
+        string previousStage;
+        string previousError;
+        Guid projectId;
+        string requestedState;
+        DateTimeOffset? checkpointAt;
+        using (var read = Command(db, tx, """
+            SELECT state,stage,error,project_id,requested_state,checkpoint_at FROM jobs
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+              AND lease_owner=$owner AND lease_until>$now;
+            """, ("$id", jobId), ("$generation", fence.Generation), ("$token", fence.Token),
+            ("$owner", fence.Owner), ("$now", now)))
+        using (var row = read.ExecuteReader())
+        {
+            if (!row.Read())
+                throw new LostExecutionLeaseException("Execution lease expired or generation was fenced");
+            previousState = row.GetString(0);
+            previousStage = row.GetString(1);
+            previousError = row.GetString(2);
+            projectId = Guid.Parse(row.GetString(3));
+            requestedState = row.GetString(4);
+            checkpointAt = (DateTimeOffset?)FromDb(row.GetValue(5), typeof(DateTimeOffset?));
+        }
+        if (!JobStates.Active.Contains(previousState))
+            throw new LostExecutionLeaseException("Execution is no longer active");
+        if (interrupted)
+        {
+            if (previousStage is "commit" or "push" or "pr")
+            {
+                nextState = JobStates.Blocked;
+                stage = "interrupted_git";
+                error = "Git side effects interrupted; reconcile before retry";
+            }
+            else
+            {
+                nextState = requestedState switch
+                {
+                    LocalJobControl.ProjectCancelRequest => JobStates.Cancelled,
+                    JobStates.Stopped or LocalJobControl.ProjectStopRequest => JobStates.Stopped,
+                    _ => JobStates.Paused
+                };
+                error = nextState == JobStates.Cancelled ? null : "Execution interrupted; inspect worktree before resuming";
+            }
+        }
+        var controlPending = LocalJobControl.IsProjectRequest(requestedState) ||
+            requestedState is JobStates.Paused or JobStates.Stopped;
+        if (!interrupted && controlPending &&
+            (JobStates.Active.Contains(nextState) || nextState is JobStates.PrReady or JobStates.CompletedLocal))
+            throw new OperationCanceledException("The current execution has an interruption request.");
+        if (nextState == JobStates.Cancelled && requestedState != LocalJobControl.ProjectCancelRequest)
+            throw new InvalidOperationException("The current execution has no cancellation request.");
+        if (previousState == nextState && previousStage == stage && (error is null || error == previousError))
+            return;
+        if (expected is not null && (expected.State != previousState || expected.Stage != previousStage ||
+            expected.CheckpointAt != checkpointAt))
+            throw new LostExecutionLeaseException("The job stage changed since it was observed.");
+        var reason = JobLifecycle.FencedTransition(previousState, nextState);
         using (var update = Command(db, tx, """
             UPDATE jobs SET state=$state, stage=$stage, error=COALESCE($error,error),
                 updated_at=$now, checkpoint_stage=$stage, checkpoint_at=$now
@@ -827,11 +895,8 @@ public sealed partial class StateStore
                 """, ("$position", position), ("$id", Guid.NewGuid()), ("$at", now),
                 ("$job", jobId), ("$message", nextState + "/" + stage));
         }
-        Execute(db, tx, """
-            DELETE FROM events WHERE id IN (
-                SELECT id FROM events ORDER BY position DESC LIMIT -1 OFFSET 20000
-            );
-            """);
+        RecordLifecycle(db, tx, projectId, "job", jobId, fence.Owner, previousState,
+            nextState, reason, generation: fence.Generation);
         tx.Commit();
     }
 

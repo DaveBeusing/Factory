@@ -33,7 +33,7 @@ public sealed class FactoryEngine
 
     private bool Claim(Guid id)
     {
-        return _store.Change(s =>
+        return _store.Change((s, db, tx) =>
         {
             var j = s.Jobs.Single(x => x.Id == id);
            if (!JobExecutionModes.Matches(j, _executionMode) || j.State != JobStates.Queued ||
@@ -43,6 +43,8 @@ public sealed class FactoryEngine
            if (!selected.Any(x => x.Id == id)) return false;
            JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true,
                 state: s, reservationTokens: _settings.GoalReservationTokens);
+           StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, _workerId, JobStates.Queued,
+               j.State, LifecycleReason.LeaseClaimed, generation: j.ExecutionGeneration, state: s);
            s.Events.Add(new FactoryEvent { JobId = id, Type = "claimed", Message = _workerId });
            return true;
         });
@@ -68,7 +70,7 @@ public sealed class FactoryEngine
     }
 
     private void Stage(Guid id, ExecutionFence fence, string state, string stage, string? error = null)
-        => _store.SetFencedStage(id, fence, state, stage, error);
+        => _store.AdvanceFencedStage(id, fence, _store.Job(id), state, stage, error);
 
     public IReadOnlyList<Guid> Recover() => JobRecovery.QuarantineExpired(_store);
 
@@ -164,18 +166,8 @@ public sealed class FactoryEngine
         }
         catch (OperationCanceledException)
         {
-            var interrupted = _store.Job(id);
-            if (JobRecovery.Matches(interrupted, fence))
-            {
-                if (interrupted.Stage is "commit" or "push" or "pr")
-                    Stage(id, fence, JobStates.Blocked, "interrupted_git",
-                        "Git side effects interrupted; reconcile before retry");
-                else
-                    Stage(id, fence,
-                        interrupted.RequestedState is JobStates.Stopped or LocalJobControl.ProjectStopRequest
-                            ? JobStates.Stopped : JobStates.Paused,
-                        "interrupted", "Execution interrupted; inspect worktree before resuming");
-            }
+            try { _store.InterruptFencedStage(id, fence); }
+            catch (LostExecutionLeaseException) { }
         }
         catch (Exception ex)
         {
@@ -196,6 +188,7 @@ public sealed class FactoryEngine
                     job.LeaseToken != fence.Token || job.LeaseOwner != fence.Owner ||
                     job.LeaseUntil <= DateTimeOffset.UtcNow)
                     return;
+                if (JobStates.Active.Contains(job.State)) return; // Keep the lease recoverable if recording the outcome failed.
                 GoalBudgetLedger.Settle(state, job);
                 job.LeaseOwner = "";
                 job.LeaseToken = "";
@@ -339,7 +332,7 @@ public sealed class FactoryEngine
         // Never accept a local-only ancestry result for a project with a configured remote.
         var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct);
         ct.ThrowIfCancellationRequested();
-        var recorded = _store.Change(s =>
+        var recorded = _store.Change((s, db, tx) =>
         {
             var current = s.Jobs.Single(j => j.Id == id);
             var currentProject = s.Projects.Single(p => p.Id == job.ProjectId);
@@ -351,6 +344,8 @@ public sealed class FactoryEngine
                 currentProject.Origin != project.Origin ||
                 currentProject.BaseBranch != project.BaseBranch)
                 return false;
+            StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", id, "integration-verifier",
+                current.State, JobStates.Integrated, LifecycleReason.IntegrationVerified, reference: proof.IntegratedCommit, state: s);
             current.Integrated = true;
             current.State = JobStates.Integrated;
             current.Stage = "done";

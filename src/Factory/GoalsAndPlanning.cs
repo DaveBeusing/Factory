@@ -189,6 +189,7 @@ public static class Planning
             var jobs = BuildAdoptedJobs(plan, goal, mode);
             state.Jobs.AddRange(jobs);
             goal.State = "active";
+            StateStore.RecordPlanAdoption(db, tx, plan, "local-operator");
             state.Events.Add(new FactoryEvent { Type = "plan_adopted", Message = $"Goal {goalId}: {jobs.Count} work packages" });
             return (IReadOnlyList<FactoryJob>)jobs;
         });

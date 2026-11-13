@@ -11,13 +11,14 @@ public sealed class ProjectJobControlInput
     public string Action { get; set; } = "";
     public bool Reviewed { get; set; }
     public string Reason { get; set; } = "";
+    public string? ControlRevision { get; set; }
     public string? RecoveryRevision { get; set; }
 }
 
 internal sealed record ProjectJobControlResult(Guid Id, Guid ProjectId, string State, DateTimeOffset UpdatedAt,
     string? RequestedState = null);
 internal sealed record ProjectJobOperation(Guid Id, string Title, string State, string Mode, string[] Actions,
-    bool ReviewBeforeResume, string? RequestedState, string? CheckpointCommit, string? RecoveryRevision);
+    bool ReviewBeforeResume, string? RequestedState, string? CheckpointCommit, string? RecoveryRevision, string ControlRevision);
 
 public sealed partial class StateStore
 {
@@ -48,7 +49,7 @@ public sealed partial class StateStore
         var now = DateTimeOffset.UtcNow;
         return ReadViewerRows(db, tx, projectId, """
             SELECT j.id,j.title,j.state,j.mode,j.stage,j.started_at,j.lease_owner,j.lease_until,
-                LENGTH(j.lease_token)>0,j.requested_state,j.checkpoint_stage,j.checkpoint_commit,p.status,j.execution_generation
+                LENGTH(j.lease_token)>0,j.requested_state,j.checkpoint_stage,j.checkpoint_commit,p.status,j.execution_generation,j.updated_at
             FROM jobs j JOIN projects p ON p.id=j.project_id WHERE j.project_id=$project
             ORDER BY j.position,j.id;
             """, row =>
@@ -67,12 +68,12 @@ public sealed partial class StateStore
                 if (active)
                 {
                     if (requested.Length == 0 && HasCurrentLocalLease(mode, owner, row.GetBoolean(8), expires, now))
-                        actions.AddRange(["pause", "stop"]);
+                        actions.AddRange(["pause", "stop", "cancel"]);
                 }
                 else if (owner.Length == 0)
                 {
                     if (state is JobStates.Queued or JobStates.Paused or JobStates.Stopped)
-                        actions.AddRange(["pause", "stop"]);
+                        actions.AddRange(["pause", "stop", "cancel"]);
                     if ((state is JobStates.Paused or JobStates.Stopped) && stage is not ("scope" or "reconcile"))
                         actions.Add("resume");
                     if (state == JobStates.Blocked && stage == "reconcile" && mode == JobExecutionModes.Local &&
@@ -89,14 +90,46 @@ public sealed partial class StateStore
                 {
                     LocalJobControl.ProjectPauseRequest => JobStates.Paused,
                     LocalJobControl.ProjectStopRequest => JobStates.Stopped,
+                    LocalJobControl.ProjectCancelRequest => JobStates.Cancelled,
                     _ => null
-                }, checkpoint, checkpoint is null ? null : JobRecoveryRevision(id, row.GetInt64(13), row.GetString(10), checkpoint));
+                }, checkpoint, checkpoint is null ? null : JobRecoveryRevision(id, row.GetInt64(13), row.GetString(10), checkpoint),
+                JobLifecycle.ControlRevision(id, row.GetInt64(13), state, requested,
+                    (DateTimeOffset)FromDb(row.GetValue(14), typeof(DateTimeOffset))!));
         });
     }
 
     private static string JobRecoveryRevision(Guid jobId, long generation, string stage, string commit) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             FormattableString.Invariant($"{jobId:D}\n{generation}\n{stage}\n{commit}"))));
+
+    internal FactoryJob RequestLocalControl(FactoryJob observed, string action, string detail) => Change((state, db, tx) =>
+    {
+        var job = state.Jobs.Single(j => j.Id == observed.Id);
+        if (job.ControlRevision != observed.ControlRevision || !HasCurrentLocalLease(job.Mode, job.LeaseOwner, job.LeaseToken.Length > 0, job.LeaseUntil,
+            DateTimeOffset.UtcNow) || !JobRecovery.Matches(job,
+            new ExecutionFence(observed.ExecutionGeneration, observed.LeaseToken, observed.LeaseOwner)))
+            throw new LostExecutionLeaseException("The execution lease changed.");
+        var (signal, target, reason) = RequestedControl(action);
+        if (job.RequestedState == signal) return job;
+        if (job.RequestedState.Length != 0)
+            throw new InvalidOperationException("The current lease already has a control request.");
+        job.RequestedState = signal;
+        job.UpdatedAt = DateTimeOffset.UtcNow;
+        RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, "local-operator", job.State, job.State,
+            reason, reference: target, generation: job.ExecutionGeneration, state: state);
+        var message = action + " " + detail;
+        state.Events.Add(new FactoryEvent { JobId = job.Id, Type = "job_control_requested",
+            Message = message[..Math.Min(message.Length, 2000)] });
+        return job;
+    });
+
+    private static (string Signal, string Target, LifecycleReason Reason) RequestedControl(string action) => action switch
+    {
+        "cancel" => (LocalJobControl.ProjectCancelRequest, JobStates.Cancelled, LifecycleReason.CancelRequested),
+        "stop" => (LocalJobControl.ProjectStopRequest, JobStates.Stopped, LifecycleReason.StopRequested),
+        "pause" => (LocalJobControl.ProjectPauseRequest, JobStates.Paused, LifecycleReason.PauseRequested),
+        _ => throw new InvalidOperationException("Invalid interrupt action.")
+    };
 
     private static bool HasCurrentLocalLease(string mode, string owner, bool hasToken,
         DateTimeOffset? expires, DateTimeOffset now) =>
@@ -112,8 +145,8 @@ public sealed partial class StateStore
         using (var read = db.BeginTransaction(deferred: true))
             CheckJobControlAccess(db, read, verifier, projectId, jobId, request);
 
-        if (request.Action is not ("pause" or "resume" or "stop"))
-            throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Choose pause, resume or stop.");
+        if (request.Action is not ("pause" or "resume" or "stop" or "cancel"))
+            throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Choose pause, resume, stop or cancel.");
         var reason = request.Reason?.Trim() ?? "";
         if (reason.Length > 2000)
             throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "The reason may contain at most 2000 characters.");
@@ -122,12 +155,16 @@ public sealed partial class StateStore
         var actor = CheckJobControlAccess(db, tx, verifier, projectId, jobId, request);
         using var query = Command(db, tx, """
             SELECT j.state, j.stage, j.lease_owner, j.started_at, j.error, j.requested_state, p.status,
-                j.mode, j.lease_until, j.lease_token, j.updated_at
+                j.mode, j.lease_until, j.lease_token, j.updated_at, j.execution_generation
             FROM jobs j JOIN projects p ON p.id=j.project_id WHERE j.project_id=$project AND j.id=$job;
             """, ("$project", projectId), ("$job", jobId));
         using var row = query.ExecuteReader();
         if (!row.Read()) throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
         var previousState = row.GetString(0);
+        var revision = JobLifecycle.ControlRevision(jobId, row.GetInt64(11), previousState, row.GetString(5),
+            (DateTimeOffset)FromDb(row.GetValue(10), typeof(DateTimeOffset))!);
+        if (request.ControlRevision != revision)
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The job changed. Refresh before submitting the action.");
         if (row.GetString(6) == "archived")
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The job belongs to an archived project.");
         var leaseOwner = row.GetString(2);
@@ -139,10 +176,9 @@ public sealed partial class StateStore
                 throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Only a running local job with a current lease can be paused or stopped.");
             var pending = row.GetString(5);
             var updatedAt = (DateTimeOffset)FromDb(row.GetValue(10), typeof(DateTimeOffset))!;
+            var generation = row.GetInt64(11);
             row.Close();
-            var stop = request.Action == "stop";
-            var signal = stop ? LocalJobControl.ProjectStopRequest : LocalJobControl.ProjectPauseRequest;
-            var target = stop ? JobStates.Stopped : JobStates.Paused;
+            var (signal, target, code) = RequestedControl(request.Action);
             if (pending == signal) return new(jobId, projectId, previousState, updatedAt, target);
             if (pending.Length != 0)
                 throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The current lease already has a control request.");
@@ -153,6 +189,8 @@ public sealed partial class StateStore
             AuditJobOperation(db, tx, actor, projectId, jobId, request.Action + "_requested",
                 previousState, previousState, request.Reviewed, reason, now);
             AppendEvent(db, tx, jobId, "job_control_requested", request.Action + " " + reason);
+            RecordLifecycle(db, tx, projectId, "job", jobId, actor.ToString(), previousState, previousState,
+                code, reference: target, generation: generation);
             tx.Commit();
             return new(jobId, projectId, previousState, now, target);
         }
@@ -166,10 +204,13 @@ public sealed partial class StateStore
             StartedAt = (DateTimeOffset?)FromDb(row.GetValue(3), typeof(DateTimeOffset?)),
             Error = row.GetString(4), RequestedState = row.GetString(5)
         };
+        var observedUpdatedAt = (DateTimeOffset)FromDb(row.GetValue(10), typeof(DateTimeOffset))!;
         row.Close();
         if (request.Action == "resume" && job.StartedAt.HasValue && reason.Length == 0)
             throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Record what was reviewed before resuming this job.");
-        if (request.Action == "resume") RequireSettledJobProviderUsage(db, tx, jobId);
+        if (request.Action == "cancel" && previousState == JobStates.Cancelled)
+            return new(jobId, projectId, previousState, observedUpdatedAt);
+        if (request.Action is "resume" or "cancel") RequireSettledJobProviderUsage(db, tx, jobId);
         try
         {
             MissionControlManager.ApplyInactiveJobControl(job,
@@ -187,6 +228,9 @@ public sealed partial class StateStore
         AuditJobOperation(db, tx, actor, projectId, jobId, request.Action, previousState, job.State,
             request.Reviewed, reason, job.UpdatedAt);
         AppendEvent(db, tx, jobId, "job_control", request.Action + " " + reason);
+        if (previousState != job.State)
+            RecordLifecycle(db, tx, projectId, "job", jobId, actor.ToString(), previousState, job.State,
+                JobLifecycle.ControlReason(request.Action));
         tx.Commit();
         return new(jobId, projectId, job.State, job.UpdatedAt);
     }
@@ -246,6 +290,8 @@ public sealed partial class StateStore
             """, ("$at", now), ("$project", projectId), ("$job", jobId));
         AuditJobOperation(db, tx, actor, projectId, jobId, "reconcile", current.State, JobStates.Queued, true, reason, now);
         AppendEvent(db, tx, jobId, "reconciled", "Reviewed clean checkpoint " + current.CheckpointCommit + "; " + reason);
+        RecordLifecycle(db, tx, projectId, "job", jobId, actor.ToString(), current.State, JobStates.Queued,
+            LifecycleReason.Reconciled, reference: current.CheckpointCommit, generation: current.ExecutionGeneration);
         tx.Commit();
         return new(jobId, projectId, JobStates.Queued, now);
 

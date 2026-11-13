@@ -65,6 +65,7 @@ public sealed class WorkerPermissionsResult
 }
 public sealed class ControlInput
 {
+    public string? ControlRevision { get; set; }
     public string Action { get; set; } = "";
     public bool Reviewed { get; set; }
     public string Reason { get; set; } = "";
@@ -74,17 +75,13 @@ public static class LocalJobControl
 {
     internal const string ProjectPauseRequest = "project:paused";
     internal const string ProjectStopRequest = "project:stopped";
-    internal static bool IsProjectRequest(string? state) => state is ProjectPauseRequest or ProjectStopRequest;
+    internal const string ProjectCancelRequest = "project:cancelled";
+    internal static bool IsProjectRequest(string? state) =>
+        state is ProjectPauseRequest or ProjectStopRequest or ProjectCancelRequest;
     private static readonly ConcurrentDictionary<Guid, CancellationTokenSource> Active = new();
     public static void Register(Guid id, CancellationTokenSource cts) => Active[id] = cts;
     public static void Unregister(Guid id) => Active.TryRemove(id, out _);
     public static bool IsRegistered(Guid id) => Active.ContainsKey(id);
-    public static bool Request(Guid id)
-    {
-        if (!Active.TryGetValue(id, out var token)) return false;
-        try { token.Cancel(); return true; }
-        catch (ObjectDisposedException) { return false; }
-    }
 }
 
 public static class MissionControlManager
@@ -331,46 +328,27 @@ public static class MissionControlManager
     public static FactoryJob ControlJob(StateStore store, Guid id, ControlInput input)
     {
         var action = input.Action;
-        Require(action is "pause" or "stop" or "resume" or "retry", "Unknown job action");
+        Require(action is "pause" or "stop" or "resume" or "retry" or "cancel", "Unknown job action");
         var active = store.Job(id);
+        var expected = input.ControlRevision ?? active.ControlRevision;
+        Require(active.ControlRevision == expected, "The job changed. Refresh before submitting the action.");
         if (IsActive(active))
         {
             Require(active.Mode == "local" && active.LeaseOwner is { Length: > 0 } && !active.LeaseOwner.StartsWith("remote:", StringComparison.Ordinal),
                 "Active remote jobs cannot be interrupted from Mission Control; drain the worker");
-            Require(action is "pause" or "stop", "Active jobs can only be paused or stopped");
-            var updated = store.Change(s =>
-            {
-                var j = s.Jobs.Single(j => j.Id == id);
-                Require(IsActive(j) && j.Mode == active.Mode && j.ExecutionGeneration == active.ExecutionGeneration &&
-                    j.LeaseOwner == active.LeaseOwner && j.LeaseToken == active.LeaseToken,
-                    "The execution lease changed; refresh the job before retrying");
-                Require(!LocalJobControl.IsProjectRequest(j.RequestedState),
-                    "The current lease already has a project control request");
-                j.RequestedState = action == "pause" ? JobStates.Paused : JobStates.Stopped;
-                Log(s, id, "job_control_requested", action + " " + input.Reason); return j;
-            });
-            if (!LocalJobControl.Request(id))
-            {
-                store.Change(s =>
-                {
-                    var j = s.Jobs.Single(j => j.Id == id);
-                    if (j.ExecutionGeneration == updated.ExecutionGeneration && j.LeaseOwner == updated.LeaseOwner &&
-                        j.LeaseToken == updated.LeaseToken && j.RequestedState == updated.RequestedState)
-                    {
-                        j.RequestedState = "";
-                        j.UpdatedAt = DateTimeOffset.UtcNow;
-                    }
-                });
-                throw new InvalidOperationException("Job is not executing in this dashboard process");
-            }
-            return updated;
+            Require(action is "pause" or "stop" or "cancel", "Active jobs can only be paused, stopped or cancelled");
+            return store.RequestLocalControl(active, action, input.Reason);
         }
-        return store.Change(s =>
+        return store.Change((s, db, tx) =>
         {
             var j = s.Jobs.Single(j => j.Id == id);
-            Require(!IsActive(j) && (string.IsNullOrEmpty(j.LeaseOwner) || !LocalJobControl.IsProjectRequest(j.RequestedState)),
+            Require(j.ControlRevision == expected && !IsActive(j) && string.IsNullOrEmpty(j.LeaseOwner),
                 "The job is executing or already has a project control request");
+            var previous = j.State;
             ApplyInactiveJobControl(j, input);
+            if (j.State != previous)
+                StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, "local-operator", previous, j.State,
+                    JobLifecycle.ControlReason(action), state: s);
             Log(s, id, "job_control", action + " " + input.Reason);
             return j;
         });
@@ -379,10 +357,18 @@ public static class MissionControlManager
     internal static void ApplyInactiveJobControl(FactoryJob j, ControlInput input)
     {
         var action = input.Action;
-        if (action is "pause" or "stop")
+        if (action is "pause" or "stop" or "cancel")
         {
-            Require(j.State == JobStates.Queued || j.State is JobStates.Paused or JobStates.Stopped, "Only queued jobs can be paused/stopped immediately");
-            j.State = action == "pause" ? JobStates.Paused : JobStates.Stopped;
+            Require(j.State is JobStates.Queued or JobStates.Paused or JobStates.Stopped ||
+                (action == "cancel" && j.State == JobStates.Cancelled),
+                "Only queued, paused or stopped jobs can be controlled immediately");
+            if (action == "cancel" && j.State == JobStates.Cancelled) return;
+            j.State = action switch
+            {
+                "pause" => JobStates.Paused,
+                "stop" => JobStates.Stopped,
+                _ => JobStates.Cancelled
+            };
         }
         else
         {

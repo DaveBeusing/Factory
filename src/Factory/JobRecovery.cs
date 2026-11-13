@@ -74,7 +74,7 @@ public static class JobRecovery
 
     public static IReadOnlyList<Guid> QuarantineExpired(StateStore store, string? mode = null)
     {
-        return store.Change(s =>
+        return store.Change((s, db, tx) =>
         {
             if (mode is null) ProviderBudgetLedger.HoldOrphans(s);
             var ids = new List<Guid>();
@@ -87,6 +87,8 @@ public static class JobRecovery
                 GoalBudgetLedger.Hold(s, job, "expired worker lease");
                 var previousOwner = job.LeaseOwner;
                 var previousGeneration = job.ExecutionGeneration;
+                StateStore.RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, previousOwner, job.State,
+                    JobStates.Blocked, LifecycleReason.LeaseFenced, reference: job.CheckpointCommit, generation: previousGeneration, state: s);
                 job.ExecutionGeneration = checked(previousGeneration + 1); // fence old owner first
                 job.State = JobStates.Blocked;
                 job.Stage = "reconcile";
@@ -143,10 +145,12 @@ public static class JobRecovery
         var snapshot = store.Job(id);
         VerifyLocalRecoveryEvidence(snapshot);
 
-        return store.Change(s =>
+        return store.Change((s, db, tx) =>
         {
             var j = s.Jobs.Single(j => j.Id == id);
             VerifyRecoverySnapshot(snapshot, j);
+            StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, "local-operator", j.State,
+                JobStates.Queued, LifecycleReason.Reconciled, reference: j.CheckpointCommit, generation: j.ExecutionGeneration, state: s);
             j.State = JobStates.Queued;
             j.Stage = "reconciled";
             j.Error = "";

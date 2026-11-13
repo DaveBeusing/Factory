@@ -208,6 +208,7 @@ Environment: FACTORY_HOME overrides the local state directory.
                 Print(await Planning.ProposeAsync(store, project, goal, settings, CancellationToken.None));
                 return 0;
             }
+            case "issue-intake": Print(store.ScanIssues(store.Project(Required(args, "project")).Id)); return 0;
             case "adopt": Print(Planning.Adopt(store, GuidArg(Required(args, "goal")),
                 Option(args, "mode", "local"), Flag(args, "reviewed-existing-work"),
                 GuidArg(Required(args, "plan-revision")))); return 0;

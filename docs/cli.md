@@ -82,3 +82,7 @@ dotnet run --project tools/Factory.Versioning -- build-version
 `release` prepares local files and metadata; it does **not** publish, tag, sign, merge or deploy. Git-derived versioning is separate from the release helper. See [Versioning](versioning.md).
 
 **Next:** [Architecture](architecture.md) · [Full documentation index](README.md)
+
+## GitHub issue intake
+
+Run `issue-intake --project NAME` from the local operator CLI. It uses the registered GitHub origin and the same bounded issue inventory as planning preflight. Incomplete scans never create a goal. The default policy holds observations. Administrators can read and update `/api/projects/{projectId}/issue-intake-policy` with the current `expectedRevision` and a rule of `hold`, `deny`, `escalate` or `accept`. Acceptance creates one linked draft goal per issue. A policy change applies on rescan and does not delete an existing draft. Intake does not run jobs or write to GitHub.

@@ -176,7 +176,7 @@ public static class WorkPackagePreflight
             throw new InvalidOperationException("Configured remote has no master branch; check the project origin before continuing");
     }
 
-    private static string? GitHubRepository(string? origin)
+    internal static string? GitHubRepository(string? origin)
     {
         if (origin is null) return null;
         try { return GitHubWorkerResultVerifier.GitHubRepository(origin); }
@@ -191,6 +191,13 @@ public static class WorkPackagePreflight
     {
         var label = pullRequests ? "Open PR" : "Open issue";
         if (repository is null) return ([], false, label + " inventory not applicable or origin unavailable.");
+        if (!pullRequests)
+        {
+            var (issues, complete, note) = DiscoverIssues(project, repository);
+            return (issues.Where(item => terms.Any(term => item.Title.Contains(term, StringComparison.OrdinalIgnoreCase)))
+                .Select(item => new OpenWorkCandidate { Number = item.Number, Title = item.Title, Url = item.Url })
+                .ToList(), complete, note);
+        }
         const int limit = 100;
         var qualifiedRepository = "github.com/" + repository;
         var args = pullRequests
@@ -222,6 +229,33 @@ public static class WorkPackagePreflight
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { }
         return ([], false, label + " inventory unavailable; inspect the hosting service before adoption.");
+    }
+
+    internal static (List<IssueObservation> Items, bool Complete, string Note) DiscoverIssues(ProjectInfo project, string repository)
+    {
+        const int limit = 100;
+        try
+        {
+            var result = Commands.Run("gh", ["issue", "list", "--repo", "github.com/" + repository,
+                "--state", "open", "--json", "number,title,url,updatedAt,author,state", "--limit", limit.ToString()],
+                project.Path, 20);
+            if (result.Ok)
+            {
+                using var document = JsonDocument.Parse(result.Output);
+                var items = document.RootElement.EnumerateArray().Select(item => new IssueObservation(
+                    item.GetProperty("number").GetInt32(), item.GetProperty("title").GetString() ?? "",
+                    item.GetProperty("url").GetString() ?? "", item.GetProperty("updatedAt").GetString() ?? "",
+                    item.TryGetProperty("author", out var author) && author.ValueKind == JsonValueKind.Object &&
+                    author.TryGetProperty("login", out var login) ? login.GetString() ?? "" : "",
+                    item.GetProperty("state").GetString() ?? "",
+                    author.ValueKind == JsonValueKind.Object && author.TryGetProperty("is_bot", out var bot) &&
+                    bot.ValueKind == JsonValueKind.True)).ToList();
+                var complete = items.Count < limit;
+                return (items, complete, complete ? "" : "Open issue inventory reached its 100-item limit.");
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { }
+        return ([], false, "Open issue inventory unavailable; inspect the hosting service before adoption.");
     }
 
     private static string ReadPullRequestHead(JsonElement item)

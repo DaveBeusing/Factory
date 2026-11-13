@@ -1272,6 +1272,45 @@ Test("Versioned plan policy denies stale, self and expired approvals", () =>
     Assert(FactoryPolicy.Decide(context with { Manual = false }, policy, approval, now).Outcome == PolicyOutcome.Deny);
 });
 
+Test("Issue intake deduplicates concurrent scans and re-evaluates policy and edits", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-issue-intake-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "intake", Origin = "https://github.com/example/project.git" };
+        store.Change(s => s.Projects.Add(project));
+        var issue = new IssueObservation(11, "Untrusted instructions", "https://github.com/example/project/issues/11",
+            "2026-03-01T10:00:00Z", "reporter", "OPEN");
+        IssueIntakeResult Scan(StateStore target, IssueObservation item, bool complete = true) =>
+            target.PersistIssueScan(project, "example/project", [item, item], complete, "partial").Single();
+        Assert(Scan(store, issue).Decision == "hold");
+        var baseline = Guid.Parse("00000000-0000-0000-0000-000000000069");
+        var revision = store.SetIssueIntakePolicy(project.Id, new("accept", baseline));
+        Assert(Scan(store, issue, complete: false).Decision == "hold");
+        Assert(Scan(store, issue with { Number = 12, Url = "https://github.com/example/project/issues/12",
+            Author = "automation[bot]" }).Decision == "hold");
+        var writers = Enumerable.Range(0, 4).Select(_ => Task.Run(() => Scan(new StateStore(home), issue))).ToArray();
+        Task.WaitAll(writers);
+        var goal = writers[0].Result.GoalId;
+        Assert(goal.HasValue && writers.All(writer => writer.Result.GoalId == goal));
+        var edit = issue with { Title = "Edited", UpdatedAt = "2026-03-01T10:01:00Z" };
+        Assert(Scan(store, edit).GoalId == goal);
+        Assert(Scan(store, issue).Reason == "stale_or_ambiguous_source");
+        store.SetIssueIntakePolicy(project.Id, new("deny", revision));
+        Assert(Scan(new StateStore(home), edit).Decision == "deny");
+        try
+        {
+            Scan(store, issue with { Url = "https://github.com/elsewhere/project/issues/11" });
+            throw new Exception("Foreign issue accepted");
+        }
+        catch (InvalidOperationException) { }
+        Assert(store.Read().Goals.Single().Id == goal);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -2261,7 +2300,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 20, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 21, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -2879,7 +2918,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 20);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 21);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3379,7 +3418,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 20);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 21);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

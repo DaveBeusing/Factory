@@ -20,7 +20,6 @@ internal enum LifecycleReason
     ExecutionStopped,
     PullRequestPrepared,
     ExecutionCancelled,
-    ControlWithdrawn,
     LeaseClaimed,
     LeaseFenced,
     RemoteResultVerified,

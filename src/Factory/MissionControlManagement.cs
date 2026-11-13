@@ -82,12 +82,6 @@ public static class LocalJobControl
     public static void Register(Guid id, CancellationTokenSource cts) => Active[id] = cts;
     public static void Unregister(Guid id) => Active.TryRemove(id, out _);
     public static bool IsRegistered(Guid id) => Active.ContainsKey(id);
-    public static bool Request(Guid id)
-    {
-        if (!Active.TryGetValue(id, out var token)) return false;
-        try { token.Cancel(); return true; }
-        catch (ObjectDisposedException) { return false; }
-    }
 }
 
 public static class MissionControlManager
@@ -343,39 +337,7 @@ public static class MissionControlManager
             Require(active.Mode == "local" && active.LeaseOwner is { Length: > 0 } && !active.LeaseOwner.StartsWith("remote:", StringComparison.Ordinal),
                 "Active remote jobs cannot be interrupted from Mission Control; drain the worker");
             Require(action is "pause" or "stop" or "cancel", "Active jobs can only be paused, stopped or cancelled");
-            if (action == "cancel") return store.RequestLocalCancellation(active);
-            var updated = store.Change((s, db, tx) =>
-            {
-                var j = s.Jobs.Single(j => j.Id == id);
-                Require(j.ControlRevision == expected && IsActive(j) && j.Mode == active.Mode && j.ExecutionGeneration == active.ExecutionGeneration &&
-                    j.LeaseOwner == active.LeaseOwner && j.LeaseToken == active.LeaseToken,
-                    "The execution lease changed; refresh the job before retrying");
-                Require(!LocalJobControl.IsProjectRequest(j.RequestedState),
-                    "The current lease already has a project control request");
-                j.RequestedState = action == "pause" ? JobStates.Paused : JobStates.Stopped;
-                StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, "local-operator", j.State, j.State,
-                    action == "pause" ? LifecycleReason.PauseRequested : LifecycleReason.StopRequested,
-                    reference: j.RequestedState, generation: j.ExecutionGeneration, state: s);
-                Log(s, id, "job_control_requested", action + " " + input.Reason); return j;
-            });
-            if (!LocalJobControl.Request(id))
-            {
-                store.Change((s, db, tx) =>
-                {
-                    var j = s.Jobs.Single(j => j.Id == id);
-                    if (j.ExecutionGeneration == updated.ExecutionGeneration && j.LeaseOwner == updated.LeaseOwner &&
-                        j.LeaseToken == updated.LeaseToken && j.RequestedState == updated.RequestedState)
-                    {
-                        StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, "local-operator", j.State, j.State,
-                            LifecycleReason.ControlWithdrawn, reference: j.RequestedState, generation: j.ExecutionGeneration, state: s);
-                        j.RequestedState = "";
-                        j.UpdatedAt = DateTimeOffset.UtcNow;
-                    }
-                    return 0;
-                });
-                throw new InvalidOperationException("Job is not executing in this dashboard process");
-            }
-            return updated;
+            return store.RequestLocalControl(active, action, input.Reason);
         }
         return store.Change((s, db, tx) =>
         {

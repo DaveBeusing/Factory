@@ -102,22 +102,34 @@ public sealed partial class StateStore
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             FormattableString.Invariant($"{jobId:D}\n{generation}\n{stage}\n{commit}"))));
 
-    internal FactoryJob RequestLocalCancellation(FactoryJob observed) => Change((state, db, tx) =>
+    internal FactoryJob RequestLocalControl(FactoryJob observed, string action, string detail) => Change((state, db, tx) =>
     {
         var job = state.Jobs.Single(j => j.Id == observed.Id);
         if (job.ControlRevision != observed.ControlRevision || !HasCurrentLocalLease(job.Mode, job.LeaseOwner, job.LeaseToken.Length > 0, job.LeaseUntil,
             DateTimeOffset.UtcNow) || !JobRecovery.Matches(job,
             new ExecutionFence(observed.ExecutionGeneration, observed.LeaseToken, observed.LeaseOwner)))
             throw new LostExecutionLeaseException("The execution lease changed.");
-        if (job.RequestedState == LocalJobControl.ProjectCancelRequest) return job;
+        var (signal, target, reason) = RequestedControl(action);
+        if (job.RequestedState == signal) return job;
         if (job.RequestedState.Length != 0)
             throw new InvalidOperationException("The current lease already has a control request.");
-        job.RequestedState = LocalJobControl.ProjectCancelRequest;
+        job.RequestedState = signal;
         job.UpdatedAt = DateTimeOffset.UtcNow;
         RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, "local-operator", job.State, job.State,
-            LifecycleReason.CancelRequested, reference: JobStates.Cancelled, generation: job.ExecutionGeneration, state: state);
+            reason, reference: target, generation: job.ExecutionGeneration, state: state);
+        var message = action + " " + detail;
+        state.Events.Add(new FactoryEvent { JobId = job.Id, Type = "job_control_requested",
+            Message = message[..Math.Min(message.Length, 2000)] });
         return job;
     });
+
+    private static (string Signal, string Target, LifecycleReason Reason) RequestedControl(string action) => action switch
+    {
+        "cancel" => (LocalJobControl.ProjectCancelRequest, JobStates.Cancelled, LifecycleReason.CancelRequested),
+        "stop" => (LocalJobControl.ProjectStopRequest, JobStates.Stopped, LifecycleReason.StopRequested),
+        "pause" => (LocalJobControl.ProjectPauseRequest, JobStates.Paused, LifecycleReason.PauseRequested),
+        _ => throw new InvalidOperationException("Invalid interrupt action.")
+    };
 
     private static bool HasCurrentLocalLease(string mode, string owner, bool hasToken,
         DateTimeOffset? expires, DateTimeOffset now) =>
@@ -166,12 +178,7 @@ public sealed partial class StateStore
             var updatedAt = (DateTimeOffset)FromDb(row.GetValue(10), typeof(DateTimeOffset))!;
             var generation = row.GetInt64(11);
             row.Close();
-            var (signal, target, code) = request.Action switch
-            {
-                "cancel" => (LocalJobControl.ProjectCancelRequest, JobStates.Cancelled, LifecycleReason.CancelRequested),
-                "stop" => (LocalJobControl.ProjectStopRequest, JobStates.Stopped, LifecycleReason.StopRequested),
-                _ => (LocalJobControl.ProjectPauseRequest, JobStates.Paused, LifecycleReason.PauseRequested)
-            };
+            var (signal, target, code) = RequestedControl(request.Action);
             if (pending == signal) return new(jobId, projectId, previousState, updatedAt, target);
             if (pending.Length != 0)
                 throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The current lease already has a control request.");

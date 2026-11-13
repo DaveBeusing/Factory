@@ -84,7 +84,7 @@ public sealed partial class StateStore
 
     private static PropertyInfo[] Scalars(EntityMap map) =>
         map.Type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
-            .Where(p => !typeof(IList).IsAssignableFrom(p.PropertyType)).ToArray();
+            .Where(p => p.CanWrite && !typeof(IList).IsAssignableFrom(p.PropertyType)).ToArray();
 
     private static PropertyInfo[] Collections(EntityMap map) =>
         map.Type.GetProperties(BindingFlags.Instance | BindingFlags.Public)
@@ -820,9 +820,9 @@ public sealed partial class StateStore
         string previousError;
         Guid projectId;
         string requestedState;
-        DateTimeOffset updatedAt;
+        DateTimeOffset? checkpointAt;
         using (var read = Command(db, tx, """
-            SELECT state,stage,error,project_id,requested_state,updated_at FROM jobs
+            SELECT state,stage,error,project_id,requested_state,checkpoint_at FROM jobs
             WHERE id=$id AND execution_generation=$generation AND lease_token=$token
               AND lease_owner=$owner AND lease_until>$now;
             """, ("$id", jobId), ("$generation", fence.Generation), ("$token", fence.Token),
@@ -836,7 +836,7 @@ public sealed partial class StateStore
             previousError = row.GetString(2);
             projectId = Guid.Parse(row.GetString(3));
             requestedState = row.GetString(4);
-            updatedAt = (DateTimeOffset)FromDb(row.GetValue(5), typeof(DateTimeOffset))!;
+            checkpointAt = (DateTimeOffset?)FromDb(row.GetValue(5), typeof(DateTimeOffset?));
         }
         if (!JobStates.Active.Contains(previousState))
             throw new LostExecutionLeaseException("Execution is no longer active");
@@ -859,15 +859,17 @@ public sealed partial class StateStore
                 error = nextState == JobStates.Cancelled ? null : "Execution interrupted; inspect worktree before resuming";
             }
         }
-        if (requestedState == LocalJobControl.ProjectCancelRequest &&
-            nextState is not (JobStates.Cancelled or JobStates.Blocked or JobStates.Failed))
-            throw new OperationCanceledException("The current execution has a cancellation request.");
+        var controlPending = LocalJobControl.IsProjectRequest(requestedState) ||
+            requestedState is JobStates.Paused or JobStates.Stopped;
+        if (!interrupted && controlPending &&
+            (JobStates.Active.Contains(nextState) || nextState is JobStates.PrReady or JobStates.CompletedLocal))
+            throw new OperationCanceledException("The current execution has an interruption request.");
         if (nextState == JobStates.Cancelled && requestedState != LocalJobControl.ProjectCancelRequest)
             throw new InvalidOperationException("The current execution has no cancellation request.");
         if (previousState == nextState && previousStage == stage && (error is null || error == previousError))
             return;
         if (expected is not null && (expected.State != previousState || expected.Stage != previousStage ||
-            expected.UpdatedAt != updatedAt))
+            expected.CheckpointAt != checkpointAt))
             throw new LostExecutionLeaseException("The job stage changed since it was observed.");
         var reason = JobLifecycle.FencedTransition(previousState, nextState);
         using (var update = Command(db, tx, """

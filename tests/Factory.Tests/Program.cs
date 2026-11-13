@@ -2581,6 +2581,35 @@ Test("Schema 18 lifecycle audit upgrade survives event pruning and restart", () 
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Pending stop wins over a fenced stage advance", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-stage-stop-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "stage-stop" };
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "stage-runner", 120, local: true));
+        var observed = store.Job(job.Id);
+        store.Change(s =>
+        {
+            var current = s.Jobs.Single();
+            current.RequestedState = LocalJobControl.ProjectStopRequest;
+            current.UpdatedAt = observed.UpdatedAt.AddTicks(1);
+        });
+        try
+        {
+            store.AdvanceFencedStage(job.Id, fence, observed, JobStates.Building, "agent");
+            throw new Exception("Stage advanced despite a pending stop");
+        }
+        catch (OperationCanceledException) { }
+        store.InterruptFencedStage(job.Id, fence);
+        Assert(store.Job(job.Id).State == JobStates.Stopped);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Competing fenced terminal transitions commit only one decision", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-stage-race-" + Guid.NewGuid().ToString("N"));

@@ -352,6 +352,15 @@ internal static class ProjectPlanningTests
             {
                 using var request = new HttpRequestMessage(method, path);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                if (body is not null && path.EndsWith("/action", StringComparison.Ordinal) &&
+                    System.Text.RegularExpressions.Regex.Match(path, @"/jobs/([0-9a-f-]+)/action$") is { Success: true } match &&
+                    Guid.TryParse(match.Groups[1].Value, out var targetId))
+                {
+                    var fields = System.Text.Json.JsonSerializer.SerializeToNode(body)!.AsObject();
+                    if (!fields.ContainsKey("controlRevision"))
+                        fields["controlRevision"] = store.Job(targetId).ControlRevision;
+                    body = fields;
+                }
                 if (body is not null) request.Content = JsonContent.Create(body);
                 var cancellation = deadline ?? timeout.Token;
                 using var response = await client.SendAsync(request, cancellation);

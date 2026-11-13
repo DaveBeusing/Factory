@@ -266,7 +266,9 @@ public static class DashboardHost
         app.MapPost("/api/jobs/{id:guid}/scope-amendment", (Guid id, ScopeAmendmentInput input) =>
             Results.Ok(MissionControlManager.AmendScope(store, id, input)));
         app.MapPost("/api/jobs/{id:guid}/action", (Guid id, ControlInput input) =>
-            Results.Ok(MissionControlManager.ControlJob(store, id, input)));
+            string.IsNullOrEmpty(input.ControlRevision)
+                ? Results.Conflict(new { error = "Refresh the job and include its control revision." })
+                : Results.Ok(MissionControlManager.ControlJob(store, id, input)));
         app.MapPost("/api/jobs/{id:guid}/start", (Guid id) =>
         {
             var job = store.Job(id);
@@ -347,7 +349,7 @@ public static class DashboardHost
             var requested = new List<Guid>();
             foreach (var j in jobs)
             {
-                try { MissionControlManager.ControlJob(store, j.Id, new ControlInput { Action = "stop", Reason = "Queue stop" }); requested.Add(j.Id); }
+                try { MissionControlManager.ControlJob(store, j.Id, new ControlInput { Action = "stop", Reason = "Queue stop", ControlRevision = j.ControlRevision }); requested.Add(j.Id); }
                 catch (InvalidOperationException) { }
             }
             return Results.Ok(new { paused = true, cancellationRequested = requested,

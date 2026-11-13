@@ -45,6 +45,10 @@ internal enum LifecycleReason
 
 internal static class JobLifecycle
 {
+    internal static string ControlRevision(Guid id, long generation, string state, string request, DateTimeOffset updatedAt) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            FormattableString.Invariant($"{id:D}\n{generation}\n{state}\n{request}\n{updatedAt.UtcTicks}"))));
+
     internal static LifecycleReason ControlReason(string action) => action switch
     {
         "pause" => LifecycleReason.OperatorPaused,
@@ -169,6 +173,8 @@ public sealed class FactoryJob
     public DateTimeOffset UpdatedAt { get; set; } = DateTimeOffset.UtcNow;
     public DateTimeOffset? StartedAt { get; set; }
     public DateTimeOffset? FinishedAt { get; set; }
+
+    public string ControlRevision => JobLifecycle.ControlRevision(Id, ExecutionGeneration, State, RequestedState, UpdatedAt);
 }
 
 /// <summary>

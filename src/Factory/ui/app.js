@@ -750,7 +750,7 @@ function formProjectJobOperation(id,action){
    if(reason.length>(reconcile?1000:2000))throw new Error('The reason is too long.');
    const path='viewer/projects/'+encodeURIComponent(project.id)+'/jobs/'+encodeURIComponent(job.id);
    await submitProjectRecovery(context,project.id,path+(reconcile?'/reconcile':'/action'),
-    {action,reviewed,reason,executionGeneration:job.executionGeneration,...(reconcile?{recoveryRevision:job.recoveryRevision}:{})},
+    {action,reviewed,reason,controlRevision:job.controlRevision,...(reconcile?{recoveryRevision:job.recoveryRevision}:{})},
     reconcile?'Job requeued after review':'Job state updated');
   },projectJobActions[action]);
 }
@@ -989,9 +989,9 @@ function formSettings(){
    await fetchSettings();
   },'Apply settings');
 }
-async function confirmControl(type,id,action){const label={activate:'Activate',pause:'Pause',disable:'Disable',archive:'Archive',stop:'Stop',resume:'Resume',retry:'Retry',complete:'Complete',drain:'Drain',enable:'Enable'}[action]||action;
+async function confirmControl(type,id,action){const controlRevision=type==='job'?state.jobs.find(j=>j.id===id)?.controlRevision:undefined;const label={activate:'Activate',pause:'Pause',disable:'Disable',archive:'Archive',stop:'Stop',resume:'Resume',retry:'Retry',complete:'Complete',drain:'Drain',enable:'Enable'}[action]||action;
  let html=`<p class="subtext">${esc(label)} ${esc(type)}? The action will be recorded in the audit trail.</p>`+field('reason','Reason (optional)','','textarea');if(type==='worker'&&action==='stop')html+='<p class="subtext">Stops only a locally managed, idle worker process. Drain first if work is active.</p>';if(type==='job'&&['resume','retry'].includes(action)){const j=state.jobs.find(j=>j.id===id);if(j?.startedAt)html+=field('reviewed','I inspected the existing worktree and side effects',false,'checkbox')}
- openForm(`${label} ${type}`,action==='pause'&&type==='queue'?'Active jobs continue; new scheduling pauses.':'Confirm this operational action.',html,async f=>{const x=values(f);const body={action,reason:x.reason||'',reviewed:!!f.elements.reviewed?.checked};if(type==='job'&&['resume','retry'].includes(action)&&state.jobs.find(j=>j.id===id)?.startedAt&&!body.reviewed)throw Error('Worktree review acknowledgement required');await mutate(`${type}s/${encodeURIComponent(id)}/action`,'POST',body);if(type==='worker')await fetchManagedWorkers()},label)}
+ openForm(`${label} ${type}`,action==='pause'&&type==='queue'?'Active jobs continue; new scheduling pauses.':'Confirm this operational action.',html,async f=>{const x=values(f);const body={action,controlRevision,reason:x.reason||'',reviewed:!!f.elements.reviewed?.checked};if(type==='job'&&['resume','retry'].includes(action)&&state.jobs.find(j=>j.id===id)?.startedAt&&!body.reviewed)throw Error('Worktree review acknowledgement required');await mutate(`${type}s/${encodeURIComponent(id)}/action`,'POST',body);if(type==='worker')await fetchManagedWorkers()},label)}
 async function runQueue(action){if(action==='stop'){if(!confirm('Stop local active jobs at their next cancellation point and pause the queue? Remote work is not force-killed.'))return}await mutate('queue/'+action,'POST',{})}
 async function verify(id){if(!confirm('Verify this job is integrated into its base branch?'))return;await mutate(`jobs/${id}/verify`,'POST',{})}
 const plansCache=new Map(), planGoals=new Map();

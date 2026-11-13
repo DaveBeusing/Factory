@@ -11,14 +11,14 @@ public sealed class ProjectJobControlInput
     public string Action { get; set; } = "";
     public bool Reviewed { get; set; }
     public string Reason { get; set; } = "";
-    public long? ExecutionGeneration { get; set; }
+    public string? ControlRevision { get; set; }
     public string? RecoveryRevision { get; set; }
 }
 
 internal sealed record ProjectJobControlResult(Guid Id, Guid ProjectId, string State, DateTimeOffset UpdatedAt,
     string? RequestedState = null);
 internal sealed record ProjectJobOperation(Guid Id, string Title, string State, string Mode, string[] Actions,
-    bool ReviewBeforeResume, string? RequestedState, string? CheckpointCommit, string? RecoveryRevision, long ExecutionGeneration);
+    bool ReviewBeforeResume, string? RequestedState, string? CheckpointCommit, string? RecoveryRevision, string ControlRevision);
 
 public sealed partial class StateStore
 {
@@ -49,7 +49,7 @@ public sealed partial class StateStore
         var now = DateTimeOffset.UtcNow;
         return ReadViewerRows(db, tx, projectId, """
             SELECT j.id,j.title,j.state,j.mode,j.stage,j.started_at,j.lease_owner,j.lease_until,
-                LENGTH(j.lease_token)>0,j.requested_state,j.checkpoint_stage,j.checkpoint_commit,p.status,j.execution_generation
+                LENGTH(j.lease_token)>0,j.requested_state,j.checkpoint_stage,j.checkpoint_commit,p.status,j.execution_generation,j.updated_at
             FROM jobs j JOIN projects p ON p.id=j.project_id WHERE j.project_id=$project
             ORDER BY j.position,j.id;
             """, row =>
@@ -93,7 +93,8 @@ public sealed partial class StateStore
                     LocalJobControl.ProjectCancelRequest => JobStates.Cancelled,
                     _ => null
                 }, checkpoint, checkpoint is null ? null : JobRecoveryRevision(id, row.GetInt64(13), row.GetString(10), checkpoint),
-                row.GetInt64(13));
+                JobLifecycle.ControlRevision(id, row.GetInt64(13), state, requested,
+                    (DateTimeOffset)FromDb(row.GetValue(14), typeof(DateTimeOffset))!));
         });
     }
 
@@ -104,7 +105,7 @@ public sealed partial class StateStore
     internal FactoryJob RequestLocalCancellation(FactoryJob observed) => Change((state, db, tx) =>
     {
         var job = state.Jobs.Single(j => j.Id == observed.Id);
-        if (!HasCurrentLocalLease(job.Mode, job.LeaseOwner, job.LeaseToken.Length > 0, job.LeaseUntil,
+        if (job.ControlRevision != observed.ControlRevision || !HasCurrentLocalLease(job.Mode, job.LeaseOwner, job.LeaseToken.Length > 0, job.LeaseUntil,
             DateTimeOffset.UtcNow) || !JobRecovery.Matches(job,
             new ExecutionFence(observed.ExecutionGeneration, observed.LeaseToken, observed.LeaseOwner)))
             throw new LostExecutionLeaseException("The execution lease changed.");
@@ -148,9 +149,10 @@ public sealed partial class StateStore
         using var row = query.ExecuteReader();
         if (!row.Read()) throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
         var previousState = row.GetString(0);
-        if ((request.ExecutionGeneration.HasValue || request.Action == "cancel") &&
-            request.ExecutionGeneration != row.GetInt64(11))
-            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The execution generation changed. Refresh the job.");
+        var revision = JobLifecycle.ControlRevision(jobId, row.GetInt64(11), previousState, row.GetString(5),
+            (DateTimeOffset)FromDb(row.GetValue(10), typeof(DateTimeOffset))!);
+        if (request.ControlRevision != revision)
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The job changed. Refresh before submitting the action.");
         if (row.GetString(6) == "archived")
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The job belongs to an archived project.");
         var leaseOwner = row.GetString(2);

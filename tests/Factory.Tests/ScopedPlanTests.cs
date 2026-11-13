@@ -307,13 +307,15 @@ internal static class ScopedPlanTests
                     new { action = "stop" });
                 Require(store.Job(local.Id).RequestedState == "", "Rejected control left an interrupt request");
                 Execute("DROP TRIGGER reject_operation_audit;");
-                var generationBeforeCancel = store.Job(local.Id).ExecutionGeneration;
+                var observed = store.Job(local.Id);
+                var staleRevision = JobLifecycle.ControlRevision(local.Id, observed.ExecutionGeneration,
+                    observed.State, observed.RequestedState, observed.UpdatedAt.AddTicks(-1));
                 await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Conflict,
-                    new { action = "cancel", executionGeneration = generationBeforeCancel - 1 });
+                    new { action = "cancel", controlRevision = staleRevision });
                 Require(store.Job(local.Id).RequestedState == "", "Stale cancellation targeted the current lease");
                 var accepted = JsonSerializer.Deserialize<ProjectJobControlResult>(
                     await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Accepted,
-                        new { action = "cancel", reason = "Cancel fixture", executionGeneration = store.Job(local.Id).ExecutionGeneration }), Json.Options)!;
+                        new { action = "cancel", reason = "Cancel fixture", controlRevision = observed.ControlRevision }), Json.Options)!;
                 Require(accepted.RequestedState == JobStates.Cancelled, "Active cancellation did not expose its requested outcome");
                 await executionTask.WaitAsync(timeout.Token);
             }
@@ -325,7 +327,7 @@ internal static class ScopedPlanTests
             var stopped = store.Job(local.Id);
             Require(stopped.State == JobStates.Cancelled && stopped.LeaseOwner == "" && stopped.RequestedState == "",
                 "The runner did not consume the durable cancellation request");
-            await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.OK, new { action = "cancel", executionGeneration = stopped.ExecutionGeneration });
+            await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.OK, new { action = "cancel", controlRevision = stopped.ControlRevision });
             await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Conflict, new { action = "resume" });
             using (var lifecycle = db.CreateCommand())
             {
@@ -403,6 +405,15 @@ internal static class ScopedPlanTests
             {
                 using var request = new HttpRequestMessage(method, url);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                if (body is not null && url.EndsWith("/action", StringComparison.Ordinal) &&
+                    System.Text.RegularExpressions.Regex.Match(url, @"/jobs/([0-9a-f-]+)/action$") is { Success: true } match &&
+                    Guid.TryParse(match.Groups[1].Value, out var targetId))
+                {
+                    var fields = System.Text.Json.JsonSerializer.SerializeToNode(body)!.AsObject();
+                    if (!fields.ContainsKey("controlRevision"))
+                        fields["controlRevision"] = store.Job(targetId).ControlRevision;
+                    body = fields;
+                }
                 if (body is not null) request.Content = JsonContent.Create(body);
                 using var response = await client.SendAsync(request, timeout.Token);
                 var content = await response.Content.ReadAsStringAsync(timeout.Token);

@@ -65,6 +65,7 @@ public sealed class WorkerPermissionsResult
 }
 public sealed class ControlInput
 {
+    public string? ControlRevision { get; set; }
     public string Action { get; set; } = "";
     public bool Reviewed { get; set; }
     public string Reason { get; set; } = "";
@@ -335,6 +336,8 @@ public static class MissionControlManager
         var action = input.Action;
         Require(action is "pause" or "stop" or "resume" or "retry" or "cancel", "Unknown job action");
         var active = store.Job(id);
+        var expected = input.ControlRevision ?? active.ControlRevision;
+        Require(active.ControlRevision == expected, "The job changed. Refresh before submitting the action.");
         if (IsActive(active))
         {
             Require(active.Mode == "local" && active.LeaseOwner is { Length: > 0 } && !active.LeaseOwner.StartsWith("remote:", StringComparison.Ordinal),
@@ -344,7 +347,7 @@ public static class MissionControlManager
             var updated = store.Change((s, db, tx) =>
             {
                 var j = s.Jobs.Single(j => j.Id == id);
-                Require(IsActive(j) && j.Mode == active.Mode && j.ExecutionGeneration == active.ExecutionGeneration &&
+                Require(j.ControlRevision == expected && IsActive(j) && j.Mode == active.Mode && j.ExecutionGeneration == active.ExecutionGeneration &&
                     j.LeaseOwner == active.LeaseOwner && j.LeaseToken == active.LeaseToken,
                     "The execution lease changed; refresh the job before retrying");
                 Require(!LocalJobControl.IsProjectRequest(j.RequestedState),
@@ -377,7 +380,7 @@ public static class MissionControlManager
         return store.Change((s, db, tx) =>
         {
             var j = s.Jobs.Single(j => j.Id == id);
-            Require(!IsActive(j) && string.IsNullOrEmpty(j.LeaseOwner),
+            Require(j.ControlRevision == expected && !IsActive(j) && string.IsNullOrEmpty(j.LeaseOwner),
                 "The job is executing or already has a project control request");
             var previous = j.State;
             ApplyInactiveJobControl(j, input);

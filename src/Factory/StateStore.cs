@@ -801,9 +801,34 @@ public sealed partial class StateStore
     {
         if (string.IsNullOrWhiteSpace(nextState) || string.IsNullOrWhiteSpace(stage))
             throw new ArgumentException("Job state and stage are required");
-        var now = DateTimeOffset.UtcNow;
         using var db = Open();
         using var tx = db.BeginTransaction();
+        var now = DateTimeOffset.UtcNow;
+        string previousState;
+        string previousStage;
+        string previousError;
+        Guid projectId;
+        using (var read = Command(db, tx, """
+            SELECT state,stage,error,project_id FROM jobs
+            WHERE id=$id AND execution_generation=$generation AND lease_token=$token
+              AND lease_owner=$owner AND lease_until>$now;
+            """, ("$id", jobId), ("$generation", fence.Generation), ("$token", fence.Token),
+            ("$owner", fence.Owner), ("$now", now)))
+        using (var row = read.ExecuteReader())
+        {
+            if (!row.Read())
+                throw new LostExecutionLeaseException("Execution lease expired or generation was fenced");
+            previousState = row.GetString(0);
+            previousStage = row.GetString(1);
+            previousError = row.GetString(2);
+            projectId = Guid.Parse(row.GetString(3));
+        }
+        if (!JobStates.Active.Contains(previousState))
+            throw new LostExecutionLeaseException("Execution is no longer active");
+        if (previousState == nextState && previousStage == stage && (error is null || error == previousError))
+            return;
+        var reason = JobLifecycle.FencedTransition(previousState, nextState);
+        var decision = Guid.NewGuid();
         using (var update = Command(db, tx, """
             UPDATE jobs SET state=$state, stage=$stage, error=COALESCE($error,error),
                 updated_at=$now, checkpoint_stage=$stage, checkpoint_at=$now
@@ -827,6 +852,16 @@ public sealed partial class StateStore
                 """, ("$position", position), ("$id", Guid.NewGuid()), ("$at", now),
                 ("$job", jobId), ("$message", nextState + "/" + stage));
         }
+        AppendEvent(db, tx, jobId, "job_lifecycle_transition", Json.Stringify(new
+        {
+            decision,
+            projectId,
+            actor = fence.Owner,
+            generation = fence.Generation,
+            from = previousState,
+            to = nextState,
+            reason = reason.ToString()
+        }));
         Execute(db, tx, """
             DELETE FROM events WHERE id IN (
                 SELECT id FROM events ORDER BY position DESC LIMIT -1 OFFSET 20000

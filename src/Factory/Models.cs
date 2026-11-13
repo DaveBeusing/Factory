@@ -11,6 +11,37 @@ public static class JobStates
     public static readonly HashSet<string> Active = [Preparing, Building, Gating, Reviewing, Reworking, AwaitingApproval];
 }
 
+internal enum LifecycleReason
+{
+    ExecutionAdvanced,
+    ExecutionBlocked,
+    ExecutionFailed,
+    ExecutionPaused,
+    ExecutionStopped,
+    PullRequestPrepared,
+    AwaitingManualIntegration
+}
+
+internal static class JobLifecycle
+{
+    internal static LifecycleReason FencedTransition(string from, string to) => (from, to) switch
+    {
+        (_, JobStates.Blocked) => LifecycleReason.ExecutionBlocked,
+        (_, JobStates.Failed) => LifecycleReason.ExecutionFailed,
+        (_, JobStates.Paused) => LifecycleReason.ExecutionPaused,
+        (_, JobStates.Stopped) => LifecycleReason.ExecutionStopped,
+        (JobStates.AwaitingApproval, JobStates.PrReady) => LifecycleReason.PullRequestPrepared,
+        (JobStates.AwaitingApproval, JobStates.CompletedLocal) => LifecycleReason.AwaitingManualIntegration,
+        (JobStates.Preparing, JobStates.Building) or
+        (JobStates.Building or JobStates.Reworking, JobStates.Gating) or
+        (JobStates.Gating, JobStates.Gating or JobStates.Reviewing or JobStates.Reworking) or
+        (JobStates.Reviewing, JobStates.Reworking or JobStates.AwaitingApproval) or
+        (JobStates.AwaitingApproval, JobStates.AwaitingApproval) => LifecycleReason.ExecutionAdvanced,
+        _ => throw new InvalidOperationException($"Illegal fenced job transition: {from} → {to}")
+    };
+}
+
+
 public sealed class FactoryState
 {
     public int Schema { get; set; } = 1;

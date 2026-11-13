@@ -2488,6 +2488,25 @@ Test("Fenced stage transition writes job and event in one transaction", () =>
         Assert(snapshot.Events.Count(e => e.JobId == job.Id && e.Type == "stage" &&
             e.Message == "building/agent") == 1);
 
+        store.SetFencedStage(job.Id, fence, JobStates.Building, "agent");
+        Assert(store.Job(job.Id).UpdatedAt == actual.UpdatedAt, "Replaying the same stage changed its timestamp");
+        var reopened = new StateStore(home);
+        var audit = reopened.Read().Events.Single(e => e.JobId == job.Id && e.Type == "job_lifecycle_transition");
+        using var decision = System.Text.Json.JsonDocument.Parse(audit.Message);
+        Assert(decision.RootElement.GetProperty("projectId").GetGuid() == project.Id);
+        Assert(decision.RootElement.GetProperty("actor").GetString() == fence.Owner);
+        Assert(decision.RootElement.GetProperty("generation").GetInt64() == fence.Generation);
+        Assert(decision.RootElement.GetProperty("reason").GetString() == "ExecutionAdvanced");
+        Assert(decision.RootElement.GetProperty("decision").GetGuid() != Guid.Empty);
+        try
+        {
+            reopened.SetFencedStage(job.Id, fence, JobStates.Integrated, "done");
+            throw new Exception("Execution bypassed integration verification");
+        }
+        catch (InvalidOperationException) { }
+        Assert(reopened.Job(job.Id).State == JobStates.Building);
+        Assert(reopened.Read().Events.Count(e => e.Type == "job_lifecycle_transition") == 1);
+
         try
         {
             store.SetFencedStage(job.Id, fence with { Generation = fence.Generation - 1 },
@@ -2511,7 +2530,7 @@ Test("Fenced stage transition writes job and event in one transaction", () =>
         }
         try
         {
-            store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
+            store.SetFencedStage(job.Id, fence, JobStates.Gating, "commit");
             throw new Exception("Stage mutation survived failed audit insert");
         }
         catch (Microsoft.Data.Sqlite.SqliteException) { }
@@ -2521,10 +2540,42 @@ Test("Fenced stage transition writes job and event in one transaction", () =>
         store.Change(s => s.Jobs.Single().LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
         try
         {
-            store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
+            store.SetFencedStage(job.Id, fence, JobStates.Gating, "commit");
             throw new Exception("Expired execution changed its stage");
         }
         catch (LostExecutionLeaseException) { }
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+Test("Competing fenced terminal transitions commit only one decision", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-stage-race-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "stage-race" };
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "stage-runner", 120, local: true));
+        using var start = new System.Threading.ManualResetEventSlim();
+        var writers = new[] { JobStates.Paused, JobStates.Stopped }.Select(target => Task.Run(() =>
+        {
+            start.Wait();
+            try
+            {
+                new StateStore(home).SetFencedStage(job.Id, fence, target, "interrupt");
+                return true;
+            }
+            catch (LostExecutionLeaseException) { return false; }
+        })).ToArray();
+        start.Set();
+        Task.WaitAll(writers);
+        Assert(writers.Count(writer => writer.Result) == 1);
+        var snapshot = new StateStore(home).Read();
+        var audit = snapshot.Events.Single(e => e.JobId == job.Id && e.Type == "job_lifecycle_transition");
+        using var decision = System.Text.Json.JsonDocument.Parse(audit.Message);
+        Assert(decision.RootElement.GetProperty("to").GetString() == snapshot.Jobs.Single().State);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

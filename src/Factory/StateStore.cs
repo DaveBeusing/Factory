@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 20;
+    private const int DatabaseVersion = 21;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -314,7 +314,8 @@ public sealed partial class StateStore
             if (schemaVersion < 17) UpgradeProjectGoalReconciliation(db, tx);
             if (schemaVersion < 18) UpgradeProjectReviews(db, tx);
             if (schemaVersion < 19) UpgradeLifecycleAudit(db, tx);
-            UpgradeFactoryPolicy(db, tx);
+            if (schemaVersion < 20) UpgradeFactoryPolicy(db, tx);
+            UpgradeIssueIntake(db, tx);
         }
         tx.Commit();
     }

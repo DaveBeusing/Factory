@@ -213,13 +213,18 @@ public static class MissionControlManager
         AcceptanceCriteria = input.AcceptanceCriteria, TokenBudget = input.TokenBudget
     };
     public static FactoryGoal SetGoalStatus(StateStore store, Guid id, string action)
-        => store.Change(s =>
+        => store.Change((s, db, tx) =>
         {
             var g = s.Goals.Single(x => x.Id == id);
             Require(action is "activate" or "pause" or "stop" or "complete" or "archive", "Unknown goal action");
             Require(g.State != "archived", "Archived goal is read-only");
             if (action is "complete" or "archive") Require(!s.Jobs.Any(j => j.GoalId == id && IsActive(j)), "Cannot finish a goal while jobs run");
-            if (action == "activate") Require(g.State != "completed", "Completed goal cannot be restarted");
+            if (action == "activate")
+            {
+                Require(g.State != "completed", "Completed goal cannot be restarted");
+                Require(!StateStore.RequiresIntakePlanAdoption(db, tx, id),
+                    "Adopt a reviewed plan before activating an intake goal.");
+            }
             g.State = action switch { "activate" => "active", "pause" => "paused", "stop" => "stopped", "complete" => "completed", _ => "archived" };
             Log(s, null, "goal_status", g.Objective + ": " + g.State); return g;
         });
@@ -252,12 +257,15 @@ public static class MissionControlManager
     public static FactoryJob UpdateJob(StateStore store, Guid id, JobInput input)
     {
         ValidateJob(input);
-        return store.Change(s =>
+        return store.Change((s, db, tx) =>
         {
             var j = s.Jobs.Single(x => x.Id == id);
             Require(j.State is JobStates.Queued or JobStates.Paused or JobStates.Failed or JobStates.Blocked or JobStates.Stopped, "Only inactive jobs can be edited");
             Require(j.ProjectId == input.ProjectId, "Cannot move job between projects");
             if (input.GoalId.HasValue) Require(s.Goals.Any(g => g.Id == input.GoalId && g.ProjectId == j.ProjectId), "Goal not in project");
+            if (input.GoalId is { } targetGoal)
+                Require(!StateStore.RequiresIntakePlanAdoption(db, tx, targetGoal),
+                    "Adopt a reviewed plan before assigning jobs to an intake goal.");
             Require(input.DependsOn.All(x => x != id && s.Jobs.Any(a => a.Id == x && a.ProjectId == j.ProjectId)), "Unknown or cross-project dependency");
             Require(j.Attempt == 0 || j.ExpectedPaths.SequenceEqual(input.ExpectedPaths),
                 "Executed work-package scope can only change through an explicit reviewed scope amendment");

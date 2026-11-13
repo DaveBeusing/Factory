@@ -12,7 +12,8 @@ internal sealed record PolicyVersion(Guid Revision, AdoptionRule Rule);
 internal sealed record PolicyApproval(string Actor, Guid Project, Guid Source, Guid PolicyRevision,
     DateTimeOffset ExpiresAt, bool GrantCurrent, bool Revoked, long? Id = null);
 public sealed record PlanPolicyInput(string Rule, Guid ExpectedRevision);
-public sealed record PlanApprovalInput(Guid SourceRevision, Guid PolicyRevision, int Minutes, bool Revoke = false);
+public sealed record PlanApprovalInput(Guid SourceRevision, Guid PolicyRevision, int Minutes, bool Revoke = false,
+    long? ExpectedApprovalId = null);
 
 internal static class FactoryPolicy
 {
@@ -122,6 +123,17 @@ public sealed partial class StateStore
         if (scope.StoredPlan?.Revision != input.SourceRevision || input.SourceRevision == Guid.Empty ||
             policy.Revision != input.PolicyRevision || policy.Rule != AdoptionRule.IndependentApproval || grant is null)
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The plan, grant or policy changed.");
+        using (var author = Command(db, tx, """
+            SELECT actor FROM lifecycle_audit WHERE project_id=$project AND entity_id=$goal
+                AND entity_kind='plan' AND reason_code='PlanProposed' AND reference=$source;
+            """, ("$project", project), ("$goal", goal), ("$source", input.SourceRevision)))
+        {
+            if (!input.Revoke && (author.ExecuteScalar() is not string creator ||
+                string.Equals(creator, scope.SubjectId.ToString(), StringComparison.OrdinalIgnoreCase)))
+                throw new ScopedProjectRejected(DraftGoalStatus.Forbidden, "Approval requires a different Planner from the plan author.");
+        }
+        if (LatestApprovalId(db, tx, project, input.SourceRevision, policy.Revision, scope.SubjectId) != input.ExpectedApprovalId)
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Approval changed. Reload the plan before submitting.");
         var now = DateTimeOffset.UtcNow;
         Execute(db, tx, """
             INSERT INTO factory_plan_approvals(project_id,source_revision,policy_revision,actor,grant_revision,expires_at,revoked,at)
@@ -132,6 +144,17 @@ public sealed partial class StateStore
         tx.Commit();
     }
 
+    private static long? LatestApprovalId(SqliteConnection db, SqliteTransaction tx, Guid project, Guid? source,
+        Guid policy, Guid actor)
+    {
+        if (source is null) return null;
+        using var query = Command(db, tx, """
+            SELECT MAX(id) FROM factory_plan_approvals WHERE project_id=$project AND source_revision=$source
+                AND policy_revision=$policy AND actor=$actor;
+            """, ("$project", project), ("$source", source), ("$policy", policy), ("$actor", actor));
+        return query.ExecuteScalar() as long?;
+    }
+
     private static List<PolicyApproval> ReadPlanApprovals(SqliteConnection db, SqliteTransaction tx, PolicyContext context,
         PolicyVersion policy)
     {
@@ -139,6 +162,8 @@ public sealed partial class StateStore
             SELECT a.actor,a.expires_at,a.revoked, EXISTS(
                 SELECT 1 FROM planner_project_grants p JOIN viewer_subjects v ON v.id=p.subject_id
                 WHERE p.project_id=a.project_id AND p.subject_id=a.actor AND v.verifier IS NOT NULL AND
+                  NOT EXISTS(SELECT 1 FROM viewer_access_audit c WHERE c.subject_id=a.actor
+                    AND c.operation IN ('disable','rotate') AND c.at>=a.at) AND
                   a.grant_revision=(SELECT MAX(id) FROM viewer_access_audit
                     WHERE project_id=a.project_id AND subject_id=a.actor AND operation='grant_planner')
             ),a.id

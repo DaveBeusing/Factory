@@ -1256,7 +1256,7 @@ Test("Mission Control embeds operational recovery and budget views", () =>
 
 Test("Versioned plan policy denies stale, self and expired approvals", () =>
 {
-    var context = new PolicyContext("operator", Guid.NewGuid(), Guid.NewGuid(), FactoryPolicy.AdoptPlan,
+    var context = new PolicyContext(Guid.NewGuid().ToString(), Guid.NewGuid(), Guid.NewGuid(), FactoryPolicy.AdoptPlan,
         PolicyRisk.High, HasCapability: true, Manual: true);
     var policy = new PolicyVersion(Guid.NewGuid(), AdoptionRule.IndependentApproval);
     var now = DateTimeOffset.UtcNow;
@@ -1264,7 +1264,7 @@ Test("Versioned plan policy denies stale, self and expired approvals", () =>
         now.AddMinutes(1), GrantCurrent: true, Revoked: false);
     Assert(FactoryPolicy.Decide(context, policy, null, now).Outcome == PolicyOutcome.Hold);
     Assert(FactoryPolicy.Decide(context, policy, approval, now).Outcome == PolicyOutcome.Allow);
-    foreach (var invalid in new[] { approval with { Actor = "Operator" }, approval with { ExpiresAt = now },
+    foreach (var invalid in new[] { approval with { Actor = context.Actor }, approval with { ExpiresAt = now },
         approval with { GrantCurrent = false }, approval with { Revoked = true },
         approval with { PolicyRevision = Guid.NewGuid() }, approval with { Source = Guid.NewGuid() } })
         Assert(FactoryPolicy.Decide(context, policy, invalid, now).Outcome == PolicyOutcome.Deny);

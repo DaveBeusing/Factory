@@ -10,7 +10,7 @@ internal sealed record PolicyContext(string Actor, Guid Project, Guid Source, st
     PolicyRisk Risk, bool HasCapability, bool Manual);
 internal sealed record PolicyVersion(Guid Revision, AdoptionRule Rule);
 internal sealed record PolicyApproval(string Actor, Guid Project, Guid Source, Guid PolicyRevision,
-    DateTimeOffset ExpiresAt, bool GrantCurrent, bool Revoked);
+    DateTimeOffset ExpiresAt, bool GrantCurrent, bool Revoked, long? Id = null);
 public sealed record PlanPolicyInput(string Rule, Guid ExpectedRevision);
 public sealed record PlanApprovalInput(Guid SourceRevision, Guid PolicyRevision, int Minutes, bool Revoke = false);
 
@@ -32,6 +32,8 @@ internal static class FactoryPolicy
             return (PolicyOutcome.Deny, "project_policy_denied");
         if (policy.Rule == AdoptionRule.Manual || request.Risk != PolicyRisk.High)
             return (PolicyOutcome.Allow, "manual_review");
+        if (!Guid.TryParse(request.Actor, out _))
+            return (PolicyOutcome.Deny, "verified_planner_identity_required");
         if (approval is null)
             return (PolicyOutcome.Hold, "independent_approval_required");
         if (string.IsNullOrWhiteSpace(approval.Actor) ||
@@ -51,7 +53,8 @@ public sealed partial class StateStore
             CREATE TABLE IF NOT EXISTS factory_policy_receipts(
                 id TEXT PRIMARY KEY NOT NULL, project_id TEXT NOT NULL, source_revision TEXT NOT NULL,
                 policy_revision TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
-                risk TEXT NOT NULL, outcome TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL
+                risk TEXT NOT NULL, outcome TEXT NOT NULL, reason TEXT NOT NULL, at TEXT NOT NULL,
+                approval_id INTEGER
             );
             CREATE TABLE IF NOT EXISTS factory_project_policies(
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -59,11 +62,13 @@ public sealed partial class StateStore
                 PRIMARY KEY(project_id,version)
             );
             CREATE TABLE IF NOT EXISTS factory_plan_approvals(
+                id INTEGER PRIMARY KEY,
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 source_revision TEXT NOT NULL, policy_revision TEXT NOT NULL, actor TEXT NOT NULL,
-                grant_revision INTEGER NOT NULL, expires_at TEXT NOT NULL, revoked INTEGER NOT NULL,
-                PRIMARY KEY(project_id,source_revision,policy_revision,actor)
+                grant_revision INTEGER NOT NULL, expires_at TEXT NOT NULL, revoked INTEGER NOT NULL, at TEXT NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_plan_approval_lookup
+                ON factory_plan_approvals(project_id,source_revision,policy_revision,actor,id);
             PRAGMA user_version=20;
             """);
 
@@ -96,11 +101,11 @@ public sealed partial class StateStore
         return revision;
     }
 
-    internal Guid PlanPolicyRevision(Guid project)
+    internal PolicyVersion ReadPlanPolicy(Guid project)
     {
         using var db = Open();
         using var tx = db.BeginTransaction(deferred: true);
-        return EffectivePlanPolicy(db, tx, project).Revision;
+        return EffectivePlanPolicy(db, tx, project);
     }
 
     internal void SetPlanApproval(string authorization, Guid project, Guid goal, PlanApprovalInput input)
@@ -117,14 +122,13 @@ public sealed partial class StateStore
         if (scope.StoredPlan?.Revision != input.SourceRevision || input.SourceRevision == Guid.Empty ||
             policy.Revision != input.PolicyRevision || policy.Rule != AdoptionRule.IndependentApproval || grant is null)
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The plan, grant or policy changed.");
+        var now = DateTimeOffset.UtcNow;
         Execute(db, tx, """
-            INSERT INTO factory_plan_approvals(project_id,source_revision,policy_revision,actor,grant_revision,expires_at,revoked)
-            VALUES($project,$source,$policy,$actor,$grant,$expires,$revoked)
-            ON CONFLICT(project_id,source_revision,policy_revision,actor) DO UPDATE SET
-                grant_revision=excluded.grant_revision,expires_at=excluded.expires_at,revoked=excluded.revoked;
+            INSERT INTO factory_plan_approvals(project_id,source_revision,policy_revision,actor,grant_revision,expires_at,revoked,at)
+            VALUES($project,$source,$policy,$actor,$grant,$expires,$revoked,$at);
             """, ("$project", project), ("$source", input.SourceRevision), ("$policy", policy.Revision),
             ("$actor", scope.SubjectId), ("$grant", grant), ("$revoked", input.Revoke),
-            ("$expires", DateTimeOffset.UtcNow.AddMinutes(input.Revoke ? 0 : input.Minutes)));
+            ("$expires", now.AddMinutes(input.Revoke ? 0 : input.Minutes)), ("$at", now));
         tx.Commit();
     }
 
@@ -137,15 +141,19 @@ public sealed partial class StateStore
                 WHERE p.project_id=a.project_id AND p.subject_id=a.actor AND v.verifier IS NOT NULL AND
                   a.grant_revision=(SELECT MAX(id) FROM viewer_access_audit
                     WHERE project_id=a.project_id AND subject_id=a.actor AND operation='grant_planner')
-            )
+            ),a.id
             FROM factory_plan_approvals a WHERE a.project_id=$project AND a.source_revision=$source
-                AND a.policy_revision=$policy ORDER BY a.actor;
+                AND a.policy_revision=$policy AND a.id=(SELECT MAX(b.id) FROM factory_plan_approvals b
+                    WHERE b.project_id=a.project_id AND b.source_revision=a.source_revision
+                      AND b.policy_revision=a.policy_revision AND b.actor=a.actor)
+            ORDER BY a.actor;
             """, ("$project", context.Project), ("$source", context.Source), ("$policy", policy.Revision));
         using var row = query.ExecuteReader();
         var approvals = new List<PolicyApproval>();
         while (row.Read())
             approvals.Add(new(row.GetString(0), context.Project, context.Source, policy.Revision,
-                (DateTimeOffset)FromDb(row.GetValue(1), typeof(DateTimeOffset))!, row.GetBoolean(3), row.GetBoolean(2)));
+                (DateTimeOffset)FromDb(row.GetValue(1), typeof(DateTimeOffset))!, row.GetBoolean(3), row.GetBoolean(2),
+                row.GetInt64(4)));
         return approvals;
     }
 
@@ -159,20 +167,23 @@ public sealed partial class StateStore
         var policy = EffectivePlanPolicy(db, tx, plan.ProjectId);
         var now = DateTimeOffset.UtcNow;
         var (outcome, reason) = FactoryPolicy.Decide(context, policy, null, now);
+        long? approvalId = null;
         if (outcome == PolicyOutcome.Hold)
         {
             foreach (var approval in ReadPlanApprovals(db, tx, context, policy))
             {
                 (outcome, reason) = FactoryPolicy.Decide(context, policy, approval, now);
+                approvalId = approval.Id;
                 if (outcome == PolicyOutcome.Allow) break;
             }
         }
         Execute(db, tx, """
-            INSERT INTO factory_policy_receipts(id,project_id,source_revision,policy_revision,actor,action,risk,outcome,reason,at)
-            VALUES($id,$project,$source,$policy,$actor,$action,$risk,$outcome,$reason,$at);
+            INSERT INTO factory_policy_receipts(id,project_id,source_revision,policy_revision,actor,action,risk,outcome,reason,at,approval_id)
+            VALUES($id,$project,$source,$policy,$actor,$action,$risk,$outcome,$reason,$at,$approval);
             """, ("$id", Guid.NewGuid()), ("$project", context.Project), ("$source", context.Source),
             ("$policy", policy.Revision), ("$actor", context.Actor), ("$action", context.Action),
-            ("$risk", risk.ToString()), ("$outcome", outcome.ToString()), ("$reason", reason), ("$at", now));
+            ("$risk", risk.ToString()), ("$outcome", outcome.ToString()), ("$reason", reason), ("$at", now),
+            ("$approval", approvalId));
         return outcome;
     }
 }

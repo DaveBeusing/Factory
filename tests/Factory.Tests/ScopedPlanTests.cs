@@ -169,6 +169,7 @@ internal static class ScopedPlanTests
             Commit("Advance master");
             await Adopt(thirdPlan.Revision, HttpStatusCode.Conflict);
             draft.Revision = thirdPlan.Revision;
+            draft.Packages[0].Risk = "high";
             var current = await Save();
             Require(AuditCount() == 4 && store.Read().Jobs.Count == 0, "Rejected adoption wrote state");
 
@@ -181,7 +182,28 @@ internal static class ScopedPlanTests
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("policy", StringComparison.Ordinal)) { }
             Require(store.Read().Jobs.Count == 0, "Denied policy created jobs");
-            store.SetPlanPolicy(first.Id, new("Manual", policy));
+            var independent = store.SetPlanPolicy(first.Id, new("IndependentApproval", policy));
+            var approval = new PlanApprovalInput(current.Revision!.Value, independent, 10);
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            await Request(alice.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.OK, approval);
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            try
+            {
+                Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true, planRevision: current.Revision.Value);
+                throw new Exception("Unscoped operator bypassed independent approval");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("policy", StringComparison.Ordinal)) { }
+            store.SetViewerGrant(bob.SubjectId, first.Id, grant: true, planner: true);
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.OK, approval);
+            store.SetViewerGrant(bob.SubjectId, first.Id, grant: false, planner: true);
+            store.SetViewerGrant(bob.SubjectId, first.Id, grant: true, planner: true);
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.OK, approval);
+            var updatedPolicy = store.SetPlanPolicy(first.Id, new("IndependentApproval", independent));
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.Conflict, approval);
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.OK,
+                approval with { PolicyRevision = updatedPolicy });
 
             RejectAudit();
             await Adopt(current.Revision, HttpStatusCode.InternalServerError);

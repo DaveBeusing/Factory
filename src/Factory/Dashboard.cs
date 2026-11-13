@@ -248,7 +248,10 @@ public static class DashboardHost
             Results.Ok(Planning.Adopt(store, goalId, input.Mode, input.ReviewedExistingWork, input.PlanRevision)));
 
         app.MapGet("/api/projects/{projectId:guid}/plan-policy", (Guid projectId) =>
-            Results.Ok(new { revision = store.PlanPolicyRevision(projectId) }));
+            {
+                var policy = store.ReadPlanPolicy(projectId);
+                return Results.Ok(new { policy.Revision, rule = policy.Rule.ToString() });
+            });
         app.MapPut("/api/projects/{projectId:guid}/plan-policy", (Guid projectId, PlanPolicyInput input) =>
             Results.Ok(new { revision = store.SetPlanPolicy(projectId, input) }));
 

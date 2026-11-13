@@ -40,6 +40,10 @@ public sealed partial class StateStore
             CREATE TABLE IF NOT EXISTS issue_intake_plan_bindings(
                 plan_revision TEXT PRIMARY KEY, policy_revision TEXT NOT NULL, source_revision TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS issue_intake_scans(
+                project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+                generation INTEGER NOT NULL
+            );
             PRAGMA user_version=21;
             """);
 
@@ -85,18 +89,36 @@ public sealed partial class StateStore
         var repository = WorkPackagePreflight.GitHubRepository(project.Origin)
             ?? throw new InvalidOperationException("The project has no configured GitHub origin.");
         WorkPackagePreflight.RequireMaster(project);
+        var generation = BeginIssueScan(projectId);
         var (items, complete, note) = WorkPackagePreflight.DiscoverIssues(project, repository, paginated: true);
-        return PersistIssueScan(project, repository, items, complete, note);
+        return PersistIssueScan(project, repository, items, complete, note, generation);
+    }
+
+    internal long BeginIssueScan(Guid projectId)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        using var reserve = Command(db, tx, """
+            INSERT INTO issue_intake_scans(project_id,generation) VALUES($project,1)
+            ON CONFLICT(project_id) DO UPDATE SET generation=generation+1 RETURNING generation;
+            """, ("$project", projectId));
+        var generation = (long)reserve.ExecuteScalar()!;
+        Execute(db, tx, """
+            UPDATE issue_intake_goals SET policy_revision=NULL,source_revision=NULL WHERE project_id=$project;
+            """, ("$project", projectId));
+        tx.Commit();
+        return generation;
     }
 
     internal IReadOnlyList<IssueIntakeResult> PersistIssueScan(ProjectInfo project, string repository,
-        IReadOnlyList<IssueObservation> items, bool complete, string note)
+        IReadOnlyList<IssueObservation> items, bool complete, string note, long? generation = null)
     {
         var projectId = project.Id;
         var configured = WorkPackagePreflight.GitHubRepository(project.Origin);
         if (!string.Equals(configured, repository, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("Issue inventory does not belong to the project repository.");
         repository = repository.ToLowerInvariant();
+        var expected = generation ?? BeginIssueScan(projectId);
         if (items.GroupBy(item => item.Number).Any(group => group.Distinct().Count() > 1))
             complete = false;
         using var db = Open();
@@ -107,6 +129,13 @@ public sealed partial class StateStore
             if (!row.Read() || row.GetString(0) != project.Origin || row.GetString(1) != project.Path ||
                 row.GetString(2) != "active" || row.GetString(3) != project.BaseBranch)
                 throw new InvalidOperationException("The project is inactive or its checkout configuration changed.");
+        }
+        using (var latest = Command(db, tx, """
+            SELECT generation FROM issue_intake_scans WHERE project_id=$project;
+            """, ("$project", projectId)))
+        {
+            if ((long?)latest.ExecuteScalar() != expected)
+                throw new InvalidOperationException("A newer issue scan superseded this inventory.");
         }
         // Invalidate previous acceptance before consuming this observation of the inventory.
         Execute(db, tx, """
@@ -122,6 +151,13 @@ public sealed partial class StateStore
         var results = items.Distinct().Select(item => RecordIssueObservation(db, tx, projectId, repository, policy, item, complete)).ToArray();
         tx.Commit();
         return results;
+    }
+
+    internal static bool IsIntakeGoal(SqliteConnection db, SqliteTransaction tx, Guid goal)
+    {
+        using var query = Command(db, tx, "SELECT 1 FROM issue_intake_goals WHERE goal_id=$goal LIMIT 1;",
+            ("$goal", goal));
+        return query.ExecuteScalar() is not null;
     }
 
     private static void BindIntakePlan(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan) =>

@@ -1290,10 +1290,31 @@ Test("Issue intake deduplicates concurrent scans and re-evaluates policy and edi
         Assert(Scan(store, issue, complete: false).Decision == "hold");
         Assert(Scan(store, issue with { Number = 12, Url = "https://github.com/example/project/issues/12",
             Author = "automation[bot]" }).Decision == "hold");
-        var writers = Enumerable.Range(0, 4).Select(_ => Task.Run(() => Scan(new StateStore(home), issue))).ToArray();
+        var writers = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+        {
+            try { return Scan(new StateStore(home), issue).GoalId; }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("superseded", StringComparison.Ordinal))
+            { return null; }
+        })).ToArray();
         Task.WaitAll(writers);
-        var goal = writers[0].Result.GoalId;
-        Assert(goal.HasValue && writers.All(writer => writer.Result.GoalId == goal));
+        var goal = writers.Select(writer => writer.Result).First(id => id.HasValue);
+        Assert(writers.All(writer => !writer.Result.HasValue || writer.Result == goal));
+        var older = store.BeginIssueScan(project.Id);
+        var newer = store.BeginIssueScan(project.Id);
+        store.PersistIssueScan(project, "example/project", [], true, "", newer);
+        try
+        {
+            store.PersistIssueScan(project, "example/project", [issue], true, "", older);
+            throw new Exception("Superseded scan restored acceptance");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("superseded", StringComparison.Ordinal)) { }
+        Assert(Scan(store, issue).GoalId == goal);
+        try
+        {
+            MissionControlManager.SetGoalStatus(store, goal!.Value, "activate");
+            throw new Exception("Intake goal activated without adoption");
+        }
+        catch (InvalidOperationException) { }
         var plan = new FactoryPlan { ProjectId = project.Id, GoalId = goal!.Value };
         var allowed = store.Change((_, db, tx) =>
         {

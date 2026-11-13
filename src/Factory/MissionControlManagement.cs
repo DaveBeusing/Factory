@@ -213,13 +213,18 @@ public static class MissionControlManager
         AcceptanceCriteria = input.AcceptanceCriteria, TokenBudget = input.TokenBudget
     };
     public static FactoryGoal SetGoalStatus(StateStore store, Guid id, string action)
-        => store.Change(s =>
+        => store.Change((s, db, tx) =>
         {
             var g = s.Goals.Single(x => x.Id == id);
             Require(action is "activate" or "pause" or "stop" or "complete" or "archive", "Unknown goal action");
             Require(g.State != "archived", "Archived goal is read-only");
             if (action is "complete" or "archive") Require(!s.Jobs.Any(j => j.GoalId == id && IsActive(j)), "Cannot finish a goal while jobs run");
-            if (action == "activate") Require(g.State != "completed", "Completed goal cannot be restarted");
+            if (action == "activate")
+            {
+                Require(g.State != "completed", "Completed goal cannot be restarted");
+                Require(!StateStore.IsIntakeGoal(db, tx, id) || s.Jobs.Any(job => job.GoalId == id),
+                    "Adopt a reviewed plan before activating an intake goal.");
+            }
             g.State = action switch { "activate" => "active", "pause" => "paused", "stop" => "stopped", "complete" => "completed", _ => "archived" };
             Log(s, null, "goal_status", g.Objective + ": " + g.State); return g;
         });

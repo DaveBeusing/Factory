@@ -194,6 +194,16 @@ internal static class ScopedPlanTests
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("policy", StringComparison.Ordinal)) { }
             store.SetViewerGrant(bob.SubjectId, first.Id, grant: true, planner: true);
+            var unscopedGoal = new FactoryGoal { ProjectId = first.Id, Objective = "Unscoped author fixture" };
+            store.Change(state => state.Goals.Add(unscopedGoal));
+            var unscopedPlan = Planning.SaveRevision(store, new FactoryPlan
+            {
+                GoalId = unscopedGoal.Id, ProjectId = first.Id, BaseCommit = current.BaseCommit,
+                GoalRevision = Planning.GoalRevision(unscopedGoal), Packages = current.Packages
+            }, first);
+            var unscopedApproval = approval with { SourceRevision = unscopedPlan.Revision!.Value };
+            var unscopedPath = project + $"/plans/{unscopedGoal.Id}/approval";
+            await Request(bob.Token, HttpMethod.Post, unscopedPath, HttpStatusCode.Forbidden, unscopedApproval);
             await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.OK, approval);
             var approvalView = JsonSerializer.Deserialize<ScopedPlanView>(
                 await Request(bob.Token, HttpMethod.Get, path, HttpStatusCode.OK), Json.Options)!;

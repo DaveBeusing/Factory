@@ -129,8 +129,10 @@ public sealed partial class StateStore
             """, ("$project", project), ("$goal", goal), ("$source", input.SourceRevision)))
         {
             if (!input.Revoke && (author.ExecuteScalar() is not string creator ||
-                string.Equals(creator, scope.SubjectId.ToString(), StringComparison.OrdinalIgnoreCase)))
-                throw new ScopedProjectRejected(DraftGoalStatus.Forbidden, "Approval requires a different Planner from the plan author.");
+                !Guid.TryParseExact(creator, "D", out var authorId) || authorId == Guid.Empty ||
+                authorId == scope.SubjectId))
+                throw new ScopedProjectRejected(DraftGoalStatus.Forbidden,
+                    "Independent approval requires a plan revision saved by a different identified Planner.");
         }
         if (LatestApprovalId(db, tx, project, input.SourceRevision, policy.Revision, scope.SubjectId) != input.ExpectedApprovalId)
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Approval changed. Reload the plan before submitting.");

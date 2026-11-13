@@ -1294,8 +1294,16 @@ Test("Issue intake deduplicates concurrent scans and re-evaluates policy and edi
         Task.WaitAll(writers);
         var goal = writers[0].Result.GoalId;
         Assert(goal.HasValue && writers.All(writer => writer.Result.GoalId == goal));
+        var plan = new FactoryPlan { ProjectId = project.Id, GoalId = goal!.Value };
+        var allowed = store.Change((_, db, tx) =>
+        {
+            StateStore.InsertPlanRevision(db, tx, plan);
+            return StateStore.IntakeAllowsPlan(db, tx, plan);
+        });
+        Assert(allowed);
         var edit = issue with { Title = "Edited", UpdatedAt = "2026-03-01T10:01:00Z" };
         Assert(Scan(store, edit).GoalId == goal);
+        Assert(!store.Change((_, db, tx) => StateStore.IntakeAllowsPlan(db, tx, plan)));
         Assert(Scan(store, issue).Reason == "stale_or_ambiguous_source");
         store.SetIssueIntakePolicy(project.Id, new("deny", revision));
         Assert(Scan(new StateStore(home), edit).Decision == "deny");

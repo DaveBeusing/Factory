@@ -17,6 +17,20 @@ public sealed record PlanApprovalInput(Guid SourceRevision, Guid PolicyRevision,
 
 internal static class FactoryPolicy
 {
+    internal static (string Decision, string Reason) DecideIssueIntake(Guid project, Guid revision, string rule)
+    {
+        if (project == Guid.Empty || revision == Guid.Empty)
+            return ("deny", "unsupported_or_unauthorized");
+        return rule switch
+        {
+            "accept" => ("accept", "project_policy_accept"),
+            "deny" => ("deny", "project_policy_denied"),
+            "escalate" => ("escalate", "project_policy_escalate"),
+            "hold" => ("hold", "intake_acceptance_not_authorized"),
+            _ => ("deny", "unsupported_or_unauthorized")
+        };
+    }
+
     internal const string AdoptPlan = "plan.adopt.v1";
     internal static readonly PolicyVersion Baseline = new(
         Guid.Parse("00000000-0000-0000-0000-000000000001"), AdoptionRule.Manual);
@@ -193,9 +207,11 @@ public sealed partial class StateStore
             FactoryPolicy.AdoptPlan, risk, HasCapability: true, Manual: true);
         var policy = EffectivePlanPolicy(db, tx, plan.ProjectId);
         var now = DateTimeOffset.UtcNow;
-        var (outcome, reason) = FactoryPolicy.Decide(context, policy, null, now);
+        var (outcome, reason) = IntakeAllowsPlan(db, tx, plan)
+            ? FactoryPolicy.Decide(context, policy, null, now)
+            : (PolicyOutcome.Hold, "issue_intake_not_current");
         long? approvalId = null;
-        if (outcome == PolicyOutcome.Hold)
+        if (outcome == PolicyOutcome.Hold && reason == "independent_approval_required")
         {
             foreach (var approval in ReadPlanApprovals(db, tx, context, policy))
             {

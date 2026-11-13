@@ -231,8 +231,9 @@ public static class WorkPackagePreflight
         return ([], false, label + " inventory unavailable; inspect the hosting service before adoption.");
     }
 
-    internal static (List<IssueObservation> Items, bool Complete, string Note) DiscoverIssues(ProjectInfo project, string repository)
+    internal static (List<IssueObservation> Items, bool Complete, string Note) DiscoverIssues(ProjectInfo project, string repository, bool paginated = false)
     {
+        if (paginated) return DiscoverIssuePages(project, repository);
         const int limit = 100;
         try
         {
@@ -256,6 +257,44 @@ public static class WorkPackagePreflight
         }
         catch (Exception ex) when (ex is not OperationCanceledException) { }
         return ([], false, "Open issue inventory unavailable; inspect the hosting service before adoption.");
+    }
+
+    private static (List<IssueObservation> Items, bool Complete, string Note) DiscoverIssuePages(
+        ProjectInfo project, string repository)
+    {
+        try
+        {
+            var identity = Commands.Run("gh", ["api", "--hostname", "github.com", "user", "--jq", ".login"], project.Path, 20);
+            var self = identity.Ok ? identity.Output.Trim() : "";
+            if (self.Length == 0) return ([], false, "GitHub actor identity could not be verified.");
+            var result = Commands.Run("gh", ["api", "--hostname", "github.com", "--paginate", "--slurp",
+                $"repos/{repository}/issues?state=open&per_page=100"], project.Path, 60);
+            if (result.Ok)
+            {
+                using var document = JsonDocument.Parse(result.Output);
+                var items = document.RootElement.EnumerateArray().SelectMany(page => page.EnumerateArray())
+                    .Where(item => !item.TryGetProperty("pull_request", out _))
+                    .Select(item =>
+                    {
+                        var author = item.GetProperty("user");
+                        var login = author.ValueKind == JsonValueKind.Object ? author.GetProperty("login").GetString() : null;
+                        var automated = string.Equals(login, self, StringComparison.OrdinalIgnoreCase) ||
+                            author.ValueKind == JsonValueKind.Object &&
+                            author.GetProperty("type").GetString() != "User" ||
+                            item.TryGetProperty("performed_via_github_app", out var app) && app.ValueKind == JsonValueKind.Object;
+                        var body = item.GetProperty("body").GetString() ?? "";
+                        var hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+                            System.Text.Encoding.UTF8.GetBytes(body)));
+                        return new IssueObservation(item.GetProperty("number").GetInt32(),
+                            item.GetProperty("title").GetString() ?? "", item.GetProperty("html_url").GetString() ?? "",
+                            item.GetProperty("updated_at").GetString() ?? "", login ?? "",
+                            (item.GetProperty("state").GetString() ?? "").ToUpperInvariant(), automated, hash);
+                    }).ToList();
+                return (items, true, "");
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException) { }
+        return ([], false, "GitHub issue inventory was incomplete or unavailable.");
     }
 
     private static string ReadPullRequestHead(JsonElement item)

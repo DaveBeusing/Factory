@@ -57,6 +57,7 @@ public sealed partial class StateStore
     {
         var previous = ReadStoredPlanRevision(db, tx, plan.GoalId);
         plan.Revision = Guid.NewGuid();
+        BindIntakePlan(db, tx, plan);
         Execute(db, tx, """
             INSERT INTO goal_plan_revisions(goal_id, revision, content)
             VALUES($goal, $revision, $content);

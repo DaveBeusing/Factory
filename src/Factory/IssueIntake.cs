@@ -5,7 +5,7 @@ using Microsoft.Data.Sqlite;
 namespace Factory;
 
 internal sealed record IssueObservation(int Number, string Title, string Url, string UpdatedAt, string Author, string State,
-    bool Automated = false);
+    bool Automated = false, string ContentHash = "");
 internal sealed record IssueIntakeResult(int Number, string Revision, string Decision, string Reason, Guid? GoalId);
 public sealed record IssueIntakePolicyInput(string Rule, Guid ExpectedRevision);
 
@@ -27,13 +27,18 @@ public sealed partial class StateStore
                 FOREIGN KEY(project_id,repository,number,revision) REFERENCES issue_intake ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS issue_intake_policies(
-                project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
-                revision TEXT NOT NULL, rule TEXT NOT NULL
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                version INTEGER NOT NULL, revision TEXT NOT NULL UNIQUE, rule TEXT NOT NULL,
+                PRIMARY KEY(project_id,version)
             );
             CREATE TABLE IF NOT EXISTS issue_intake_goals(
                 project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
                 repository TEXT NOT NULL, number INTEGER NOT NULL, goal_id TEXT NOT NULL,
+                policy_revision TEXT, source_revision TEXT,
                 PRIMARY KEY(project_id,repository,number)
+            );
+            CREATE TABLE IF NOT EXISTS issue_intake_plan_bindings(
+                plan_revision TEXT PRIMARY KEY, policy_revision TEXT NOT NULL, source_revision TEXT NOT NULL
             );
             PRAGMA user_version=21;
             """);
@@ -42,7 +47,7 @@ public sealed partial class StateStore
 
     private static (Guid Revision, string Rule) ReadIntakePolicy(SqliteConnection db, SqliteTransaction tx, Guid project)
     {
-        using var query = Command(db, tx, "SELECT revision,rule FROM issue_intake_policies WHERE project_id=$project;",
+        using var query = Command(db, tx, "SELECT revision,rule FROM issue_intake_policies WHERE project_id=$project ORDER BY version DESC LIMIT 1;",
             ("$project", project));
         using var row = query.ExecuteReader();
         return row.Read() ? (Guid.Parse(row.GetString(0)), row.GetString(1)) : (IntakeBaseline, "hold");
@@ -67,8 +72,8 @@ public sealed partial class StateStore
             throw new InvalidOperationException("The intake policy changed. Reload before updating.");
         var revision = Guid.NewGuid();
         Execute(db, tx, """
-            INSERT INTO issue_intake_policies(project_id,revision,rule) VALUES($project,$revision,$rule)
-            ON CONFLICT(project_id) DO UPDATE SET revision=excluded.revision,rule=excluded.rule;
+            INSERT INTO issue_intake_policies(project_id,version,revision,rule)
+            SELECT $project,COALESCE(MAX(version),0)+1,$revision,$rule FROM issue_intake_policies WHERE project_id=$project;
             """, ("$project", project), ("$revision", revision), ("$rule", input.Rule));
         tx.Commit();
         return revision;
@@ -80,7 +85,7 @@ public sealed partial class StateStore
         var repository = WorkPackagePreflight.GitHubRepository(project.Origin)
             ?? throw new InvalidOperationException("The project has no configured GitHub origin.");
         WorkPackagePreflight.RequireMaster(project);
-        var (items, complete, note) = WorkPackagePreflight.DiscoverIssues(project, repository);
+        var (items, complete, note) = WorkPackagePreflight.DiscoverIssues(project, repository, paginated: true);
         return PersistIssueScan(project, repository, items, complete, note);
     }
 
@@ -103,12 +108,47 @@ public sealed partial class StateStore
                 row.GetString(2) != "active" || row.GetString(3) != project.BaseBranch)
                 throw new InvalidOperationException("The project is inactive or its checkout configuration changed.");
         }
+        // Invalidate previous acceptance before consuming this observation of the inventory.
+        Execute(db, tx, """
+            UPDATE issue_intake_goals SET policy_revision=NULL,source_revision=NULL
+            WHERE project_id=$project AND repository=$repo;
+            """, ("$project", projectId), ("$repo", repository));
         if (!complete && items.Count == 0)
+        {
+            tx.Commit();
             throw new InvalidOperationException(note);
+        }
         var policy = ReadIntakePolicy(db, tx, projectId);
         var results = items.Distinct().Select(item => RecordIssueObservation(db, tx, projectId, repository, policy, item, complete)).ToArray();
         tx.Commit();
         return results;
+    }
+
+    private static void BindIntakePlan(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan) =>
+        Execute(db, tx, """
+            INSERT INTO issue_intake_plan_bindings(plan_revision,policy_revision,source_revision)
+            SELECT $plan,policy_revision,source_revision FROM issue_intake_goals
+            WHERE project_id=$project AND goal_id=$goal AND policy_revision IS NOT NULL AND source_revision IS NOT NULL;
+            """, ("$plan", plan.Revision), ("$project", plan.ProjectId), ("$goal", plan.GoalId));
+
+    internal static bool IntakeAllowsPlan(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan)
+    {
+        using var query = Command(db, tx, """
+            SELECT p.origin,g.repository,g.policy_revision,
+                EXISTS(SELECT 1 FROM issue_intake_plan_bindings b WHERE b.plan_revision=$plan
+                    AND b.policy_revision=g.policy_revision AND b.source_revision=g.source_revision)
+            FROM issue_intake_goals g JOIN projects p ON p.id=g.project_id
+            WHERE g.project_id=$project AND g.goal_id=$goal;
+            """, ("$project", plan.ProjectId), ("$goal", plan.GoalId), ("$plan", plan.Revision));
+        using var row = query.ExecuteReader();
+        if (!row.Read()) return true;
+        var origin = WorkPackagePreflight.GitHubRepository(row.GetString(0));
+        var matches = string.Equals(origin, row.GetString(1), StringComparison.OrdinalIgnoreCase);
+        var policyRevision = row.IsDBNull(2) ? null : row.GetString(2);
+        var observed = row.GetBoolean(3);
+        row.Close();
+        var policy = ReadIntakePolicy(db, tx, plan.ProjectId);
+        return matches && observed && policy.Rule == "accept" && policy.Revision.ToString() == policyRevision;
     }
 
     private static IssueIntakeResult RecordIssueObservation(SqliteConnection db, SqliteTransaction tx,
@@ -135,13 +175,7 @@ public sealed partial class StateStore
             item.State != "OPEN" ? ("deny", "issue_not_open") :
             item.Automated || item.Author.EndsWith("[bot]", StringComparison.OrdinalIgnoreCase) ||
                 item.Author.Length == 0 ? ("hold", "automated_or_unknown_author") :
-            policy.Rule switch
-            {
-                "accept" => ("accept", "project_policy_accept"),
-                "deny" => ("deny", "project_policy_denied"),
-                "escalate" => ("escalate", "project_policy_escalate"),
-                _ => ("hold", "intake_acceptance_not_authorized")
-            };
+            FactoryPolicy.DecideIssueIntake(projectId, policy.Revision, policy.Rule);
         Guid? goalId = null;
         if (decision == "accept")
         {
@@ -163,6 +197,11 @@ public sealed partial class StateStore
                     """, ("$project", projectId), ("$repo", repository), ("$number", item.Number), ("$goal", goal.Id));
                 goalId = goal.Id;
             }
+            Execute(db, tx, """
+                UPDATE issue_intake_goals SET policy_revision=$policy,source_revision=$source
+                WHERE project_id=$project AND repository=$repo AND number=$number;
+                """, ("$policy", policy.Revision), ("$source", revision),
+                ("$project", projectId), ("$repo", repository), ("$number", item.Number));
         }
         Execute(db, tx, """
             INSERT INTO issue_intake(project_id,repository,number,revision,title,author,source_state,source_updated_at)

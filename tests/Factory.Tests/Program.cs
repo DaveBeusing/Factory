@@ -1254,6 +1254,24 @@ Test("Mission Control embeds operational recovery and budget views", () =>
     Assert(style.Contains(".budget-breakdown", StringComparison.Ordinal));
 });
 
+Test("Versioned plan policy denies stale, self and expired approvals", () =>
+{
+    var context = new PolicyContext("operator", Guid.NewGuid(), Guid.NewGuid(), FactoryPolicy.AdoptPlan,
+        PolicyRisk.High, HasCapability: true, Manual: true);
+    var policy = new PolicyVersion(Guid.NewGuid(), AdoptionRule.IndependentApproval);
+    var now = DateTimeOffset.UtcNow;
+    var approval = new PolicyApproval("reviewer", context.Project, context.Source, policy.Revision,
+        now.AddMinutes(1), GrantCurrent: true, Revoked: false);
+    Assert(FactoryPolicy.Decide(context, policy, null, now).Outcome == PolicyOutcome.Hold);
+    Assert(FactoryPolicy.Decide(context, policy, approval, now).Outcome == PolicyOutcome.Allow);
+    foreach (var invalid in new[] { approval with { Actor = "Operator" }, approval with { ExpiresAt = now },
+        approval with { GrantCurrent = false }, approval with { Revoked = true },
+        approval with { PolicyRevision = Guid.NewGuid() }, approval with { Source = Guid.NewGuid() } })
+        Assert(FactoryPolicy.Decide(context, policy, invalid, now).Outcome == PolicyOutcome.Deny);
+    Assert(FactoryPolicy.Decide(context with { Action = "unknown" }, policy, approval, now).Outcome == PolicyOutcome.Deny);
+    Assert(FactoryPolicy.Decide(context with { Manual = false }, policy, approval, now).Outcome == PolicyOutcome.Deny);
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -2243,7 +2261,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 19, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 20, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -2861,7 +2879,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 19);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 20);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3361,7 +3379,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 19);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 20);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

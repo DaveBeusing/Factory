@@ -172,6 +172,17 @@ internal static class ScopedPlanTests
             var current = await Save();
             Require(AuditCount() == 4 && store.Read().Jobs.Count == 0, "Rejected adoption wrote state");
 
+            var policy = store.SetPlanPolicy(first.Id, new("Deny", FactoryPolicy.Baseline.Revision));
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            try
+            {
+                Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true, planRevision: current.Revision!.Value);
+                throw new Exception("CLI adoption bypassed project policy");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("policy", StringComparison.Ordinal)) { }
+            Require(store.Read().Jobs.Count == 0, "Denied policy created jobs");
+            store.SetPlanPolicy(first.Id, new("Manual", policy));
+
             RejectAudit();
             await Adopt(current.Revision, HttpStatusCode.InternalServerError);
             var rolledBack = store.Read();

@@ -180,19 +180,22 @@ public static class Planning
         var requestedGoal = snapshot.Goals.Single(g => g.Id == goalId);
         var requestedProject = snapshot.Projects.Single(p => p.Id == requestedGoal.ProjectId);
         VerifyAdoption(plan, snapshot, requestedProject, requestedGoal, mode, reviewedExistingWork, planRevision);
-        return store.Change((state, db, tx) =>
+        var adopted = store.Change((state, db, tx) =>
         {
             var goal = state.Goals.Single(g => g.Id == goalId);
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             VerifyAdoptionTarget(plan, StateStore.ReadStoredPlanRevision(db, tx, goalId),
                 requestedProject, project, goal);
+            if (StateStore.DecidePlanAdoption(db, tx, plan, "local-operator") != PolicyOutcome.Allow)
+                return null;
             var jobs = BuildAdoptedJobs(plan, goal, mode);
             state.Jobs.AddRange(jobs);
             goal.State = "active";
             StateStore.RecordPlanAdoption(db, tx, plan, "local-operator");
             state.Events.Add(new FactoryEvent { Type = "plan_adopted", Message = $"Goal {goalId}: {jobs.Count} work packages" });
-            return (IReadOnlyList<FactoryJob>)jobs;
+            return (IReadOnlyList<FactoryJob>?)jobs;
         });
+        return adopted ?? throw new InvalidOperationException("Project policy did not authorize plan adoption.");
     }
 
     internal static void VerifyAdoption(FactoryPlan plan, FactoryState snapshot, ProjectInfo requestedProject,

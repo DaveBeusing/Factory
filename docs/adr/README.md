@@ -12,6 +12,11 @@
 
 ## How to use these records
 
+- [ADR 0003 · Policy-governed intake](0003-policy-governed-intake.md)
+- [ADR 0004 · Specification approval](0004-specification-approval.md)
+- [ADR 0005 · Independent review](0005-independent-review.md)
+- [ADR 0006 · Policy-controlled integration](0006-policy-controlled-integration.md)
+
 1. Read the decision's original context, alternatives and consequences.
 2. Verify the actual code and test coverage before describing a mechanism as implemented.
 3. Document a new proposal or explicit amendment when changing a foundational choice.

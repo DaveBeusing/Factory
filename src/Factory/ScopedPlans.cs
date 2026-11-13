@@ -162,6 +162,11 @@ public sealed partial class StateStore
         var current = ReadPlanScope(db, tx, verifier, projectId, goalId);
         RequireDraftPlanTarget(current);
         Planning.VerifyAdoptionTarget(plan, current.StoredPlan, scope.Project, current.Project, current.Goal);
+        if (DecidePlanAdoption(db, tx, plan, current.SubjectId.ToString()) != PolicyOutcome.Allow)
+        {
+            tx.Commit();
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Project policy did not authorize plan adoption.");
+        }
         using var next = Command(db, tx, "SELECT COALESCE(MAX(position),-1)+1 FROM jobs;");
         var position = Convert.ToInt32(next.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
         var entity = Entities.Single(map => map.Type == typeof(FactoryJob));

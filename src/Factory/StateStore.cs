@@ -798,7 +798,17 @@ public sealed partial class StateStore
     /// A superseded, expired, or inactive execution cannot change the job.
     /// </summary>
     public void SetFencedStage(Guid jobId, ExecutionFence fence, string nextState, string stage,
-        string? error = null)
+        string? error = null) => WriteFencedStage(jobId, fence, nextState, stage, error);
+
+    internal void AdvanceFencedStage(Guid jobId, ExecutionFence fence, FactoryJob expected,
+        string nextState, string stage, string? error = null) =>
+        WriteFencedStage(jobId, fence, nextState, stage, error, expected: expected);
+
+    internal void InterruptFencedStage(Guid jobId, ExecutionFence fence) =>
+        WriteFencedStage(jobId, fence, JobStates.Paused, "interrupted", null, interrupted: true);
+
+    private void WriteFencedStage(Guid jobId, ExecutionFence fence, string nextState, string stage,
+        string? error, bool interrupted = false, FactoryJob? expected = null)
     {
         if (string.IsNullOrWhiteSpace(nextState) || string.IsNullOrWhiteSpace(stage))
             throw new ArgumentException("Job state and stage are required");
@@ -810,8 +820,9 @@ public sealed partial class StateStore
         string previousError;
         Guid projectId;
         string requestedState;
+        DateTimeOffset updatedAt;
         using (var read = Command(db, tx, """
-            SELECT state,stage,error,project_id,requested_state FROM jobs
+            SELECT state,stage,error,project_id,requested_state,updated_at FROM jobs
             WHERE id=$id AND execution_generation=$generation AND lease_token=$token
               AND lease_owner=$owner AND lease_until>$now;
             """, ("$id", jobId), ("$generation", fence.Generation), ("$token", fence.Token),
@@ -825,9 +836,29 @@ public sealed partial class StateStore
             previousError = row.GetString(2);
             projectId = Guid.Parse(row.GetString(3));
             requestedState = row.GetString(4);
+            updatedAt = (DateTimeOffset)FromDb(row.GetValue(5), typeof(DateTimeOffset))!;
         }
         if (!JobStates.Active.Contains(previousState))
             throw new LostExecutionLeaseException("Execution is no longer active");
+        if (interrupted)
+        {
+            if (previousStage is "commit" or "push" or "pr")
+            {
+                nextState = JobStates.Blocked;
+                stage = "interrupted_git";
+                error = "Git side effects interrupted; reconcile before retry";
+            }
+            else
+            {
+                nextState = requestedState switch
+                {
+                    LocalJobControl.ProjectCancelRequest => JobStates.Cancelled,
+                    JobStates.Stopped or LocalJobControl.ProjectStopRequest => JobStates.Stopped,
+                    _ => JobStates.Paused
+                };
+                error = nextState == JobStates.Cancelled ? null : "Execution interrupted; inspect worktree before resuming";
+            }
+        }
         if (requestedState == LocalJobControl.ProjectCancelRequest &&
             nextState is not (JobStates.Cancelled or JobStates.Blocked or JobStates.Failed))
             throw new OperationCanceledException("The current execution has a cancellation request.");
@@ -835,6 +866,9 @@ public sealed partial class StateStore
             throw new InvalidOperationException("The current execution has no cancellation request.");
         if (previousState == nextState && previousStage == stage && (error is null || error == previousError))
             return;
+        if (expected is not null && (expected.State != previousState || expected.Stage != previousStage ||
+            expected.UpdatedAt != updatedAt))
+            throw new LostExecutionLeaseException("The job stage changed since it was observed.");
         var reason = JobLifecycle.FencedTransition(previousState, nextState);
         using (var update = Command(db, tx, """
             UPDATE jobs SET state=$state, stage=$stage, error=COALESCE($error,error),

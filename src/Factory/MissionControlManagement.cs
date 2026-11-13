@@ -352,20 +352,23 @@ public static class MissionControlManager
                 j.RequestedState = action == "pause" ? JobStates.Paused : JobStates.Stopped;
                 StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, "local-operator", j.State, j.State,
                     action == "pause" ? LifecycleReason.PauseRequested : LifecycleReason.StopRequested,
-                    reference: j.RequestedState, generation: j.ExecutionGeneration);
+                    reference: j.RequestedState, generation: j.ExecutionGeneration, state: s);
                 Log(s, id, "job_control_requested", action + " " + input.Reason); return j;
             });
             if (!LocalJobControl.Request(id))
             {
-                store.Change(s =>
+                store.Change((s, db, tx) =>
                 {
                     var j = s.Jobs.Single(j => j.Id == id);
                     if (j.ExecutionGeneration == updated.ExecutionGeneration && j.LeaseOwner == updated.LeaseOwner &&
                         j.LeaseToken == updated.LeaseToken && j.RequestedState == updated.RequestedState)
                     {
+                        StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, "local-operator", j.State, j.State,
+                            LifecycleReason.ControlWithdrawn, reference: j.RequestedState, generation: j.ExecutionGeneration, state: s);
                         j.RequestedState = "";
                         j.UpdatedAt = DateTimeOffset.UtcNow;
                     }
+                    return 0;
                 });
                 throw new InvalidOperationException("Job is not executing in this dashboard process");
             }
@@ -380,7 +383,7 @@ public static class MissionControlManager
             ApplyInactiveJobControl(j, input);
             if (j.State != previous)
                 StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, "local-operator", previous, j.State,
-                    JobLifecycle.ControlReason(action));
+                    JobLifecycle.ControlReason(action), state: s);
             Log(s, id, "job_control", action + " " + input.Reason);
             return j;
         });

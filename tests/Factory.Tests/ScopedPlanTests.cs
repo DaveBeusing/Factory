@@ -307,9 +307,13 @@ internal static class ScopedPlanTests
                     new { action = "stop" });
                 Require(store.Job(local.Id).RequestedState == "", "Rejected control left an interrupt request");
                 Execute("DROP TRIGGER reject_operation_audit;");
+                var generationBeforeCancel = store.Job(local.Id).ExecutionGeneration;
+                await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Conflict,
+                    new { action = "cancel", executionGeneration = generationBeforeCancel - 1 });
+                Require(store.Job(local.Id).RequestedState == "", "Stale cancellation targeted the current lease");
                 var accepted = JsonSerializer.Deserialize<ProjectJobControlResult>(
                     await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Accepted,
-                        new { action = "cancel", reason = "Cancel fixture" }), Json.Options)!;
+                        new { action = "cancel", reason = "Cancel fixture", executionGeneration = store.Job(local.Id).ExecutionGeneration }), Json.Options)!;
                 Require(accepted.RequestedState == JobStates.Cancelled, "Active cancellation did not expose its requested outcome");
                 await executionTask.WaitAsync(timeout.Token);
             }
@@ -321,7 +325,7 @@ internal static class ScopedPlanTests
             var stopped = store.Job(local.Id);
             Require(stopped.State == JobStates.Cancelled && stopped.LeaseOwner == "" && stopped.RequestedState == "",
                 "The runner did not consume the durable cancellation request");
-            await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.OK, new { action = "cancel" });
+            await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.OK, new { action = "cancel", executionGeneration = stopped.ExecutionGeneration });
             await Request(bob.Token, HttpMethod.Post, jobUrl + "/action", HttpStatusCode.Conflict, new { action = "resume" });
             using (var lifecycle = db.CreateCommand())
             {

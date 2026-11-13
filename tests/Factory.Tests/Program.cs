@@ -2506,6 +2506,12 @@ Test("Fenced stage transition writes job and event in one transaction", () =>
         catch (InvalidOperationException) { }
         Assert(reopened.Job(job.Id).State == JobStates.Building);
         Assert(reopened.Read().Events.Count(e => e.Type == "job_lifecycle_transition") == 1);
+        try
+        {
+            reopened.AdvanceFencedStage(job.Id, fence, job, JobStates.Gating, "commit");
+            throw new Exception("An old stage snapshot was accepted");
+        }
+        catch (LostExecutionLeaseException) { }
 
         try
         {

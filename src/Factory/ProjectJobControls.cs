@@ -11,13 +11,14 @@ public sealed class ProjectJobControlInput
     public string Action { get; set; } = "";
     public bool Reviewed { get; set; }
     public string Reason { get; set; } = "";
+    public long? ExecutionGeneration { get; set; }
     public string? RecoveryRevision { get; set; }
 }
 
 internal sealed record ProjectJobControlResult(Guid Id, Guid ProjectId, string State, DateTimeOffset UpdatedAt,
     string? RequestedState = null);
 internal sealed record ProjectJobOperation(Guid Id, string Title, string State, string Mode, string[] Actions,
-    bool ReviewBeforeResume, string? RequestedState, string? CheckpointCommit, string? RecoveryRevision);
+    bool ReviewBeforeResume, string? RequestedState, string? CheckpointCommit, string? RecoveryRevision, long ExecutionGeneration);
 
 public sealed partial class StateStore
 {
@@ -91,7 +92,8 @@ public sealed partial class StateStore
                     LocalJobControl.ProjectStopRequest => JobStates.Stopped,
                     LocalJobControl.ProjectCancelRequest => JobStates.Cancelled,
                     _ => null
-                }, checkpoint, checkpoint is null ? null : JobRecoveryRevision(id, row.GetInt64(13), row.GetString(10), checkpoint));
+                }, checkpoint, checkpoint is null ? null : JobRecoveryRevision(id, row.GetInt64(13), row.GetString(10), checkpoint),
+                row.GetInt64(13));
         });
     }
 
@@ -112,7 +114,7 @@ public sealed partial class StateStore
         job.RequestedState = LocalJobControl.ProjectCancelRequest;
         job.UpdatedAt = DateTimeOffset.UtcNow;
         RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, "local-operator", job.State, job.State,
-            LifecycleReason.CancelRequested, reference: JobStates.Cancelled, generation: job.ExecutionGeneration);
+            LifecycleReason.CancelRequested, reference: JobStates.Cancelled, generation: job.ExecutionGeneration, state: state);
         return job;
     });
 
@@ -146,6 +148,9 @@ public sealed partial class StateStore
         using var row = query.ExecuteReader();
         if (!row.Read()) throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
         var previousState = row.GetString(0);
+        if ((request.ExecutionGeneration.HasValue || request.Action == "cancel") &&
+            request.ExecutionGeneration != row.GetInt64(11))
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The execution generation changed. Refresh the job.");
         if (row.GetString(6) == "archived")
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "The job belongs to an archived project.");
         var leaseOwner = row.GetString(2);

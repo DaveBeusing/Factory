@@ -65,7 +65,7 @@ public static class WorkerProtocol
     {
         if (!WorkerAuthentication.IsValidWorkerId(workerId)) return null;
         JobRecovery.QuarantineExpired(store, JobExecutionModes.Remote);
-        return store.Change(s =>
+        return store.Change((s, db, tx) =>
         {
             if (s.Paused || !settings.AllowPush) return null;
            var registered = s.Workers.FirstOrDefault(w => w.Id == workerId);
@@ -97,6 +97,8 @@ public static class WorkerProtocol
                 if (requiresProviderLease && routes is null) continue;
                 JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
                     state: s, reservationTokens: settings.GoalReservationTokens);
+                StateStore.RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, job.LeaseOwner, JobStates.Queued,
+                    job.State, LifecycleReason.LeaseClaimed, generation: job.ExecutionGeneration, state: s);
                 RemoteProviderLease? providerLease = null;
                 if (routes is not null)
                 {
@@ -187,7 +189,7 @@ public static class WorkerProtocol
     {
         // Idle heartbeat updates are independent from job authorization and usage.
         if (req.JobId == Guid.Empty) return store.TouchWorkerHeartbeat(req.WorkerId);
-        return store.Change(s =>
+        return store.Change((s, db, tx) =>
         {
             var worker = s.Workers.FirstOrDefault(w => w.Id == req.WorkerId);
             if (worker is null || !worker.Enabled) return false;
@@ -204,6 +206,8 @@ public static class WorkerProtocol
                 if (req.ProviderLeaseId != providerLease.Id ||
                     !RemoteProviderRouting.CanContinue(s, settings, j, providerLease))
                 {
+                    StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, j.LeaseOwner, j.State,
+                        JobStates.Blocked, LifecycleReason.LeaseFenced, generation: j.ExecutionGeneration, state: s);
                     RemoteProviderRouting.Fence(s, j, "Remote provider lease no longer authorized");
                     return false;
                 }
@@ -218,6 +222,8 @@ public static class WorkerProtocol
            if (remaining < 0)
            {
                GoalBudgetLedger.Hold(s, j, "remote worker exceeded its reserved budget");
+               StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, j.LeaseOwner, j.State,
+                   JobStates.Blocked, LifecycleReason.LeaseFenced, generation: j.ExecutionGeneration, state: s);
                j.ExecutionGeneration++;
                j.State = JobStates.Blocked; j.Stage = "reconcile";
                j.Error = "Remote worker budget exceeded; review observed usage";
@@ -290,7 +296,7 @@ public static class WorkerProtocol
             }
         }
 
-        return store.Change(s =>
+        return store.Change((s, db, tx) =>
         {
             var j = s.Jobs.FirstOrDefault(x => x.Id == req.JobId);
             var currentProject = s.Projects.FirstOrDefault(p => p.Id == claimed.ProjectId);
@@ -334,6 +340,7 @@ public static class WorkerProtocol
                 remaining = GoalBudgetLedger.Record(s, j, reportedIn, reportedOut, finalUsage);
             }
 
+            var previousState = j.State;
             if (verified is not null && successReported &&
                 (j.GoalId is null || (finalUsage && remaining >= 0)))
             {
@@ -358,6 +365,9 @@ public static class WorkerProtocol
                 s.Events.Add(new FactoryEvent { JobId = j.Id,
                     Type = scopeBlocked ? "scope_violation" : "remote_rejected", Message = j.Error });
             }
+            StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, j.LeaseOwner, previousState, j.State,
+                j.State == JobStates.PrReady ? LifecycleReason.RemoteResultVerified : LifecycleReason.RemoteResultRejected,
+                reference: j.State == JobStates.PrReady ? j.HeadSha : null, generation: j.ExecutionGeneration, state: s);
             GoalBudgetLedger.Settle(s, j);
             j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null;
             j.UpdatedAt = DateTimeOffset.UtcNow;

@@ -25,7 +25,7 @@ public sealed partial class StateStore
 
     internal static void RecordLifecycle(SqliteConnection db, SqliteTransaction tx, Guid projectId,
         string kind, Guid entityId, string actor, string from, string to, LifecycleReason reason,
-        string? reference = null, long? generation = null)
+        string? reference = null, long? generation = null, FactoryState? state = null)
     {
         var decision = Guid.NewGuid();
         Execute(db, tx, """
@@ -35,10 +35,17 @@ public sealed partial class StateStore
             """, ("$decision", decision), ("$project", projectId), ("$kind", kind), ("$entity", entityId),
             ("$actor", actor), ("$from", from), ("$to", to), ("$reason", reason.ToString()),
             ("$reference", reference), ("$generation", generation), ("$at", DateTimeOffset.UtcNow));
-        AppendEvent(db, tx, kind == "job" ? entityId : null, kind + "_lifecycle_transition", Json.Stringify(new
+        var evt = new FactoryEvent
         {
-            decision, projectId, entityId, actor, generation, from, to, reason = reason.ToString(), reference
-        }));
+            JobId = kind == "job" ? entityId : null,
+            Type = kind + "_lifecycle_transition",
+            Message = Json.Stringify(new
+            {
+                decision, projectId, entityId, actor, generation, from, to, reason = reason.ToString(), reference
+            })
+        };
+        if (state is null) AppendEvent(db, tx, evt.JobId, evt.Type, evt.Message);
+        else state.Events.Add(evt);
     }
 
     internal static void RecordPlanAdoption(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan, string actor)

@@ -750,7 +750,7 @@ function formProjectJobOperation(id,action){
    if(reason.length>(reconcile?1000:2000))throw new Error('The reason is too long.');
    const path='viewer/projects/'+encodeURIComponent(project.id)+'/jobs/'+encodeURIComponent(job.id);
    await submitProjectRecovery(context,project.id,path+(reconcile?'/reconcile':'/action'),
-    {action,reviewed,reason,...(reconcile?{recoveryRevision:job.recoveryRevision}:{})},
+    {action,reviewed,reason,executionGeneration:job.executionGeneration,...(reconcile?{recoveryRevision:job.recoveryRevision}:{})},
     reconcile?'Job requeued after review':'Job state updated');
   },projectJobActions[action]);
 }

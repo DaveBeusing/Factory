@@ -1,0 +1,4 @@
+# ADR 0004 · Risk and project policy for specification approval
+
+Accepted for implementation. The current project policy overrides the built-in manual baseline. Plan adoption binds the authenticated actor, plan revision, highest package risk and effective policy revision. Projects can deny adoption or require an independent Planner approval for high risk. Existing preflight and explicit review still apply. Approval lifetime is bounded to 24 hours. This version supports no override or exception action. Unknown actions are denied.
+For independent approval, save the revision as an authenticated project Planner. A revision saved under the shared local administrator identity must be saved again through the scoped Planner path before it can receive independent approval.

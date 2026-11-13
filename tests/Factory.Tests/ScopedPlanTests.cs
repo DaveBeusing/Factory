@@ -169,8 +169,61 @@ internal static class ScopedPlanTests
             Commit("Advance master");
             await Adopt(thirdPlan.Revision, HttpStatusCode.Conflict);
             draft.Revision = thirdPlan.Revision;
+            draft.Packages[0].Risk = "high";
             var current = await Save();
             Require(AuditCount() == 4 && store.Read().Jobs.Count == 0, "Rejected adoption wrote state");
+
+            var policy = store.SetPlanPolicy(first.Id, new("Deny", FactoryPolicy.Baseline.Revision));
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            try
+            {
+                Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true, planRevision: current.Revision!.Value);
+                throw new Exception("CLI adoption bypassed project policy");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("policy", StringComparison.Ordinal)) { }
+            Require(store.Read().Jobs.Count == 0, "Denied policy created jobs");
+            var independent = store.SetPlanPolicy(first.Id, new("IndependentApproval", policy));
+            var approval = new PlanApprovalInput(current.Revision!.Value, independent, 10);
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            await Request(alice.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.Forbidden, approval);
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            try
+            {
+                Planning.Adopt(store, goal.Id, "local", reviewedExistingWork: true, planRevision: current.Revision.Value);
+                throw new Exception("Unscoped operator bypassed independent approval");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("policy", StringComparison.Ordinal)) { }
+            store.SetViewerGrant(bob.SubjectId, first.Id, grant: true, planner: true);
+            var unscopedGoal = new FactoryGoal { ProjectId = first.Id, Objective = "Unscoped author fixture" };
+            store.Change(state => state.Goals.Add(unscopedGoal));
+            var unscopedPlan = Planning.SaveRevision(store, new FactoryPlan
+            {
+                GoalId = unscopedGoal.Id, ProjectId = first.Id, BaseCommit = current.BaseCommit,
+                GoalRevision = Planning.GoalRevision(unscopedGoal), Packages = current.Packages
+            }, first);
+            var unscopedApproval = approval with { SourceRevision = unscopedPlan.Revision!.Value };
+            var unscopedPath = project + $"/plans/{unscopedGoal.Id}/approval";
+            await Request(bob.Token, HttpMethod.Post, unscopedPath, HttpStatusCode.Forbidden, unscopedApproval);
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.OK, approval);
+            var approvalView = JsonSerializer.Deserialize<ScopedPlanView>(
+                await Request(bob.Token, HttpMethod.Get, path, HttpStatusCode.OK), Json.Options)!;
+            Require(approvalView.ApprovalId.HasValue, "Scoped planner did not get approval revision");
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.OK,
+                approval with { Revoke = true, ExpectedApprovalId = approvalView.ApprovalId });
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.Conflict, approval);
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            approvalView = JsonSerializer.Deserialize<ScopedPlanView>(
+                await Request(bob.Token, HttpMethod.Get, path, HttpStatusCode.OK), Json.Options)!;
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.OK,
+                approval with { ExpectedApprovalId = approvalView.ApprovalId });
+            store.SetViewerGrant(bob.SubjectId, first.Id, grant: false, planner: true);
+            store.SetViewerGrant(bob.SubjectId, first.Id, grant: true, planner: true);
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            var updatedPolicy = store.SetPlanPolicy(first.Id, new("IndependentApproval", independent));
+            await Adopt(current.Revision, HttpStatusCode.Conflict);
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.Conflict, approval);
+            await Request(bob.Token, HttpMethod.Post, path + "/approval", HttpStatusCode.OK,
+                approval with { PolicyRevision = updatedPolicy });
 
             RejectAudit();
             await Adopt(current.Revision, HttpStatusCode.InternalServerError);
@@ -179,6 +232,7 @@ internal static class ScopedPlanTests
                 "Adoption escaped audit rollback");
             Execute("DROP TRIGGER reject_plan_audit;");
             await Adopt(current.Revision, HttpStatusCode.OK);
+            store.SetViewerGrant(bob.SubjectId, first.Id, grant: false, planner: true);
             await Adopt(current.Revision, HttpStatusCode.Conflict);
             var final = store.Read();
             Require(final.Jobs.Single().ProjectId == first.Id && final.Jobs.Single().GoalId == goal.Id &&

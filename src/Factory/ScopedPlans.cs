@@ -8,7 +8,7 @@ internal sealed class ScopedProjectRejected(DraftGoalStatus status, string? mess
 }
 
 internal sealed record ScopedPlanView(string GoalRevision, FactoryPlan? Plan, string Objective,
-    List<string> AcceptanceCriteria, string State, bool IsLegacy);
+    List<string> AcceptanceCriteria, string State, bool IsLegacy, Guid PolicyRevision, string PolicyRule, long? ApprovalId);
 
 public sealed class ScopedPlanGenerationInput
 {
@@ -30,8 +30,10 @@ public sealed partial class StateStore
         using var db = Open();
         using var tx = db.BeginTransaction(deferred: true);
         var scope = ReadPlanScope(db, tx, verifier, projectId, goalId);
+        var policy = EffectivePlanPolicy(db, tx, projectId);
         return new(Planning.GoalRevision(scope.Goal), scope.Plan, scope.Goal.Objective, scope.Goal.AcceptanceCriteria,
-            scope.Goal.State, scope.StoredPlan is null && scope.LegacyPlan is not null);
+            scope.Goal.State, scope.StoredPlan is null && scope.LegacyPlan is not null, policy.Revision, policy.Rule.ToString(),
+            LatestApprovalId(db, tx, projectId, scope.StoredPlan?.Revision, policy.Revision, scope.SubjectId));
     }
 
     internal FactoryPlan SaveScopedPlan(string authorization, Guid projectId, Guid goalId, FactoryPlan draft)
@@ -162,6 +164,11 @@ public sealed partial class StateStore
         var current = ReadPlanScope(db, tx, verifier, projectId, goalId);
         RequireDraftPlanTarget(current);
         Planning.VerifyAdoptionTarget(plan, current.StoredPlan, scope.Project, current.Project, current.Goal);
+        if (DecidePlanAdoption(db, tx, plan, current.SubjectId.ToString()) != PolicyOutcome.Allow)
+        {
+            tx.Commit();
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Project policy did not authorize plan adoption.");
+        }
         using var next = Command(db, tx, "SELECT COALESCE(MAX(position),-1)+1 FROM jobs;");
         var position = Convert.ToInt32(next.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
         var entity = Entities.Single(map => map.Type == typeof(FactoryJob));

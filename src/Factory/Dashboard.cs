@@ -247,6 +247,14 @@ public static class DashboardHost
         app.MapPost("/api/plans/{goalId:guid}/adopt", (Guid goalId, PlanAdoptInput input) =>
             Results.Ok(Planning.Adopt(store, goalId, input.Mode, input.ReviewedExistingWork, input.PlanRevision)));
 
+        app.MapGet("/api/projects/{projectId:guid}/plan-policy", (Guid projectId) =>
+            {
+                var policy = store.ReadPlanPolicy(projectId);
+                return Results.Ok(new { policy.Revision, rule = policy.Rule.ToString() });
+            });
+        app.MapPut("/api/projects/{projectId:guid}/plan-policy", (Guid projectId, PlanPolicyInput input) =>
+            Results.Ok(new { revision = store.SetPlanPolicy(projectId, input) }));
+
         app.MapPost("/api/projects", (ProjectInput input) => Results.Created("/api/state", MissionControlManager.CreateProject(store, input)));
         app.MapPut("/api/projects/{id:guid}", (Guid id, ProjectInput input) => Results.Ok(MissionControlManager.UpdateProject(store, id, input)));
         app.MapPost("/api/projects/{id:guid}/action", (Guid id, ControlInput input) =>

@@ -136,7 +136,7 @@ public sealed partial class StateStore
         verify?.Invoke(db, tx, current);
         VerifyPlanCheckout(scope.Project, current.Project, draft.BaseCommit);
         cancellation.ThrowIfCancellationRequested();
-        InsertPlanRevision(db, tx, draft);
+        InsertPlanRevision(db, tx, draft, current.SubjectId.ToString());
         AuditPlan(db, tx, current, draft, operation, reviewed: null);
         AppendEvent(db, tx, null, "plan_saved", scope.Goal.Id.ToString());
         tx.Commit();
@@ -168,6 +168,7 @@ public sealed partial class StateStore
         foreach (var job in jobs) Upsert(db, tx, entity, job, position++);
         Execute(db, tx, "UPDATE goals SET state='active' WHERE id=$goal AND project_id=$project;",
             ("$goal", goalId), ("$project", projectId));
+        RecordPlanAdoption(db, tx, plan, current.SubjectId.ToString());
         AuditPlan(db, tx, current, plan, "plan_adopted", reviewed: true);
         AppendEvent(db, tx, null, "plan_adopted", $"Goal {goalId}: {jobs.Count} work packages");
         tx.Commit();

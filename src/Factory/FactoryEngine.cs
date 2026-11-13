@@ -171,9 +171,12 @@ public sealed class FactoryEngine
                     Stage(id, fence, JobStates.Blocked, "interrupted_git",
                         "Git side effects interrupted; reconcile before retry");
                 else
-                    Stage(id, fence,
-                        interrupted.RequestedState is JobStates.Stopped or LocalJobControl.ProjectStopRequest
-                            ? JobStates.Stopped : JobStates.Paused,
+                    Stage(id, fence, interrupted.RequestedState switch
+                    {
+                        JobStates.Cancelled or LocalJobControl.ProjectCancelRequest => JobStates.Cancelled,
+                        JobStates.Stopped or LocalJobControl.ProjectStopRequest => JobStates.Stopped,
+                        _ => JobStates.Paused
+                    },
                         "interrupted", "Execution interrupted; inspect worktree before resuming");
             }
         }
@@ -339,7 +342,7 @@ public sealed class FactoryEngine
         // Never accept a local-only ancestry result for a project with a configured remote.
         var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct);
         ct.ThrowIfCancellationRequested();
-        var recorded = _store.Change(s =>
+        var recorded = _store.Change((s, db, tx) =>
         {
             var current = s.Jobs.Single(j => j.Id == id);
             var currentProject = s.Projects.Single(p => p.Id == job.ProjectId);
@@ -351,6 +354,8 @@ public sealed class FactoryEngine
                 currentProject.Origin != project.Origin ||
                 currentProject.BaseBranch != project.BaseBranch)
                 return false;
+            StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", id, "integration-verifier",
+                current.State, JobStates.Integrated, LifecycleReason.IntegrationVerified, reference: proof.IntegratedCommit);
             current.Integrated = true;
             current.State = JobStates.Integrated;
             current.Stage = "done";

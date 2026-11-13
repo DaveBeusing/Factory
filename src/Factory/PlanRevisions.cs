@@ -52,13 +52,26 @@ public sealed partial class StateStore
             : null;
     }
 
-    internal static FactoryPlan InsertPlanRevision(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan)
+    internal static FactoryPlan InsertPlanRevision(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan,
+        string actor = "local-operator")
     {
+        var previous = ReadStoredPlanRevision(db, tx, plan.GoalId);
         plan.Revision = Guid.NewGuid();
         Execute(db, tx, """
             INSERT INTO goal_plan_revisions(goal_id, revision, content)
             VALUES($goal, $revision, $content);
             """, ("$goal", plan.GoalId), ("$revision", plan.Revision), ("$content", Json.Stringify(plan)));
+        if (previous?.Revision is { } prior)
+        {
+            RecordLifecycle(db, tx, plan.ProjectId, "plan", plan.GoalId, actor, "proposed", "superseded",
+                LifecycleReason.PlanSuperseded, reference: prior.ToString());
+            RecordLifecycle(db, tx, plan.ProjectId, "approval", plan.GoalId, actor, "pending", "superseded",
+                LifecycleReason.ApprovalSuperseded, reference: prior.ToString());
+        }
+        RecordLifecycle(db, tx, plan.ProjectId, "plan", plan.GoalId, actor, "none", "proposed",
+            LifecycleReason.PlanProposed, reference: plan.Revision.ToString());
+        RecordLifecycle(db, tx, plan.ProjectId, "approval", plan.GoalId, actor, "none", "pending",
+            LifecycleReason.ApprovalRequested, reference: plan.Revision.ToString());
         return plan;
     }
 }

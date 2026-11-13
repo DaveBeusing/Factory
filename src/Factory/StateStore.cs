@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 18;
+    private const int DatabaseVersion = 19;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -312,7 +312,8 @@ public sealed partial class StateStore
             if (schemaVersion < 15) UpgradeProjectControls(db, tx);
             if (schemaVersion < 16) UpgradeProjectBudgetReconciliation(db, tx);
             if (schemaVersion < 17) UpgradeProjectGoalReconciliation(db, tx);
-            UpgradeProjectReviews(db, tx);
+            if (schemaVersion < 18) UpgradeProjectReviews(db, tx);
+            UpgradeLifecycleAudit(db, tx);
         }
         tx.Commit();
     }
@@ -808,8 +809,9 @@ public sealed partial class StateStore
         string previousStage;
         string previousError;
         Guid projectId;
+        string requestedState;
         using (var read = Command(db, tx, """
-            SELECT state,stage,error,project_id FROM jobs
+            SELECT state,stage,error,project_id,requested_state FROM jobs
             WHERE id=$id AND execution_generation=$generation AND lease_token=$token
               AND lease_owner=$owner AND lease_until>$now;
             """, ("$id", jobId), ("$generation", fence.Generation), ("$token", fence.Token),
@@ -822,13 +824,18 @@ public sealed partial class StateStore
             previousStage = row.GetString(1);
             previousError = row.GetString(2);
             projectId = Guid.Parse(row.GetString(3));
+            requestedState = row.GetString(4);
         }
         if (!JobStates.Active.Contains(previousState))
             throw new LostExecutionLeaseException("Execution is no longer active");
+        if (requestedState == LocalJobControl.ProjectCancelRequest &&
+            nextState is not (JobStates.Cancelled or JobStates.Blocked or JobStates.Failed))
+            throw new OperationCanceledException("The current execution has a cancellation request.");
+        if (nextState == JobStates.Cancelled && requestedState != LocalJobControl.ProjectCancelRequest)
+            throw new InvalidOperationException("The current execution has no cancellation request.");
         if (previousState == nextState && previousStage == stage && (error is null || error == previousError))
             return;
         var reason = JobLifecycle.FencedTransition(previousState, nextState);
-        var decision = Guid.NewGuid();
         using (var update = Command(db, tx, """
             UPDATE jobs SET state=$state, stage=$stage, error=COALESCE($error,error),
                 updated_at=$now, checkpoint_stage=$stage, checkpoint_at=$now
@@ -852,21 +859,8 @@ public sealed partial class StateStore
                 """, ("$position", position), ("$id", Guid.NewGuid()), ("$at", now),
                 ("$job", jobId), ("$message", nextState + "/" + stage));
         }
-        AppendEvent(db, tx, jobId, "job_lifecycle_transition", Json.Stringify(new
-        {
-            decision,
-            projectId,
-            actor = fence.Owner,
-            generation = fence.Generation,
-            from = previousState,
-            to = nextState,
-            reason = reason.ToString()
-        }));
-        Execute(db, tx, """
-            DELETE FROM events WHERE id IN (
-                SELECT id FROM events ORDER BY position DESC LIMIT -1 OFFSET 20000
-            );
-            """);
+        RecordLifecycle(db, tx, projectId, "job", jobId, fence.Owner, previousState,
+            nextState, reason, generation: fence.Generation);
         tx.Commit();
     }
 

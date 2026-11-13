@@ -7,7 +7,7 @@ public static class JobStates
         AwaitingApproval = "awaiting_approval", PrReady = "pr_ready",
         CompletedLocal = "completed_local", Integrated = "integrated", Blocked = "blocked",
         Failed = "failed", Paused = "paused";
-    public const string Stopped = "stopped";
+    public const string Stopped = "stopped", Cancelled = "cancelled";
     public static readonly HashSet<string> Active = [Preparing, Building, Gating, Reviewing, Reworking, AwaitingApproval];
 }
 
@@ -19,17 +19,44 @@ internal enum LifecycleReason
     ExecutionPaused,
     ExecutionStopped,
     PullRequestPrepared,
+    ExecutionCancelled,
+    CancelRequested,
+    PauseRequested,
+    StopRequested,
+    OperatorPaused,
+    OperatorStopped,
+    OperatorResumed,
+    OperatorRetried,
+    Reconciled,
+    IntegrationVerified,
+    PlanProposed,
+    PlanSuperseded,
+    PlanAdopted,
+    ApprovalRequested,
+    ApprovalSuperseded,
+    ApprovalGranted,
     AwaitingManualIntegration
 }
 
 internal static class JobLifecycle
 {
+    internal static LifecycleReason ControlReason(string action) => action switch
+    {
+        "pause" => LifecycleReason.OperatorPaused,
+        "stop" => LifecycleReason.OperatorStopped,
+        "cancel" => LifecycleReason.ExecutionCancelled,
+        "resume" => LifecycleReason.OperatorResumed,
+        "retry" => LifecycleReason.OperatorRetried,
+        _ => throw new InvalidOperationException("Unknown job control.")
+    };
+
     internal static LifecycleReason FencedTransition(string from, string to) => (from, to) switch
     {
         (_, JobStates.Blocked) => LifecycleReason.ExecutionBlocked,
         (_, JobStates.Failed) => LifecycleReason.ExecutionFailed,
         (_, JobStates.Paused) => LifecycleReason.ExecutionPaused,
         (_, JobStates.Stopped) => LifecycleReason.ExecutionStopped,
+        (_, JobStates.Cancelled) => LifecycleReason.ExecutionCancelled,
         (JobStates.AwaitingApproval, JobStates.PrReady) => LifecycleReason.PullRequestPrepared,
         (JobStates.AwaitingApproval, JobStates.CompletedLocal) => LifecycleReason.AwaitingManualIntegration,
         (JobStates.Preparing, JobStates.Building) or

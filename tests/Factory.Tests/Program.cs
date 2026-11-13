@@ -2243,7 +2243,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 18, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 19, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -2548,6 +2548,33 @@ Test("Fenced stage transition writes job and event in one transaction", () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+Test("Schema 18 lifecycle audit upgrade survives event pruning and restart", () =>
+{
+    var home = Path.Combine(Path.GetTempPath(), "factory-lifecycle-upgrade-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        var store = new StateStore(home);
+        var project = new ProjectInfo { Name = "historical project" };
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        using var db = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={Path.Combine(home, "factory.sqlite3")};Pooling=False");
+        db.Open();
+        using var command = db.CreateCommand();
+        command.CommandText = "DROP TABLE lifecycle_audit; PRAGMA user_version=18;";
+        command.ExecuteNonQuery();
+        var upgraded = new StateStore(home);
+        Assert(upgraded.Job(job.Id).State == JobStates.Queued);
+        MissionControlManager.ControlJob(upgraded, job.Id, new ControlInput { Action = "cancel" });
+        command.CommandText = "DELETE FROM events; PRAGMA integrity_check;";
+        Assert((string?)command.ExecuteScalar() == "ok");
+        Assert(new StateStore(home).Job(job.Id).State == JobStates.Cancelled);
+        command.CommandText = "SELECT COUNT(*) FROM lifecycle_audit WHERE reason_code='ExecutionCancelled';";
+        Assert(Convert.ToInt64(command.ExecuteScalar()) == 1);
+    }
+    finally { try { Directory.Delete(home, true); } catch { } }
+});
+
 Test("Competing fenced terminal transitions commit only one decision", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-stage-race-" + Guid.NewGuid().ToString("N"));
@@ -2799,7 +2826,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 18);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 19);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3299,7 +3326,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 18);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 19);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

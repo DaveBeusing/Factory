@@ -347,7 +347,7 @@ public sealed class FactoryEngine
     internal async Task<IntegrationProof> VerifyIntegrationAsync(Guid id, string? pullRequestUrl,
         GitHubWorkerResultVerifier verifier, CancellationToken ct = default,
         IRemoteBaseReader? remote = null, IIntegrationPullRequestReader? pullRequests = null,
-        bool coordinated = false, string? expectedMergeCommit = null)
+        bool coordinated = false, string? expectedMergeCommit = null, string? workflowEvidence = null)
     {
         var state = _store.Read();
         var job = state.Jobs.Single(j => j.Id == id);
@@ -371,6 +371,8 @@ public sealed class FactoryEngine
             throw new InvalidOperationException("Remote integration requires a verified pull request.");
 
         // Never accept a local-only ancestry result for a project with a configured remote.
+        if (coordinated && (expectedMergeCommit is null || workflowEvidence is null))
+            throw new InvalidOperationException("Coordinated integration requires verified merge and workflow evidence.");
         var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct, expectedMergeCommit);
         var pullEvidence = remoteIntegration || coordinated
             ? await verifier.VerifyMergedAsync(project, job, proof.IntegratedCommit, ct)
@@ -400,7 +402,8 @@ public sealed class FactoryEngine
                 current.PrUrl = job.PrUrl;
                 current.Branch = job.Branch;
                 StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", id, "controller/github-required-checks",
-                    current.State, current.State, LifecycleReason.RemoteResultVerified, reference: pullEvidence,
+                    current.State, current.State, LifecycleReason.RemoteResultVerified,
+                    reference: workflowEvidence is null ? pullEvidence : Json.Stringify(new { pullEvidence, workflowEvidence }),
                     generation: current.ExecutionGeneration, state: s);
             }
             StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", id, "integration-verifier",

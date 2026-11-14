@@ -1856,6 +1856,104 @@ await TestAsync("Hosted merge receipts require signed base lineage and reviewed 
     finally { try { home.Delete(true); } catch { } }
 });
 
+await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed attempts and wrong apps", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-workflow-host-");
+    try
+    {
+        var head = new string('a', 40);
+        var basis = new string('b', 40);
+        var decision = new PullRequestDecision(Guid.NewGuid(), Guid.NewGuid(), "", "example/repo", "master",
+            basis, head, "publisher", "merge", "merge", 42, DateTimeOffset.UtcNow.AddMinutes(5), "", WorkflowId: 7);
+        var project = new ProjectInfo { Checks = [new CheckCommand { Name = "build" }] };
+        var workflowId = 7;
+        var runHead = head;
+        var runBase = basis;
+        var conclusion = "success";
+        var appId = 15368;
+        var checkUrl = "https://api.github.com/repos/example/repo/check-runs/9";
+        var jobCheckUrl = checkUrl;
+        var coordinator = new PullRequestCoordinator(new StateStore(home.FullName), new FactorySettings(), (args, _, _) =>
+        {
+            var endpoint = args.Last();
+            object response = endpoint switch
+            {
+                var route when route.Contains("/workflows/7/runs?") => new[] { new { workflow_runs = new[] { new
+                {
+                    workflow_id = workflowId, head_sha = runHead, @event = "pull_request", run_number = 3,
+                    run_attempt = 2, status = "completed", conclusion, check_suite_id = 12, id = 8,
+                    pull_requests = new[] { new { number = 42, head = new { sha = head }, @base = new { sha = runBase } } }
+                } } } },
+                var route when route.Contains("/runs/8/attempts/2/jobs?") => new[] { new { jobs = new[]
+                {
+                    new { name = "build", conclusion = "success", check_run_url = jobCheckUrl }
+                } } },
+                var route when route.Contains("/check-suites/12/") => new[] { new { check_runs = new[]
+                {
+                    new { id = 9, url = checkUrl, app = new { id = appId }, head_sha = head, name = "build", conclusion = "success" }
+                } } },
+                _ => throw new Exception("Unexpected host request: " + endpoint)
+            };
+            return Task.FromResult(new CommandResult(0, Json.Stringify(response), ""));
+        });
+        async Task Reject(string message)
+        {
+            try
+            {
+                await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None);
+                throw new Exception("Invalid workflow was accepted.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains(message)) { }
+        }
+        var receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None);
+        Assert(receipt.Contains(head) && receipt.Contains("\"workflowId\": 7"));
+        workflowId = 8;
+        await Reject("latest authorized");
+        workflowId = 7;
+        runHead = basis;
+        await Reject("latest authorized");
+        runHead = head;
+        runBase = head;
+        await Reject("latest authorized");
+        runBase = basis;
+        conclusion = "failure";
+        await Reject("latest authorized");
+        conclusion = "success";
+        appId = 1;
+        await Reject("trusted app");
+        appId = 15368;
+        jobCheckUrl += "-substituted";
+        await Reject("trusted app");
+        using var account = System.Text.Json.JsonDocument.Parse("""{"login":"publisher"}""");
+        using var revoked = System.Text.Json.JsonDocument.Parse("""{"permissions":{"push":false}}""");
+        try
+        {
+            PullRequestCoordinator.RequireHostPermission(decision, account.RootElement, revoked.RootElement);
+            throw new Exception("Revoked permission was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("write permission")) { }
+        foreach (var interrupted in new[] { false, true })
+        {
+            var writes = 0;
+            var refusal = new PullRequestCoordinator(new StateStore(home.FullName), new FactorySettings(), (_, _, _) =>
+            {
+                writes++;
+                return interrupted ? Task.FromException<CommandResult>(new TimeoutException()) :
+                    Task.FromResult(new CommandResult(1, "", "refused"));
+            });
+            try
+            {
+                await refusal.MutateAsync(["api", "--method", "POST", "repos/example/repo/pulls"], CancellationToken.None);
+                throw new Exception("An unsuccessful mutation was accepted.");
+            }
+            catch (TimeoutException) when (interrupted) { }
+            catch (InvalidOperationException ex) when (!interrupted && ex.Message.Contains("refused")) { }
+            Assert(writes == 1);
+        }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {

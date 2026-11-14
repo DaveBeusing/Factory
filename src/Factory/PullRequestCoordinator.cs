@@ -8,7 +8,7 @@ namespace Factory;
 public sealed record PullRequestDecision(Guid ProjectId, Guid JobId, string ProjectRevision, string Repository,
     string BaseBranch, string BaseCommit, string HeadCommit, string Account, string Action, string Method,
     int PullNumber, DateTimeOffset ExpiresAt, string ScopeRevision, bool BranchChecksAvailable = true,
-    string? WorkflowFile = null);
+    string? WorkflowFile = null, long WorkflowId = 0);
 public sealed record SignedPullRequestDecision(PullRequestDecision Decision, string Signature);
 
 internal sealed class PullRequestCoordinator(StateStore store, FactorySettings settings,
@@ -32,11 +32,8 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             throw new InvalidOperationException("A current signed independent review is required.");
 
         var account = await ReadAsync(["api", "user"], ct);
-        if (account.GetProperty("login").GetString() != d.Account)
-            throw new InvalidOperationException("The controller GitHub credential differs from the policy decision.");
         var repository = await ReadAsync(["api", $"repos/{d.Repository}"], ct);
-        if (!repository.GetProperty("permissions").GetProperty("push").GetBoolean())
-            throw new InvalidOperationException("The controller credential lacks repository write permission.");
+        RequireHostPermission(d, account, repository);
         if (d.Action == "draft")
         {
             await RequireCurrentBaseAsync(d, ct);
@@ -76,8 +73,10 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (pull.GetProperty("merged").GetBoolean())
         {
             var mergeCommit = await RequireMergeReceiptAsync(d, pull, ct);
+            var workflowEvidence = await RequireExactWorkflowAsync(d, project, ct);
             return await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, url, verifier, ct,
-                remote: new GitRemoteBaseReader(synchronize: true), coordinated: true, expectedMergeCommit: mergeCommit);
+                remote: new GitRemoteBaseReader(synchronize: true), coordinated: true, expectedMergeCommit: mergeCommit,
+                workflowEvidence: workflowEvidence);
         }
 
         await RequireCurrentBaseAsync(d, ct);
@@ -86,6 +85,14 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         await RequireStrictRulesAsync(d, ct);
         await RequireMergeChecksAsync(d, project, job, branch, pull, verifier, ct);
         throw new InvalidOperationException("GitHub cannot atomically enforce the signed base commit during merge.");
+    }
+
+    internal static void RequireHostPermission(PullRequestDecision d, JsonElement account, JsonElement repository)
+    {
+        if (account.GetProperty("login").GetString() != d.Account)
+            throw new InvalidOperationException("The controller GitHub credential differs from the policy decision.");
+        if (!repository.GetProperty("permissions").GetProperty("push").GetBoolean())
+            throw new InvalidOperationException("The controller credential lacks repository write permission.");
     }
 
     private async Task RequireImmutableHeadAsync(PullRequestDecision d, string branch, CancellationToken ct)
@@ -201,6 +208,8 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (workflow.GetProperty("path").GetString() != path || workflow.GetProperty("state").GetString() != "active")
             throw new InvalidOperationException("The required workflow is not active at the authorized path.");
         var workflowId = workflow.GetProperty("id").GetInt64();
+        if (workflowId != d.WorkflowId)
+            throw new InvalidOperationException("The hosted workflow differs from the signed workflow ID.");
         var history = await ReadAsync(["api", $"repos/{d.Repository}/actions/workflows/{workflowId}/runs?event=pull_request&status=success&per_page=1"], ct);
         var runs = history.GetProperty("workflow_runs");
         if (runs.GetArrayLength() != 1 || runs[0].GetProperty("workflow_id").GetInt64() != workflowId ||
@@ -237,6 +246,54 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         }
     }
 
+    internal async Task<string> RequireExactWorkflowAsync(PullRequestDecision d, ProjectInfo project, CancellationToken ct)
+    {
+        if (d.WorkflowId <= 0 || project.Checks.Count == 0)
+            throw new InvalidOperationException("A signed workflow ID and named checks are required.");
+        var prefix = $"repos/{d.Repository}";
+        var pages = await ReadAsync(["api", "--paginate", "--slurp",
+            $"{prefix}/actions/workflows/{d.WorkflowId}/runs?head_sha={d.HeadCommit}&event=pull_request&per_page=100"], ct);
+        var latest = pages.EnumerateArray().SelectMany(page => page.GetProperty("workflow_runs").EnumerateArray())
+            .Where(run => run.GetProperty("workflow_id").GetInt64() == d.WorkflowId &&
+                run.GetProperty("head_sha").GetString() == d.HeadCommit &&
+                run.GetProperty("event").GetString() == "pull_request" &&
+                run.GetProperty("pull_requests").EnumerateArray().Any(pr =>
+                    pr.GetProperty("number").GetInt32() == d.PullNumber &&
+                    pr.GetProperty("head").GetProperty("sha").GetString() == d.HeadCommit &&
+                    pr.GetProperty("base").GetProperty("sha").GetString() == d.BaseCommit))
+            .OrderByDescending(run => run.GetProperty("run_number").GetInt64())
+            .ThenByDescending(run => run.GetProperty("run_attempt").GetInt32()).FirstOrDefault();
+        if (latest.ValueKind != JsonValueKind.Object || latest.GetProperty("status").GetString() != "completed" ||
+            latest.GetProperty("conclusion").GetString() != "success")
+            throw new InvalidOperationException("The latest authorized PR workflow must pass on the exact head and base.");
+        var suite = latest.GetProperty("check_suite_id").GetInt64();
+        var runId = latest.GetProperty("id").GetInt64();
+        var attempt = latest.GetProperty("run_attempt").GetInt32();
+        var jobs = await ReadAsync(["api", "--paginate", "--slurp",
+            $"{prefix}/actions/runs/{runId}/attempts/{attempt}/jobs?per_page=100"], ct);
+        var hostedJobs = jobs.EnumerateArray().SelectMany(page => page.GetProperty("jobs").EnumerateArray()).ToArray();
+        var runs = await ReadAsync(["api", "--paginate", "--slurp",
+            $"{prefix}/check-suites/{suite}/check-runs?per_page=100"], ct);
+        var checks = runs.EnumerateArray().SelectMany(page => page.GetProperty("check_runs").EnumerateArray()).ToArray();
+        var checkIds = new List<long>();
+        foreach (var check in project.Checks)
+        {
+            var candidates = hostedJobs.Where(job => job.GetProperty("name").GetString() == check.Name).ToArray();
+            if (candidates.Length != 1 || candidates[0].GetProperty("conclusion").GetString() != "success")
+                throw new InvalidOperationException("The authorized workflow attempt did not pass: " + check.Name);
+            var link = candidates[0].GetProperty("check_run_url").GetString();
+            var match = checks.Where(run => run.GetProperty("url").GetString() == link &&
+                run.GetProperty("app").GetProperty("id").GetInt64() == 15368 &&
+                run.GetProperty("head_sha").GetString() == d.HeadCommit &&
+                run.GetProperty("name").GetString() == check.Name &&
+                run.GetProperty("conclusion").GetString() == "success").ToArray();
+            if (match.Length != 1)
+                throw new InvalidOperationException("The workflow check did not originate from the trusted app on the exact head: " + check.Name);
+            checkIds.Add(match[0].GetProperty("id").GetInt64());
+        }
+        return Json.Stringify(new { d.WorkflowId, runId, attempt, suite, d.PullNumber, d.HeadCommit, d.BaseCommit, checkIds });
+    }
+
     private void RequireCurrentDecision(SignedPullRequestDecision signed, Guid id)
     {
         var d = signed.Decision;
@@ -271,7 +328,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         }
     }
 
-    private async Task RequireMergeChecksAsync(PullRequestDecision d, ProjectInfo project, FactoryJob job, string branch,
+    internal async Task RequireMergeChecksAsync(PullRequestDecision d, ProjectInfo project, FactoryJob job, string branch,
         JsonElement pull, GitHubWorkerResultVerifier verifier, CancellationToken ct)
     {
         using var snapshot = JsonDocument.Parse(pull.GetRawText());
@@ -279,6 +336,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (pull.GetProperty("draft").GetBoolean() || pull.GetProperty("mergeable_state").GetString() != "clean" ||
             pull.GetProperty("base").GetProperty("sha").GetString() != d.BaseCommit)
             throw new InvalidOperationException("The PR is not clean on the authorized base.");
+        await RequireExactWorkflowAsync(d, project, ct);
         var checks = await verifier.RequiredChecksAsync(d.Repository, d.PullNumber, d.BaseBranch, d.HeadCommit, ct);
         if (!project.Checks.All(check => checks.Contains(check.Name)))
             throw new InvalidOperationException("A configured required check is missing.");
@@ -380,7 +438,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         return json.RootElement.Clone();
     }
 
-    private async Task<JsonElement> MutateAsync(string[] args, CancellationToken ct)
+    internal async Task<JsonElement> MutateAsync(string[] args, CancellationToken ct)
     {
         var result = await github(args, 60, ct);
         if (!result.Ok)

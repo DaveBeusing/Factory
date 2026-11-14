@@ -1,6 +1,12 @@
 using System.Diagnostics;
 using Factory;
 
+if (args is ["--command-timeout-fixture"])
+{
+    await Task.Delay(TimeSpan.FromSeconds(15));
+    return 0;
+}
+
 if (args is ["--measure-queue-load"])
 {
     await QueueLoadBaseline.RunAsync();
@@ -1635,6 +1641,33 @@ Test("Review admission survives restart and cannot exceed three cycles", () =>
         catch (InvalidOperationException ex) when (ex.Message.Contains("cycle limit")) { }
     }
     finally { try { home.Delete(true); } catch { } }
+});
+
+await TestAsync("Command timeout exits quality gating as a typed transient failure", async () =>
+{
+    var repo = Directory.CreateTempSubdirectory("factory-check-timeout-");
+    try
+    {
+        GitOperations.Git(repo.FullName, "init", "-b", "master");
+        GitOperations.Git(repo.FullName, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Fixture");
+        var project = new ProjectInfo { BaseBranch = "master", Checks = [new CheckCommand
+        {
+            Name = "timeout", Executable = "dotnet", TimeoutSeconds = 1,
+            Arguments = [typeof(FakeAgent).Assembly.Location, "--command-timeout-fixture"]
+        }] };
+        var job = new FactoryJob { Worktree = repo.FullName, ExpectedPaths = ["src/"] };
+        try
+        {
+            await new QualityEngine(new FakeAgent()).GateAsync(project, job, CancellationToken.None);
+            throw new Exception("Quality gating swallowed the check timeout.");
+        }
+        catch (TimeoutException ex)
+        {
+            Assert(ExecutionFailure.From("checks", ex).Kind == ExecutionFailureKind.Transient);
+        }
+    }
+    finally { try { repo.Delete(true); } catch { } }
 });
 
 Test("Uncertain publication closes the round durably and blocks reviewed retry", () =>
@@ -3724,7 +3757,14 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
             ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken };
         Assert(await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier()));
         var blocked = store.Job(job.Id);
-        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "remote_verification_failed");
+        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "interrupted_git");
+        try
+        {
+            MissionControlManager.ControlJob(new StateStore(home), job.Id,
+                new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("An unverified remote PR was allowed to replay.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("explicit reconciliation")) { }
         Assert(string.IsNullOrEmpty(blocked.PrUrl) && string.IsNullOrEmpty(blocked.HeadSha) &&
             string.IsNullOrEmpty(blocked.EvidenceFile), "Unverified worker metadata was persisted");
         Assert(blocked.TokensIn == 10, "Remote usage accounting was dropped");
@@ -4522,7 +4562,7 @@ await TestAsync("Unverified remote final usage holds budget until reviewed recon
         Assert(await WorkerProtocol.CompleteAsync(store, report,
             new FixedWorkerVerifier(new VerifiedWorkerResult("{\"verifiedBy\":\"test\"}"))));
         var result = store.Job(job.Id);
-        Assert(result.State == JobStates.Blocked && result.Stage == "remote_verification_failed");
+        Assert(result.State == JobStates.Blocked && result.Stage == "interrupted_git");
         var held = store.Read().BudgetReservations.Single();
         Assert(held.State == GoalBudgetLedger.Held && held.Consumed == 120 &&
             GoalBudgetLedger.Available(store.Read(), goal.Id) == 0);
@@ -4530,8 +4570,6 @@ await TestAsync("Unverified remote final usage holds budget until reviewed recon
             new FixedWorkerVerifier(new VerifiedWorkerResult("{}"))),
             "Replayed completion settled a stale reservation");
 
-        MissionControlManager.ControlJob(store, job.Id,
-            new ControlInput { Action = "retry", Reviewed = true });
         Assert(GoalBudgetLedger.Allocation(store.Read(), store.Job(job.Id), 1000) == 0,
             "Job retried before uncertain budget was reconciled");
         GoalBudgetLedger.Reconcile(store, goal.Id, held.Id, 100, 20, true,

@@ -415,7 +415,8 @@ public static class WorkerProtocol
                 var gitUncertain = req.Job is { } interrupted &&
                     interrupted.Id == j.Id && interrupted.ProjectId == j.ProjectId && interrupted.Attempt == j.Attempt &&
                     interrupted.Mode == JobExecutionModes.Remote &&
-                    interrupted.Stage is "interrupted_git" or "commit" or "push" or "pr" or "merge";
+                    (interrupted.State == JobStates.PrReady || !string.IsNullOrWhiteSpace(interrupted.PrUrl) ||
+                     interrupted.Stage is "interrupted_git" or "commit" or "push" or "pr" or "merge");
                 j.State = JobStates.Blocked;
                 j.Stage = gitUncertain ? "interrupted_git" : scopeBlocked ? "scope" : "remote_verification_failed";
                 j.Error = gitUncertain ? "Remote Git effects are uncertain; reconcile before retry." :

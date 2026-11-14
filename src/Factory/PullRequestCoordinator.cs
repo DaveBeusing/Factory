@@ -253,7 +253,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
     }
 
     internal async Task<string> RequireExactWorkflowAsync(PullRequestDecision d, ProjectInfo project, CancellationToken ct,
-        IReadOnlySet<string>? requiredChecks = null)
+        IReadOnlyList<RequiredCheckRun> requiredChecks)
     {
         if (d.WorkflowId <= 0 || project.Checks.Count == 0)
             throw new InvalidOperationException("A signed workflow ID and named checks are required.");
@@ -283,14 +283,19 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             $"{prefix}/check-suites/{suite}/check-runs?per_page=100"], ct);
         var checks = runs.EnumerateArray().SelectMany(page => page.GetProperty("check_runs").EnumerateArray()).ToArray();
         var checkIds = new List<long>();
-        foreach (var name in requiredChecks ?? project.Checks.Select(check => check.Name).ToHashSet(StringComparer.Ordinal))
+        if (requiredChecks.Count == 0 || requiredChecks.Any(check => check.AppId != 15368) ||
+            project.Checks.Any(check => !requiredChecks.Any(required => required.Name == check.Name)))
+            throw new InvalidOperationException("The required check rules must pin the authorized GitHub Actions app.");
+        foreach (var required in requiredChecks)
         {
+            var name = required.Name;
             var candidates = hostedJobs.Where(job => job.GetProperty("name").GetString() == name).ToArray();
             if (candidates.Length != 1 || candidates[0].GetProperty("conclusion").GetString() != "success")
                 throw new InvalidOperationException("The authorized workflow attempt did not pass: " + name);
             var link = candidates[0].GetProperty("check_run_url").GetString();
             var match = checks.Where(run => run.GetProperty("url").GetString() == link &&
-                run.GetProperty("app").GetProperty("id").GetInt64() == 15368 &&
+                run.GetProperty("app").GetProperty("id").GetInt64() == required.AppId &&
+                run.GetProperty("id").GetInt64() == required.RunId &&
                 run.GetProperty("head_sha").GetString() == d.HeadCommit &&
                 run.GetProperty("name").GetString() == name &&
                 run.GetProperty("conclusion").GetString() == "success").ToArray();
@@ -343,8 +348,9 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (pull.GetProperty("draft").GetBoolean() || pull.GetProperty("mergeable_state").GetString() != "clean" ||
             pull.GetProperty("base").GetProperty("sha").GetString() != d.BaseCommit)
             throw new InvalidOperationException("The PR is not clean on the authorized base.");
-        var checks = await verifier.RequiredChecksAsync(d.Repository, d.PullNumber, d.BaseBranch, d.HeadCommit, ct);
-        await RequireExactWorkflowAsync(d, project, ct, checks);
+        var requiredRuns = new List<RequiredCheckRun>();
+        var checks = await verifier.RequiredChecksAsync(d.Repository, d.PullNumber, d.BaseBranch, d.HeadCommit, ct, requiredRuns);
+        await RequireExactWorkflowAsync(d, project, ct, requiredRuns);
         if (!project.Checks.All(check => checks.Contains(check.Name)))
             throw new InvalidOperationException("A configured required check is missing.");
         var changed = await verifier.CompareFilePathsAsync(d.Repository, d.BaseCommit, d.HeadCommit, ct);

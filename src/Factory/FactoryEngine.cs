@@ -348,7 +348,7 @@ public sealed class FactoryEngine
         GitHubWorkerResultVerifier verifier, CancellationToken ct = default,
         IRemoteBaseReader? remote = null, IIntegrationPullRequestReader? pullRequests = null,
         bool coordinated = false, string? expectedMergeCommit = null,
-        Func<IReadOnlySet<string>, CancellationToken, Task<string>>? verifyWorkflow = null)
+        Func<IReadOnlyList<RequiredCheckRun>, CancellationToken, Task<string>>? verifyWorkflow = null)
     {
         var state = _store.Read();
         var job = state.Jobs.Single(j => j.Id == id);

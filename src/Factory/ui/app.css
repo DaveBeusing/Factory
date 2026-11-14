@@ -127,3 +127,75 @@
   .overview-home-hero .head-actions .button-primary:focus-visible svg { transform: none; }
   .overview-home-hero .head-actions .button-primary::before { display: none; }
 }
+
+:root { --interaction-ease: cubic-bezier(.22, 1, .36, 1); }
+
+:is(button, .button, .icon-button) {
+  transition: background-color .24s var(--interaction-ease), border-color .24s var(--interaction-ease),
+    color .24s var(--interaction-ease), box-shadow .28s var(--interaction-ease),
+    translate .24s var(--interaction-ease);
+}
+:is(button, .button, .icon-button):not(:disabled):is(:hover, :focus-visible) {
+  translate: 0 -1px;
+}
+:is(button, .button, .icon-button):not(:disabled):active { translate: 0 1px; }
+.button-primary {
+  background: linear-gradient(112deg, #a19bff, #bfabf6);
+  box-shadow: inset 0 1px 0 #fff5, 0 4px 12px #8f7be728;
+}
+.button-primary:not(:disabled):is(:hover, :focus-visible) { box-shadow: inset 0 1px 0 #fff7, 0 6px 18px #a687ff52; }
+.button-danger:not(:disabled):is(:hover, :focus-visible) { background-color: #59303c; border-color: #ac6473; }
+:is(.entity-card, .usage-card, tbody tr, .package-row) {
+  transition: background-color .25s var(--interaction-ease), border-color .25s var(--interaction-ease),
+    box-shadow .3s var(--interaction-ease);
+}
+.entity-card:hover { box-shadow: 0 8px 24px #0d0c1e55; }
+
+.field-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.field-heading:has(.preset-picker) { margin-bottom: 8px; }
+.field-heading:has(.preset-picker) label { margin: 0; }
+.preset-picker { position: relative; }
+.preset-picker summary { display: grid; place-items: center; list-style: none; cursor: pointer; }
+.preset-picker summary::-webkit-details-marker { display: none; }
+.preset-picker[open] summary { color: #e2dbff; background: #343053; }
+.preset-options {
+  position: absolute; inset: calc(100% + 6px) 0 auto auto; z-index: 2;
+  width: max-content; max-width: min(275px, calc(100vw - 85px));
+  padding: 5px; border: 1px solid #555276; border-radius: 12px; background: #21263a;
+  box-shadow: 0 12px 30px #090a1590;
+}
+.preset-options .palette-entry { border-radius: 7px; padding: 10px 12px; }
+.toast-stack { pointer-events: none; }
+.toast { overflow-wrap: anywhere; animation: toast-arrive .28s var(--interaction-ease) both; }
+@keyframes toast-arrive { from { opacity: 0; translate: 0 8px; } }
+.doctor-panel { margin-top: 17px; }
+.doctor-tool small { white-space: pre-line; overflow-wrap: anywhere; }
+.doctor-status { display: flex; gap: 10px; align-items: center; color: var(--sub); }
+
+.progress-track {
+  height: 8px; border-radius: 999px; background: #282e40; box-shadow: inset 0 1px 3px #080d2266;
+  transition: box-shadow .3s var(--interaction-ease), background-color .3s var(--interaction-ease);
+}
+.progress-track:hover { background-color: #343953; box-shadow: 0 0 12px #a89aff22, inset 0 1px 3px #080d2266; }
+.progress-fill {
+  position: relative; overflow: hidden; transform-origin: left center;
+  background: linear-gradient(105deg, #7774e0, #ab90ed 60%, #9cc8f4);
+  box-shadow: inset 0 1px 0 #fffc;
+  animation: progress-arrive .65s var(--interaction-ease) both;
+}
+.progress-fill::after, .pipeline-step.current::after {
+  content: ""; position: absolute; inset: 0; transform: translateX(-100%);
+  background: linear-gradient(100deg, transparent 15%, #f1edff70 54%, transparent 85%);
+}
+.progress-track:hover .progress-fill::after { animation: progress-flow 1.35s ease-in-out infinite; }
+.pipeline-step { position: relative; overflow: hidden; transition: background-color .25s var(--interaction-ease); }
+.pipeline-step.passed { background: linear-gradient(105deg, #7774e0, #b39ef4); }
+.pipeline-step.current::after { animation: progress-flow 1.9s ease-in-out infinite; }
+@keyframes progress-arrive { from { transform: scaleX(0); } }
+@keyframes progress-flow { to { transform: translateX(100%); } }
+
+@media (prefers-reduced-motion: reduce) {
+  :is(button, .button, .icon-button):not(:disabled):is(:hover, :focus-visible, :active) { translate: none; }
+  .toast, .progress-fill, .progress-track:hover .progress-fill::after,
+  .pipeline-step.current::after, .spinner { animation: none; }
+}

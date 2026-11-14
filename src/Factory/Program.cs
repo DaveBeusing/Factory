@@ -108,19 +108,15 @@ Environment: FACTORY_HOME overrides the local state directory.
                 return 0;
             case "doctor":
             {
-                var tools = new[] { "dotnet", "git", "codex", "gh" };
-                foreach (var tool in tools)
+                var report = await Doctor.InspectAsync(Home);
+                foreach (var tool in report.Tools)
                 {
-                    try
-                    {
-                        var r = Commands.Run(tool, ["--version"], Environment.CurrentDirectory, 15);
-                        var location = tool == "codex" && r.Ok ? $" [{Commands.ResolveAgentExecutable()}]" : "";
-                        Console.WriteLine($"{tool}: {(r.Ok ? r.Output.Trim() : "unavailable")}{location}");
-                    }
-                    catch (Exception ex) { Console.WriteLine($"{tool}: unavailable ({ex.Message})"); }
+                    var status = tool.Version ?? (tool.Error is null ? "unavailable" : $"unavailable ({tool.Error})");
+                    var location = tool.Executable is null ? "" : $" [{tool.Executable}]";
+                    Console.WriteLine($"{tool.Name}: {status}{location}");
                 }
-                Console.WriteLine("State: " + Home);
-                Console.WriteLine("API token file: " + Path.Combine(Home, "settings.json"));
+                Console.WriteLine("State: " + report.StateDirectory);
+                Console.WriteLine("API token file: " + report.SettingsFile);
                 return 0;
             }
             case "init":

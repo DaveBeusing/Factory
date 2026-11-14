@@ -22,7 +22,7 @@ internal static class ScopedPlanTests
             Commit("Initial master");
             var home = Path.Combine(root, "state");
             var store = new StateStore(home);
-            var first = new ProjectInfo { Name = "First", Path = repository };
+            var first = new ProjectInfo { Name = "First", Path = repository, Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
             var second = new ProjectInfo { Name = "Second" };
             var goal = new FactoryGoal { ProjectId = first.Id, Objective = "Draft planning fixture" };
             var foreign = new FactoryGoal { ProjectId = second.Id, Objective = "Foreign draft" };
@@ -65,7 +65,7 @@ internal static class ScopedPlanTests
                 return new
                 {
                     model = "fixture-model", done = true,
-                    response = """{"packages":[{"title":"Provider package","description":"Fixture","files":["README.md"]}]}""",
+                    response = """{"contractVersion":1,"packages":[{"title":"Provider package","description":"Fixture","files":["README.md"],"acceptanceEvidence":[{"criterion":"Verified","check":"fixture"}]}]}""",
                     prompt_eval_count = 30, eval_count = 10
                 };
             });
@@ -102,8 +102,8 @@ internal static class ScopedPlanTests
             var goalRevision = payload.RootElement.GetProperty("goalRevision").GetString()!;
             var draft = new FactoryPlan
             {
-                GoalRevision = goalRevision,
-                Packages = [new PlannedPackage { Title = "First package", Description = "Review the fixture scope", Files = ["README.md"] }]
+                ContractVersion = 1, GoalRevision = goalRevision,
+                Packages = [new PlannedPackage { Title = "First package", Description = "Review the fixture scope", AcceptanceEvidence = [new("Verified", "fixture")], Files = ["README.md"] }]
             };
             await Request(bob.Token, HttpMethod.Put, path, HttpStatusCode.Forbidden, draft);
             await Request(alice.Token, HttpMethod.Get, otherPath, HttpStatusCode.NotFound);
@@ -125,7 +125,7 @@ internal static class ScopedPlanTests
             var preflight = WorkPackagePreflight.Inspect(store.Read(), first, goal);
             var legacy = new FactoryPlan
             {
-                GoalId = goal.Id, ProjectId = first.Id, GoalRevision = goalRevision, Revision = Guid.NewGuid(),
+                GoalId = goal.Id, ProjectId = first.Id, ContractVersion = 1, GoalRevision = goalRevision, Revision = Guid.NewGuid(),
                 BaseCommit = preflight.BaseCommit, Preflight = preflight,
                 Packages = [new PlannedPackage { Title = "Reviewed legacy package", Description = "Legacy work", Files = ["README.md"] }]
             };
@@ -198,7 +198,7 @@ internal static class ScopedPlanTests
             store.Change(state => state.Goals.Add(unscopedGoal));
             var unscopedPlan = Planning.SaveRevision(store, new FactoryPlan
             {
-                GoalId = unscopedGoal.Id, ProjectId = first.Id, BaseCommit = current.BaseCommit,
+                ContractVersion = 1, GoalId = unscopedGoal.Id, ProjectId = first.Id, BaseCommit = current.BaseCommit,
                 GoalRevision = Planning.GoalRevision(unscopedGoal), Packages = current.Packages
             }, first);
             var unscopedApproval = approval with { SourceRevision = unscopedPlan.Revision!.Value };

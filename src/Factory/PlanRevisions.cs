@@ -64,6 +64,20 @@ public sealed partial class StateStore
             JsonSerializer.Deserialize<FactoryPlan>(content, Json.Options)?.ContractVersion == 1;
     }
 
+    internal static void VerifySpecificationAdoption(SqliteConnection db, SqliteTransaction tx, FactoryGoal goal,
+        FactoryPlan plan, IReadOnlyList<FactoryJob> jobs)
+    {
+        if (goal.State == "draft" && !jobs.Any(j => j.GoalId == goal.Id)) return;
+        if (goal.State != "active" || plan.ContractVersion != 1 || !SpecificationContracts.CanRevise(goal, jobs))
+            throw new InvalidOperationException("Existing jobs prevent specification replacement.");
+        using var adopted = Command(db, tx, """
+            SELECT reference FROM lifecycle_audit WHERE entity_kind='plan' AND project_id=$project
+                AND entity_id=$goal AND reason_code='PlanAdopted' ORDER BY rowid DESC LIMIT 1;
+            """, ("$project", goal.ProjectId), ("$goal", goal.Id));
+        if (adopted.ExecuteScalar() is not string previous || previous == plan.Revision.ToString())
+            throw new InvalidOperationException("A new specification revision must be reviewed before replacing jobs.");
+    }
+
     internal static FactoryPlan InsertPlanRevision(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan,
         string actor = "local-operator")
     {

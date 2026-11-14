@@ -1081,8 +1081,11 @@ public sealed partial class StateStore
         job.UpdatedAt = DateTimeOffset.UtcNow;
     });
 
-    public FactoryJob AddJob(FactoryJob job) => Change(s =>
+    public FactoryJob AddJob(FactoryJob job) => Change((s, db, tx) =>
     {
+        if (HasAdoptedSpecification(db, tx, job.GoalId) ||
+            (job.GoalId is { } goal && RequiresIntakePlanAdoption(db, tx, goal)))
+            throw new InvalidOperationException("Add jobs through a reviewed plan revision for this goal.");
         if (!s.Projects.Any(p => p.Id == job.ProjectId))
             throw new ArgumentException("Project does not exist");
         foreach (var dependency in job.DependsOn)

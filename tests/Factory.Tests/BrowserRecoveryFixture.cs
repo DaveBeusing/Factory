@@ -30,7 +30,7 @@ internal static class BrowserRecoveryFixture
     public static object SeedProjectPlanning(string home, string repository)
     {
         var store = new StateStore(home);
-        var project = new ProjectInfo { Name = "Planner project", Path = repository };
+        var project = new ProjectInfo { Name = "Planner project", Path = repository, Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
         var other = new ProjectInfo { Name = "Viewer project" };
         var foreign = new FactoryGoal { ProjectId = other.Id, Objective = "Other project goal" };
         store.Change(state =>

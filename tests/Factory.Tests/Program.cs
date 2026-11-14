@@ -732,7 +732,7 @@ Test("Master-first preflight finds existing code and preserves adoption review",
         Assert(GitOperations.Head(repo) != master);
 
         var store = new StateStore(Path.Combine(root, "state"));
-        var project = new ProjectInfo { Name = "preflight", Path = repo, BaseBranch = "master" };
+        var project = new ProjectInfo { Name = "preflight", Path = repo, BaseBranch = "master" , Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
         var goal = new FactoryGoal
         {
             ProjectId = project.Id, Objective = "Finalize GoalPlanner implementation",
@@ -756,10 +756,10 @@ Test("Master-first preflight finds existing code and preserves adoption review",
 
         var plan = MissionControlManager.SavePlan(store, new FactoryPlan
         {
-            GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
+            ContractVersion = 1, GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
             Packages = [new PlannedPackage
             {
-                Title = "Complete existing GoalPlanner", Description = "Finish and test existing code",
+                Title = "Complete existing GoalPlanner", Description = "Finish and test existing code", AcceptanceEvidence = [new("Behavior verified", "fixture")],
                 Files = ["src/GoalPlanner.cs"]
             }]
         });
@@ -831,13 +831,13 @@ Test("Master-first preflight rejects stale master and non-master projects", () =
         Git("add", ".");
         Git("commit", "-m", "Initial");
         var store = new StateStore(Path.Combine(root, "state"));
-        var project = new ProjectInfo { Name = "stale", Path = repo };
+        var project = new ProjectInfo { Name = "stale", Path = repo , Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
         var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Improve diagnostics" };
         store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
         var plan = MissionControlManager.SavePlan(store, new FactoryPlan
         {
-            GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
-            Packages = [new PlannedPackage { Title = "Diagnostics", Description = "Improve output",
+            ContractVersion = 1, GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
+            Packages = [new PlannedPackage { Title = "Diagnostics", Description = "Improve output", AcceptanceEvidence = [new("Behavior verified", "fixture")],
                 Files = ["README.md"] }]
         });
         try
@@ -904,13 +904,13 @@ Test("Preflight binds the live remote master and matching PR head to the registe
         GitOperations.Git(repo, "config", $"url.{bareUrl}.insteadOf", registered);
 
         var store = new StateStore(Path.Combine(root, "state"));
-        var project = new ProjectInfo { Name = "Bound fixture", Path = repo, Origin = registered };
+        var project = new ProjectInfo { Name = "Bound fixture", Path = repo, Origin = registered , Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
         var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Improve diagnostics" };
         store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
         var plan = MissionControlManager.SavePlan(store, new FactoryPlan
         {
-            GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
-            Packages = [new() { Title = "Diagnostics", Description = "Improve diagnostics", Files = ["README.md"] }]
+            ContractVersion = 1, GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
+            Packages = [new() { Title = "Diagnostics", Description = "Improve diagnostics", AcceptanceEvidence = [new("Behavior verified", "fixture")], Files = ["README.md"] }]
         });
         var original = GitOperations.Head(repo);
         Assert(plan.Preflight?.RemoteMasterStatus == "matched" && plan.Preflight.RemoteMasterCommit == original,
@@ -981,15 +981,15 @@ await TestAsync("Plan adoption requires the reviewed plan and current goal revis
         Git("-c", "user.name=Factory Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Initial");
 
         var store = new StateStore(Path.Combine(root, "state"));
-        var project = new ProjectInfo { Name = "Plan revisions", Path = repo };
+        var project = new ProjectInfo { Name = "Plan revisions", Path = repo , Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
         var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Original diagnostics", AcceptanceCriteria = ["Old criterion"] };
         store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
 
         FactoryPlan Draft(FactoryGoal snapshot, string title, Guid? revision = null) => new()
         {
-            GoalId = snapshot.Id, ProjectId = snapshot.ProjectId, Revision = revision,
+            ContractVersion = 1, GoalId = snapshot.Id, ProjectId = snapshot.ProjectId, Revision = revision,
             GoalRevision = Planning.GoalRevision(snapshot),
-            Packages = [new() { Title = title, Description = "Reviewed fixture package", Files = ["README.md"] }]
+            Packages = [new() { Title = title, Description = "Reviewed fixture package", AcceptanceEvidence = [new("Behavior verified", "fixture")], Files = ["README.md"] }]
         };
         void Reject(Action action, string message)
         {
@@ -4114,7 +4114,7 @@ internal sealed class PausedPlanAgent : IAgentRuntime
         return new AgentRunResult
         {
             Success = true,
-            FinalText = """{"packages":[{"title":"Generated","description":"Fixture proposal","files":["README.md"]}]}"""
+            FinalText = """{"contractVersion":1,"packages":[{"title":"Generated","description":"Fixture proposal","files":["README.md"],"acceptanceEvidence":[{"criterion":"Verified","check":"fixture"}]}]}"""
         };
     }
 }

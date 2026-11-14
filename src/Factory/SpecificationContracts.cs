@@ -7,6 +7,23 @@ public sealed record SpecificationChange(string Kind, string Package,
 
 internal static class SpecificationContracts
 {
+    internal static bool CanRevise(FactoryGoal goal, IReadOnlyList<FactoryJob> jobs)
+    {
+        if (goal.State == "draft") return true;
+        if (goal.State != "active") return false;
+        var current = jobs.Where(job => job.GoalId == goal.Id).ToArray();
+        return current.Length > 0 && current.All(job => job.State == JobStates.Queued &&
+            job.Attempt == 0 && job.LeaseOwner.Length == 0) &&
+            !jobs.Any(job => job.GoalId != goal.Id && current.Any(old => job.DependsOn.Contains(old.Id)));
+    }
+
+    internal static void ValidateNew(FactoryPlan plan)
+    {
+        if (plan.ContractVersion != 1)
+            throw new ArgumentException("Save new plan revisions as specification contract version 1.");
+        Planning.Validate(plan);
+    }
+
     internal static void Validate(FactoryPlan plan)
     {
         if (plan.ContractVersion == 0) return;

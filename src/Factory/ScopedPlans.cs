@@ -44,7 +44,7 @@ public sealed partial class StateStore
             draft.ProjectId == Guid.Empty ? null : draft.ProjectId);
         if (draft.GoalId != Guid.Empty && draft.GoalId != goalId) throw new ScopedProjectRejected(DraftGoalStatus.NotFound);
         VerifyPlanSave(scope, draft);
-        Planning.Validate(draft);
+        SpecificationContracts.ValidateNew(draft);
         draft.ProjectId = projectId;
         draft.GoalId = goalId;
         draft.Preflight = WorkPackagePreflight.Inspect(snapshot, scope.Project, scope.Goal);
@@ -137,6 +137,8 @@ public sealed partial class StateStore
         VerifyPlanSave(current, draft);
         verify?.Invoke(db, tx, current);
         VerifyPlanCheckout(scope.Project, current.Project, draft.BaseCommit);
+        if (!SpecificationContracts.CanRevise(current.Goal, Load(db, tx).Jobs))
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Existing jobs prevent specification replacement.");
         VerifySpecification(db, tx, draft);
         cancellation.ThrowIfCancellationRequested();
         InsertPlanRevision(db, tx, draft, current.SubjectId.ToString());
@@ -165,6 +167,7 @@ public sealed partial class StateStore
         var current = ReadPlanScope(db, tx, verifier, projectId, goalId);
         RequireDraftPlanTarget(current);
         Planning.VerifyAdoptionTarget(plan, current.StoredPlan, scope.Project, current.Project, current.Goal);
+        VerifySpecificationAdoption(db, tx, current.Goal, plan, Load(db, tx).Jobs);
         VerifySpecification(db, tx, plan);
         if (DecidePlanAdoption(db, tx, plan, current.SubjectId.ToString()) != PolicyOutcome.Allow)
         {
@@ -174,6 +177,8 @@ public sealed partial class StateStore
         using var next = Command(db, tx, "SELECT COALESCE(MAX(position),-1)+1 FROM jobs;");
         var position = Convert.ToInt32(next.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
         var entity = Entities.Single(map => map.Type == typeof(FactoryJob));
+        if (current.Goal.State == "active")
+            Execute(db, tx, "DELETE FROM jobs WHERE goal_id=$goal;", ("$goal", goalId));
         foreach (var job in jobs) Upsert(db, tx, entity, job, position++);
         Execute(db, tx, "UPDATE goals SET state='active' WHERE id=$goal AND project_id=$project;",
             ("$goal", goalId), ("$project", projectId));
@@ -258,7 +263,7 @@ public sealed partial class StateStore
 
     private static void RequireDraftPlanTarget(PlanScope scope)
     {
-        if (scope.Goal.State != "draft" || scope.Project.Status == "archived")
+        if (scope.Goal.State is not ("draft" or "active") || scope.Project.Status == "archived")
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Only drafts in non-archived projects can be changed.");
     }
 

@@ -99,7 +99,7 @@ public static class Planning
             "Work packages must be independently reviewable and based on master, never stacked on other PR branches. " +
             "Return ONLY valid JSON with a packages array, each item with title, description, risk (low|medium|high), " +
             "priority (0..100), files string array and dependsOn integer array (zero-based indices). " +
-            "For a versioned specification set contractVersion to 1 and include acceptanceEvidence " +
+            "Set contractVersion to 1 and include acceptanceEvidence " +
             "(objects with criterion and check) using these configured check names: " +
             Json.Stringify(p.Checks.Select(c => c.Name).ToArray()) + ". " +
             "Describe existing code evidence, completion gaps and relevant PRs in each description. " +
@@ -113,7 +113,7 @@ public static class Planning
         plan.ProjectId = p.Id; plan.GoalId = goal.Id;
         plan.BaseCommit = preflight.BaseCommit;
         plan.Preflight = preflight;
-        Validate(plan);
+        SpecificationContracts.ValidateNew(plan);
         plan.GoalRevision = goalRevision;
         plan.Revision = existingRevision;
         return plan;
@@ -124,7 +124,8 @@ public static class Planning
         return store.Change((state, db, tx) =>
         {
             var goal = state.Goals.Single(g => g.Id == plan.GoalId);
-            if (goal.State != "draft" || goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
+            if (!SpecificationContracts.CanRevise(goal, state.Jobs) || goal.ProjectId != plan.ProjectId ||
+                GoalRevision(goal) != plan.GoalRevision)
                 throw new InvalidOperationException("Goal changed; reopen the current goal before saving its plan");
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             if (project.Path != source.Path || project.Origin != source.Origin ||
@@ -132,7 +133,7 @@ public static class Planning
                 throw new InvalidOperationException("Project checkout or master changed; refresh the plan");
             if (store.ReadPlanRevision(db, tx, goal.Id)?.Revision != plan.Revision)
                 throw new InvalidOperationException("Plan changed; reopen the latest revision before saving");
-            Validate(plan);
+            SpecificationContracts.ValidateNew(plan);
             StateStore.VerifySpecification(db, tx, plan, state);
             return StateStore.InsertPlanRevision(db, tx, plan);
         });
@@ -197,9 +198,11 @@ public static class Planning
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             VerifyAdoptionTarget(plan, StateStore.ReadStoredPlanRevision(db, tx, goalId),
                 requestedProject, project, goal);
+            StateStore.VerifySpecificationAdoption(db, tx, goal, plan, state.Jobs);
             StateStore.VerifySpecification(db, tx, plan, state);
             if (StateStore.DecidePlanAdoption(db, tx, plan, "local-operator") != PolicyOutcome.Allow)
                 return null;
+            state.Jobs.RemoveAll(job => job.GoalId == goalId);
             var jobs = BuildAdoptedJobs(plan, goal, mode);
             state.Jobs.AddRange(jobs);
             goal.State = "active";
@@ -254,7 +257,7 @@ public static class Planning
     internal static void VerifyAdoptionTarget(FactoryPlan plan, FactoryPlan? current,
         ProjectInfo requestedProject, ProjectInfo project, FactoryGoal goal)
     {
-        if (goal.State != "draft") throw new InvalidOperationException("Goal already adopted");
+        if (goal.State is not ("draft" or "active")) throw new InvalidOperationException("Goal cannot adopt a plan");
         if (goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
             throw new InvalidOperationException("Goal changed; review and save or regenerate its plan before adoption");
         if (current?.Revision != plan.Revision)

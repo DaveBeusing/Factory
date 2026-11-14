@@ -687,6 +687,7 @@ browserTest('plans and adopts only the reviewed revision in the granted project'
   await form.getByLabel('Package title').fill('Initial reviewed package');
   await form.getByLabel('Description / acceptance criteria').fill('Record the scoped result');
   await form.getByLabel('Expected file paths, one per line').fill('scoped.txt');
+  await form.getByLabel('Acceptance checks (criterion | check name)').fill('Verify scoped output | fixture');
   await form.getByRole('button', { name: 'Save changes' }).click();
   await inspector.getByRole('button', { name: 'Save plan' }).click();
   await inspector.getByText('Initial reviewed package', { exact: true }).waitFor();
@@ -695,7 +696,7 @@ browserTest('plans and adopts only the reviewed revision in the granted project'
   await form.getByText(prior.plan.revision, { exact: true }).waitFor();
   const packageUpdate = { ...prior.plan.packages[0], title: 'Replacement reviewed package' };
   const replacement = await request(fixture.planner, planRoute, { method: 'PUT',
-    data: { packages: [packageUpdate], goalRevision: prior.goalRevision, revision: prior.plan.revision } });
+    data: { contractVersion: 1, packages: [packageUpdate], goalRevision: prior.goalRevision, revision: prior.plan.revision } });
   assert.ok(replacement.ok(), await replacement.text());
   const nextPlan = await replacement.json();
   await form.getByRole('button', { name: 'Adopt reviewed plan' }).click();

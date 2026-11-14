@@ -8,8 +8,11 @@ namespace Factory;
 public sealed record PullRequestDecision(Guid ProjectId, Guid JobId, string ProjectRevision, string Repository,
     string BaseBranch, string BaseCommit, string HeadCommit, string Account, string Action, string Method,
     int PullNumber, DateTimeOffset ExpiresAt, string ScopeRevision, bool BranchChecksAvailable = true,
-    string? WorkflowFile = null, long WorkflowId = 0);
+    string? WorkflowFile = null, long WorkflowId = 0, WorkflowEventProof? EventProof = null);
 public sealed record SignedPullRequestDecision(PullRequestDecision Decision, string Signature);
+public sealed record WorkflowEvent(string Repository, long WorkflowId, long RunId, int Attempt,
+    long SuiteId, int PullNumber, string BaseBranch, string BaseCommit, string HeadCommit);
+public sealed record WorkflowEventProof(WorkflowEvent Event, string Signature);
 
 internal sealed class PullRequestCoordinator(StateStore store, FactorySettings settings,
     Func<string[], int, CancellationToken, Task<CommandResult>> github)
@@ -273,6 +276,10 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         var suite = latest.GetProperty("check_suite_id").GetInt64();
         var runId = latest.GetProperty("id").GetInt64();
         var attempt = latest.GetProperty("run_attempt").GetInt32();
+        var missingLinks = latest.GetProperty("pull_requests").GetArrayLength() == 0;
+        if (missingLinks)
+            VerifyWorkflowEvent(d.EventProof, new WorkflowEvent(d.Repository, d.WorkflowId, runId, attempt,
+                suite, d.PullNumber, d.BaseBranch, d.BaseCommit, d.HeadCommit));
         var jobs = await ReadAsync(["api", "--paginate", "--slurp",
             $"{prefix}/actions/runs/{runId}/attempts/{attempt}/jobs?per_page=100"], ct);
         var hostedJobs = jobs.EnumerateArray().SelectMany(page => page.GetProperty("jobs").EnumerateArray()).ToArray();
@@ -301,8 +308,24 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             checkIds.Add(match[0].GetProperty("id").GetInt64());
         }
         return Json.Stringify(new { d.WorkflowId, runId, attempt, suite, d.PullNumber, d.HeadCommit, d.BaseCommit,
-            association = latest.GetProperty("pull_requests").GetArrayLength() == 0 ? "required-check-node" : "workflow-and-required-check-node",
+            association = missingLinks ? "signed-workflow-event" : "github-workflow-link",
+            eventProof = missingLinks ? d.EventProof : null,
             checkIds });
+    }
+
+    private static void VerifyWorkflowEvent(WorkflowEventProof? proof, WorkflowEvent expected)
+    {
+        var key = Environment.GetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PUBLIC_KEY");
+        if (proof is null || proof.Event != expected || string.IsNullOrWhiteSpace(key))
+            throw new InvalidOperationException("An authoritative workflow event proof for the exact PR and base is required.");
+        using var rsa = RSA.Create();
+        rsa.ImportFromPem(key);
+        var signature = new byte[rsa.KeySize / 8];
+        if (proof.Signature is null || !Convert.TryFromBase64String(proof.Signature, signature, out var length) ||
+            length != signature.Length ||
+            !rsa.VerifyData(Encoding.UTF8.GetBytes(Json.Stringify(proof.Event)), signature,
+                HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
+            throw new InvalidOperationException("The workflow event proof signature is invalid.");
     }
 
     private static bool MatchesPullRequest(JsonElement links, PullRequestDecision decision)

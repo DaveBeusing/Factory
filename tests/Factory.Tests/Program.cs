@@ -1925,6 +1925,7 @@ await TestAsync("Hosted merge receipts require signed base lineage and reviewed 
 await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed attempts and wrong apps", async () =>
 {
     var home = Directory.CreateTempSubdirectory("factory-workflow-host-");
+    var oldEventKey = Environment.GetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PUBLIC_KEY");
     try
     {
         var head = new string('a', 40);
@@ -1988,8 +1989,24 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
         var receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
         Assert(receipt.Contains(head) && receipt.Contains("\"workflowId\": 7") && receipt.Contains("132435614163"));
         omitPullLinks = true;
+        await Reject("authoritative workflow event proof");
+        using var eventKey = System.Security.Cryptography.RSA.Create(2048);
+        Environment.SetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PUBLIC_KEY", eventKey.ExportSubjectPublicKeyInfoPem());
+        var workflowEvent = new WorkflowEvent("example/repo", 7, 8, 2, 12, 42, "master", basis, head);
+        WorkflowEventProof Sign(WorkflowEvent evidence) => new(evidence, Convert.ToBase64String(eventKey.SignData(
+            System.Text.Encoding.UTF8.GetBytes(Json.Stringify(evidence)),
+            System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss)));
+        foreach (var wrong in new[] { workflowEvent with { PullNumber = 41 }, workflowEvent with { BaseCommit = head },
+            workflowEvent with { Attempt = 1 } })
+        {
+            decision = decision with { EventProof = Sign(wrong) };
+            await Reject("authoritative workflow event proof");
+        }
+        decision = decision with { EventProof = new(workflowEvent, "invalid") };
+        await Reject("signature is invalid");
+        decision = decision with { EventProof = Sign(workflowEvent) };
         receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
-        Assert(receipt.Contains("\"association\": \"required-check-node\"") && receipt.Contains("132435614163"));
+        Assert(receipt.Contains("\"association\": \"signed-workflow-event\"") && receipt.Contains("132435614163"));
         required = [new("build", 15368, "CR_other_pull")];
         await Reject("trusted app");
         required = selected;
@@ -2062,7 +2079,11 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
             Assert(writes == 1);
         }
     }
-    finally { try { home.Delete(true); } catch { } }
+    finally
+    {
+        Environment.SetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PUBLIC_KEY", oldEventKey);
+        try { home.Delete(true); } catch { }
+    }
 });
 
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));

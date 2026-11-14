@@ -117,7 +117,7 @@ if (args.FirstOrDefault() == "--safe-mode")
             Console.WriteLine("""{"type":"result","subtype":"success","is_error":false,"result":"fixture","usage":{"input_tokens":1,"output_tokens":1}}""");
             return 0;
         default:
-            return 24;
+            return 25;
     }
 }
 
@@ -126,7 +126,7 @@ if (Environment.GetEnvironmentVariable("FACTORY_PREFLIGHT_GH_HEAD") is { } fixtu
 {
     var repository = Array.IndexOf(args, "--repo");
     if (repository < 0 || args.ElementAtOrDefault(repository + 1) != "github.com/fixture/registered")
-        return 24;
+        return 25;
     if (kind == "issue")
     {
         Console.WriteLine("[]");
@@ -1626,6 +1626,71 @@ Test("Review admission survives restart and cannot exceed three cycles", () =>
     finally { try { home.Delete(true); } catch { } }
 });
 
+Test("Signed review approval survives restart and follows the exact reviewed head", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-trusted-review-");
+    var oldKey = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
+    try
+    {
+        using var key = System.Security.Cryptography.RSA.Create(2048);
+        Environment.SetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY", key.ExportSubjectPublicKeyInfoPem());
+        var repo = Directory.CreateDirectory(Path.Combine(home.FullName, "repo")).FullName;
+        GitOperations.Git(repo, "init");
+        GitOperations.Git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "commit", "--allow-empty", "-m", "Reviewed head");
+        var head = GitOperations.Head(repo);
+        var store = new StateStore(Path.Combine(home.FullName, "state"));
+        var project = new ProjectInfo { Checks = [new CheckCommand { Name = "fixture", Executable = "fixture" }] };
+        var job = new FactoryJob { ProjectId = project.Id, Worktree = repo, HeadSha = head, SessionId = "builder-session" };
+        var fence = store.Change((s, db, tx) =>
+        {
+            s.Projects.Add(project);
+            s.Jobs.Add(job);
+            return JobRecovery.Assign(job, "builder", 120, local: true);
+        });
+        store.Change((s, db, tx) =>
+        {
+            StateStore.RecordExecutionProvenance(db, tx, project, s.Jobs.Single(), "fixture");
+            return true;
+        });
+        var cycle = store.BeginReviewCycle(job.Id, fence, 3);
+        store.FinishReviewCycle(job.Id, fence, cycle, new QualityResult
+        {
+            HeadSha = head, Passed = true, Checks = [new CheckReport { Name = "fixture" }],
+            ProjectContractRevision = SpecificationContracts.ProjectRevision(project)
+        });
+        store.UpdateJob(job.Id, current =>
+        {
+            current.State = JobStates.CompletedLocal;
+            current.LeaseOwner = "";
+            current.LeaseToken = "";
+            current.LeaseUntil = null;
+        });
+        var approval = new ReviewApproval(project.Id, job.Id, fence.Generation, cycle, head, ReviewPolicy.Revision,
+            "reviewer", "reviewer-session", "builder", "builder-session", DateTimeOffset.UtcNow.AddMinutes(5),
+            "PASS", SpecificationContracts.ProjectRevision(project));
+        var signature = Convert.ToBase64String(key.SignData(System.Text.Encoding.UTF8.GetBytes(Json.Stringify(approval)),
+            System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss));
+        Assert(!store.IsReviewApproved(job.Id));
+        try
+        {
+            store.RecordTrustedReview(new(approval with { Reviewer = "different-reviewer" }, signature));
+            throw new Exception("A modified signed approval was accepted.");
+        }
+        catch (ArgumentException) { }
+        store.RecordTrustedReview(new(approval, signature));
+        Assert(new StateStore(store.Home).IsReviewApproved(job.Id));
+        GitOperations.Git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "commit", "--allow-empty", "-m", "Different head");
+        Assert(!store.IsReviewApproved(job.Id));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY", oldKey);
+        try { home.Delete(true); } catch { }
+    }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -2619,7 +2684,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 24, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 25, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -3239,7 +3304,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 24);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 25);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3621,6 +3686,22 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
         Assert(blocked.TokensIn == 10, "Remote usage accounting was dropped");
         Assert(!await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier()),
             "A stale worker completion was replayed");
+        new StateStore(home).Change((_, db, tx) =>
+        {
+            using var query = db.CreateCommand();
+            query.Transaction = tx;
+            query.CommandText = "SELECT head_sha,report FROM review_cycles WHERE job_id=$job AND generation=$generation;";
+            query.Parameters.AddWithValue("$job", job.Id.ToString());
+            query.Parameters.AddWithValue("$generation", claim.Job.ExecutionGeneration);
+            using var rows = query.ExecuteReader();
+            Assert(rows.Read() && rows.GetString(0) == finished.HeadSha);
+            using var report = System.Text.Json.JsonDocument.Parse(rows.GetString(1));
+            Assert(report.RootElement.GetProperty("assurance").GetString() == "UNKNOWN");
+            Assert(report.RootElement.GetProperty("outcome").GetString() == JobStates.Blocked);
+            Assert(report.RootElement.GetProperty("findings")[0].GetProperty("role").GetString() == "controller");
+            Assert(!rows.Read());
+            return true;
+        });
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3745,7 +3826,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 24);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 25);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

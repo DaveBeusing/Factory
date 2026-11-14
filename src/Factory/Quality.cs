@@ -12,6 +12,7 @@ public sealed class QualityResult
     public List<ReviewFinding> ReviewFindings { get; set; } = [];
     public bool HasIndependentApproval => Passed && ReviewPolicy.HasIndependentApproval(this);
     public string HeadSha { get; set; } = "";
+    public string ProjectContractRevision { get; set; } = "";
     public List<CheckReport> Checks { get; set; } = [];
     public List<string> Findings { get; set; } = [];
     public Dictionary<string, string> Reviews { get; set; } = [];
@@ -37,7 +38,11 @@ public sealed class QualityEngine
     }
     public async Task<QualityResult> GateAsync(ProjectInfo project, FactoryJob job, CancellationToken ct)
     {
-        var quality = new QualityResult { HeadSha = GitOperations.Head(job.Worktree) };
+        var quality = new QualityResult
+        {
+            HeadSha = GitOperations.Head(job.Worktree),
+            ProjectContractRevision = SpecificationContracts.ProjectRevision(project)
+        };
         if (project.Checks.Count == 0)
         {
             quality.Findings.Add("No executable project checks configured");

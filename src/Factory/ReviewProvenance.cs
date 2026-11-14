@@ -42,7 +42,7 @@ public sealed partial class StateStore
                 job_id TEXT NOT NULL, cycle INTEGER NOT NULL, payload TEXT NOT NULL, signature TEXT NOT NULL,
                 PRIMARY KEY(job_id,cycle), FOREIGN KEY(job_id,cycle) REFERENCES review_cycles(job_id,cycle)
             );
-            PRAGMA user_version=24;
+            PRAGMA user_version=25;
             """);
 
     internal static int ReviewCyclesUsed(SqliteConnection db, SqliteTransaction tx, Guid id)
@@ -106,7 +106,10 @@ public sealed partial class StateStore
         var payload = Json.Stringify(proof);
         using var signer = RSA.Create();
         signer.ImportFromPem(key);
-        if (!signer.VerifyData(Encoding.UTF8.GetBytes(payload), Convert.FromBase64String(input.Signature),
+        var signature = new byte[signer.KeySize / 8];
+        if (input.Signature is null ||
+            !Convert.TryFromBase64String(input.Signature, signature, out var written) || written != signature.Length ||
+            !signer.VerifyData(Encoding.UTF8.GetBytes(payload), signature,
             HashAlgorithmName.SHA256, RSASignaturePadding.Pss))
             throw new ArgumentException("Invalid trusted review signature.");
         using var db = Open();
@@ -130,7 +133,8 @@ public sealed partial class StateStore
             if (!row.Read() || row.IsDBNull(0) || row.GetString(1) != proof.Builder)
                 throw new InvalidOperationException("The approval does not match the builder provenance.");
             var report = JsonSerializer.Deserialize<QualityResult>(row.GetString(0), Json.Options);
-            if (report is null || !report.Passed || report.HeadSha != proof.Commit || report.Findings.Count != 0 ||
+            if (report is null || !report.Passed || report.HeadSha != proof.Commit ||
+                report.ProjectContractRevision != proof.ProjectContractRevision || report.Findings.Count != 0 ||
                 project.Checks.Count == 0 || report.Checks.Any(c => c.ExitCode != 0) ||
                 !report.Checks.Select(c => c.Name).SequenceEqual(project.Checks.Select(c => c.Name)))
                 throw new InvalidOperationException("Current deterministic quality evidence is required.");
@@ -148,7 +152,9 @@ public sealed partial class StateStore
         var head = result is not null && result.Id == job.Id && result.ProjectId == job.ProjectId &&
             result.Attempt == job.Attempt && IntegrationVerifier.IsCommitSha(result.HeadSha) ? result.HeadSha : null;
         var report = Json.Stringify(new { assurance = "UNKNOWN", head, outcome = job.State,
-            findings = new[] { job.Error }, workerReport = request.Evidence is { Length: <= 1_000_000 } ? request.Evidence : null });
+            findings = string.IsNullOrEmpty(job.Error) ? Array.Empty<ReviewFinding>() :
+                new[] { new ReviewFinding("controller", job.Error) },
+            workerReport = request.Evidence is { Length: <= 1_000_000 } ? request.Evidence : null });
         Execute(db, tx, """
             UPDATE review_cycles SET head_sha=$head, report=$report
             WHERE job_id=$job AND generation=$generation AND report IS NULL;

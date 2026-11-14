@@ -339,25 +339,10 @@ public sealed class FactoryEngine
         if (GitOperations.Head(worktree) != report.HeadSha)
             throw new ScopeViolationException("Commit changed after quality verification");
         Stage(id, fence,JobStates.AwaitingApproval, "integration");
-        // Push is a side effect requiring explicit operator opt-in in settings plus remote mode.
-        if (j.Mode == "remote" && _settings.AllowPush)
-        {
-            if (!report.HasIndependentApproval)
-            {
-                Stage(id, fence, JobStates.Blocked, "quality", "Independent reviewer provenance is unavailable for this commit.");
-                return;
-            }
-            ct.ThrowIfCancellationRequested();
-           Stage(id, fence,JobStates.AwaitingApproval, "push");
-           EnsureOwned(id, fence);
-            var pr = await GitOperations.PublishAsync(p, _store.Job(id), ct);
-            EnsureOwned(id, fence);
-            UpdateOwned(id, fence, x => x.PrUrl = pr);
-        }
-        var ready = j.Mode == "remote" && _settings.AllowPush;
+        // The controller accepts independently signed approvals after the build releases its lease.
         var outcome = _store.Job(id);
-        outcome.State = ready ? JobStates.PrReady : JobStates.CompletedLocal;
-        outcome.Stage = ready ? "pr" : "await_manual_integration";
+        outcome.State = JobStates.CompletedLocal;
+        outcome.Stage = "await_manual_integration";
         foreach (var plugin in _plugins) await plugin.AfterJobAsync(p, outcome, ct);
         EnsureOwned(id, fence);
         Stage(id, fence, outcome.State, outcome.Stage);

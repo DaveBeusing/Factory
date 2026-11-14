@@ -54,8 +54,11 @@ internal sealed class RemoteProviderAgent(Uri server, string token, WorkerClaim 
                 if (await RemoteProviderExecutor.WorkerGitAsync(directory, cancellation, "write-tree") != result.OutputTree)
                     throw new InvalidOperationException("Executor patch does not reproduce the verified tree");
             }
+            var session = result.TurnId.ToString("D");
+            onSession?.Invoke(session);
             return new AgentRunResult
             {
+                SessionId = session,
                 Success = result.Success, Error = result.Success ? "" : "Trusted provider turn failed",
                 ObservedModel = result.ObservedModel, FinalText = result.FinalText,
                 FinalTextIsFallback = result.FinalTextIsFallback, InputTokens = result.InputTokens,

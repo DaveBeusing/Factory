@@ -1657,7 +1657,7 @@ Test("Signed review approval survives restart and follows the exact reviewed hea
         store.FinishReviewCycle(job.Id, fence, cycle, new QualityResult
         {
             HeadSha = head, Passed = true, Checks = [new CheckReport { Name = "fixture" }],
-            ProjectContractRevision = SpecificationContracts.ProjectRevision(project)
+            ProjectContractRevision = ReviewPolicy.ProjectRevision(project)
         });
         store.UpdateJob(job.Id, current =>
         {
@@ -1668,7 +1668,7 @@ Test("Signed review approval survives restart and follows the exact reviewed hea
         });
         var approval = new ReviewApproval(project.Id, job.Id, fence.Generation, cycle, head, ReviewPolicy.Revision,
             "reviewer", "reviewer-session", "builder", "builder-session", DateTimeOffset.UtcNow.AddMinutes(5),
-            "PASS", SpecificationContracts.ProjectRevision(project));
+            "PASS", ReviewPolicy.ProjectRevision(project));
         var signature = Convert.ToBase64String(key.SignData(System.Text.Encoding.UTF8.GetBytes(Json.Stringify(approval)),
             System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss));
         Assert(!store.IsReviewApproved(job.Id));
@@ -3704,6 +3704,75 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
         });
     }
     finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Completed remote builds require a signed decision bound to the target", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-signed-remote-");
+    var oldKey = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
+    try
+    {
+        using var key = System.Security.Cryptography.RSA.Create(2048);
+        Environment.SetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY", key.ExportSubjectPublicKeyInfoPem());
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo { Origin = "https://github.com/example/repo",
+            Checks = [new CheckCommand { Name = "build", Executable = "fixture" }] };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(s =>
+        {
+            s.Projects.Add(project);
+            s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        GrantRemoteWorker(store, "worker-01", project.Id);
+        var settings = new FactorySettings { AllowPush = true };
+        var claim = WorkerProtocol.Claim(store, settings, "worker-01") ?? throw new Exception("Missing claim");
+        Assert(store.StartRemoteBuilder(new(claim.WorkerId, project.Id, job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), settings));
+        var finished = claim.Job;
+        finished.State = JobStates.CompletedLocal;
+        finished.Stage = "await_manual_integration";
+        finished.HeadSha = new string('a', 40);
+        finished.SessionId = "remote-builder-session";
+        var revision = ReviewPolicy.ProjectRevision(project);
+        var quality = new QualityResult
+        {
+            Passed = true, HeadSha = finished.HeadSha, TreeSha = new string('b', 40),
+            ProjectContractRevision = revision, Checks = [new CheckReport { Name = "build" }]
+        };
+        foreach (var role in ReviewPolicy.Roles) quality.Reviews.Add(role, "PASS\nfixture");
+        var status = new WorkerStatus
+        {
+            WorkerId = claim.WorkerId, JobId = job.Id, Job = finished,
+            ExecutionGeneration = finished.ExecutionGeneration, LeaseToken = finished.LeaseToken,
+            ProviderLeaseId = claim.ProviderLeaseId,
+            Evidence = Json.Stringify(new { jobId = job.Id, commit = finished.HeadSha, finished.Attempt,
+                report = quality, outcome = "ready" })
+        };
+        Assert(await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier(), settings: settings));
+        Assert(store.Job(job.Id).Stage == "await_signed_remote_review");
+        Assert(!store.IsReviewApproved(job.Id));
+        var approval = new ReviewApproval(project.Id, job.Id, finished.ExecutionGeneration, 1, finished.HeadSha,
+            ReviewPolicy.Revision, "reviewer", "review-session", "remote:worker-01", finished.SessionId,
+            DateTimeOffset.UtcNow.AddMinutes(5), "PASS", revision);
+        var signature = Convert.ToBase64String(key.SignData(System.Text.Encoding.UTF8.GetBytes(Json.Stringify(approval)),
+            System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss));
+        store.RecordTrustedReview(new(approval, signature));
+        Assert(new StateStore(home.FullName).IsReviewApproved(job.Id));
+        store.Change(s => s.Projects.Single().Origin = "https://github.com/example/other");
+        Assert(!store.IsReviewApproved(job.Id));
+        store.Change(s =>
+        {
+            s.Projects.Single().Origin = project.Origin;
+            s.Projects.Single().BaseBranch = "release";
+        });
+        Assert(!store.IsReviewApproved(job.Id));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY", oldKey);
+        try { home.Delete(true); } catch { }
+    }
 });
 
 await TestAsync("Controller-verified remote results are atomically bound to the active lease", async () =>

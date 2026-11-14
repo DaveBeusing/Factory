@@ -356,6 +356,8 @@ public sealed class FactoryEngine
         var project = state.Projects.Single(p => p.Id == job.ProjectId);
         if (job.State is not (JobStates.CompletedLocal or JobStates.PrReady) || job.Integrated || job.LeaseOwner.Length != 0)
             throw new InvalidOperationException("Job is not eligible for integration verification");
+        if (job.Stage == "await_signed_remote_review" && !_store.IsReviewApproved(id))
+            throw new InvalidOperationException("An exact-commit signed remote review is required.");
 
         // Never accept a local-only ancestry result for a project with a configured remote.
         var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct);
@@ -370,7 +372,11 @@ public sealed class FactoryEngine
                 current.PrUrl != job.PrUrl ||
                 currentProject.Path != project.Path ||
                 currentProject.Origin != project.Origin ||
-                currentProject.BaseBranch != project.BaseBranch)
+                currentProject.BaseBranch != project.BaseBranch ||
+                (job.Stage == "await_signed_remote_review" &&
+                    (current.Stage != job.Stage || current.ExecutionGeneration != job.ExecutionGeneration ||
+                     current.SessionId != job.SessionId ||
+                     ReviewPolicy.ProjectRevision(currentProject) != ReviewPolicy.ProjectRevision(project))))
                 return false;
             StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", id, "integration-verifier",
                 current.State, JobStates.Integrated, LifecycleReason.IntegrationVerified, reference: proof.IntegratedCommit, state: s);

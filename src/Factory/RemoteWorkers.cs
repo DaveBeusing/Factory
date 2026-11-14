@@ -269,6 +269,26 @@ public static class WorkerProtocol
         var providerLease = RemoteProviderRouting.Current(state, claimed);
         if (req.ProviderLeaseId != providerLease?.Id) return false;
         var successReported = req.Job is { State: JobStates.PrReady };
+        QualityResult? pendingReview = null;
+        if (req.Job is { State: JobStates.CompletedLocal, Stage: "await_manual_integration" } candidate &&
+            candidate.Id == claimed.Id && candidate.ProjectId == claimed.ProjectId &&
+            candidate.Attempt == claimed.Attempt && candidate.Mode == JobExecutionModes.Remote &&
+            IntegrationVerifier.IsCommitSha(candidate.HeadSha) && !string.IsNullOrWhiteSpace(candidate.SessionId))
+        {
+            try
+            {
+                var evidence = GitHubWorkerResultVerifier.ValidateEvidence(project, claimed, req);
+                var quality = System.Text.Json.JsonSerializer.Deserialize<QualityResult>(evidence.GetProperty("report"), Json.Options);
+                if (quality is not null && quality.ProjectContractRevision == ReviewPolicy.ProjectRevision(project) &&
+                    IntegrationVerifier.IsCommitSha(quality.TreeSha))
+                    pendingReview = quality;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.Text.Json.JsonException or
+                KeyNotFoundException or FormatException)
+            {
+                // Malformed worker evidence cannot enter the review handoff.
+            }
+        }
         VerifiedWorkerResult? verified = null;
         var failure = "Worker returned no verified PR result";
         if (successReported)
@@ -329,7 +349,7 @@ public static class WorkerProtocol
                 // A project reconfiguration invalidates verification performed against an older policy.
                 Json.Stringify(currentProject.Checks) != Json.Stringify(project.Checks) ||
                 Json.Stringify(currentProject.ProtectedPaths) != Json.Stringify(project.ProtectedPaths) ||
-                currentProject.Origin != project.Origin || currentProject.BaseBranch != project.BaseBranch)
+                ReviewPolicy.ProjectRevision(currentProject) != ReviewPolicy.ProjectRevision(project))
                 return false;
 
             // Reported cumulative usage is debited under the same transaction as
@@ -341,7 +361,9 @@ public static class WorkerProtocol
                 var current = RemoteProviderRouting.Current(s, j);
                 finalUsage = current?.Id == providerLease.Id &&
                     RemoteProviderRouting.CanContinue(s, executionSettings, j, providerLease) &&
-                    verified?.TreeSha is { } tree &&
+                    (verified?.TreeSha ?? pendingReview?.TreeSha) is { } tree &&
+                    (pendingReview is null || s.RemoteProviderTurns.LastOrDefault(turn =>
+                        turn.LeaseId == providerLease.Id && turn.Role == "builder")?.Id.ToString("D") == req.Job!.SessionId) &&
                     RemoteProviderRouting.VerifyCompletion(s, providerLease, req.Job!.HeadSha, tree);
                 if (!finalUsage)
                 {
@@ -359,7 +381,15 @@ public static class WorkerProtocol
             }
 
             var previousState = j.State;
-            if (verified is not null && successReported &&
+            if (pendingReview is not null && (j.GoalId is null || (finalUsage && remaining >= 0)))
+            {
+                j.State = JobStates.CompletedLocal;
+                j.Stage = "await_signed_remote_review";
+                j.HeadSha = req.Job!.HeadSha;
+                j.SessionId = req.Job.SessionId;
+                j.Error = "";
+            }
+            else if (verified is not null && successReported &&
                 (j.GoalId is null || (finalUsage && remaining >= 0)))
             {
                 j.State = JobStates.PrReady; j.Stage = "pr";
@@ -379,14 +409,17 @@ public static class WorkerProtocol
                     candidate.Attempt == j.Attempt && candidate.Mode == JobExecutionModes.Remote;
                 j.State = JobStates.Blocked;
                 j.Stage = scopeBlocked ? "scope" : "remote_verification_failed";
-                j.Error = scopeBlocked ? req.Job!.Error : failure;
+                j.Error = scopeBlocked ? req.Job!.Error : pendingReview is not null
+                    ? "Unverified or exhausted final goal usage" : failure;
                 s.Events.Add(new FactoryEvent { JobId = j.Id,
                     Type = scopeBlocked ? "scope_violation" : "remote_rejected", Message = j.Error });
             }
             StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, j.LeaseOwner, previousState, j.State,
-                j.State == JobStates.PrReady ? LifecycleReason.RemoteResultVerified : LifecycleReason.RemoteResultRejected,
-                reference: j.State == JobStates.PrReady ? j.HeadSha : null, generation: j.ExecutionGeneration, state: s);
-            StateStore.FinishRemoteReviewCycle(db, tx, j, req);
+                j.State == JobStates.CompletedLocal ? LifecycleReason.AwaitingManualIntegration :
+                    j.State == JobStates.PrReady ? LifecycleReason.RemoteResultVerified : LifecycleReason.RemoteResultRejected,
+                reference: j.State is JobStates.PrReady or JobStates.CompletedLocal ? j.HeadSha : null,
+                generation: j.ExecutionGeneration, state: s);
+            StateStore.FinishRemoteReviewCycle(db, tx, j, req, pendingReview);
             GoalBudgetLedger.Settle(s, j);
             j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null;
             j.UpdatedAt = DateTimeOffset.UtcNow;

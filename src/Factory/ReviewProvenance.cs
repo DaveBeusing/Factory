@@ -15,9 +15,16 @@ public sealed record SignedReviewApproval(ReviewApproval Approval, string Signat
 
 internal static class ReviewPolicy
 {
-    internal const string Revision = "review-policy-v1";
+    internal const string Revision = "review-policy-v2";
     internal const int MaxCycles = 3;
     internal static readonly string[] Roles = ["code", "architecture", "security", "ux"];
+
+    internal static string ProjectRevision(ProjectInfo project) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Stringify(new
+        {
+            project.Origin, project.BaseBranch,
+            Contract = SpecificationContracts.ProjectRevision(project)
+        }))));
 
     // Adapter output and a distinct session are evidence, but neither establishes
     // a trusted reviewer identity or isolation from the builder.
@@ -118,9 +125,9 @@ public sealed partial class StateStore
         var project = Load(db, tx).Projects.SingleOrDefault(p => p.Id == proof.ProjectId);
         if (job is null || job.ProjectId != proof.ProjectId || job.ExecutionGeneration != proof.Generation ||
             job.State != JobStates.CompletedLocal || job.LeaseOwner.Length != 0 ||
-            project is null || SpecificationContracts.ProjectRevision(project) != proof.ProjectContractRevision ||
+            project is null || ReviewPolicy.ProjectRevision(project) != proof.ProjectContractRevision ||
             job.HeadSha != proof.Commit || job.SessionId != proof.BuilderSession ||
-            string.IsNullOrEmpty(job.Worktree) || GitOperations.Head(job.Worktree) != proof.Commit)
+            !HasCurrentReviewHead(job))
             throw new InvalidOperationException("The approval does not match a current completed build.");
         using var query = Command(db, tx, """
             SELECT c.report,p.worker FROM review_cycles c JOIN execution_provenance p
@@ -132,7 +139,11 @@ public sealed partial class StateStore
         {
             if (!row.Read() || row.IsDBNull(0) || row.GetString(1) != proof.Builder)
                 throw new InvalidOperationException("The approval does not match the builder provenance.");
-            var report = JsonSerializer.Deserialize<QualityResult>(row.GetString(0), Json.Options);
+            using var document = JsonDocument.Parse(row.GetString(0));
+            var evidence = document.RootElement;
+            if (job.Mode == JobExecutionModes.Remote)
+                evidence = evidence.GetProperty("quality");
+            var report = evidence.Deserialize<QualityResult>(Json.Options);
             if (report is null || !report.Passed || report.HeadSha != proof.Commit ||
                 report.ProjectContractRevision != proof.ProjectContractRevision || report.Findings.Count != 0 ||
                 project.Checks.Count == 0 || report.Checks.Any(c => c.ExitCode != 0) ||
@@ -146,12 +157,13 @@ public sealed partial class StateStore
         tx.Commit();
     }
 
-    internal static void FinishRemoteReviewCycle(SqliteConnection db, SqliteTransaction tx, FactoryJob job, WorkerStatus request)
+    internal static void FinishRemoteReviewCycle(SqliteConnection db, SqliteTransaction tx, FactoryJob job,
+        WorkerStatus request, QualityResult? quality)
     {
         var result = request.Job;
         var head = result is not null && result.Id == job.Id && result.ProjectId == job.ProjectId &&
             result.Attempt == job.Attempt && IntegrationVerifier.IsCommitSha(result.HeadSha) ? result.HeadSha : null;
-        var report = Json.Stringify(new { assurance = "UNKNOWN", head, outcome = job.State,
+        var report = Json.Stringify(new { assurance = "UNKNOWN", head, outcome = job.State, quality,
             findings = string.IsNullOrEmpty(job.Error) ? Array.Empty<ReviewFinding>() :
                 new[] { new ReviewFinding("controller", job.Error) },
             workerReport = request.Evidence is { Length: <= 1_000_000 } ? request.Evidence : null });
@@ -161,6 +173,11 @@ public sealed partial class StateStore
             """, ("$job", job.Id), ("$generation", job.ExecutionGeneration), ("$head", head), ("$report", report));
     }
 
+    private static bool HasCurrentReviewHead(FactoryJob job) =>
+        job.Mode == JobExecutionModes.Remote
+            ? job.Stage == "await_signed_remote_review" && IntegrationVerifier.IsCommitSha(job.HeadSha)
+            : !string.IsNullOrEmpty(job.Worktree) && GitOperations.Head(job.Worktree) == job.HeadSha;
+
     internal bool IsReviewApproved(Guid id)
     {
         var key = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
@@ -169,8 +186,7 @@ public sealed partial class StateStore
         using var tx = db.BeginTransaction(deferred: true);
         var job = ReadJob(db, tx, id);
         if (job is null || job.State != JobStates.CompletedLocal || job.LeaseOwner.Length != 0 ||
-            string.IsNullOrEmpty(job.Worktree) ||
-            !string.Equals(GitOperations.Head(job.Worktree), job.HeadSha, StringComparison.Ordinal))
+            !HasCurrentReviewHead(job))
             return false;
         using var query = Command(db, tx, """
             SELECT a.payload,a.signature FROM trusted_review_approvals a JOIN review_cycles c
@@ -187,7 +203,7 @@ public sealed partial class StateStore
         if (proof is null || proof.ExpiresAt <= DateTimeOffset.UtcNow || proof.PolicyRevision != ReviewPolicy.Revision ||
             proof.ProjectId != job.ProjectId || proof.JobId != id || proof.Generation != job.ExecutionGeneration ||
             proof.Commit != job.HeadSha || proof.BuilderSession != job.SessionId ||
-            SpecificationContracts.ProjectRevision(Load(db, tx).Projects.Single(p => p.Id == job.ProjectId)) != proof.ProjectContractRevision)
+            ReviewPolicy.ProjectRevision(Load(db, tx).Projects.Single(p => p.Id == job.ProjectId)) != proof.ProjectContractRevision)
             return false;
         using var signer = RSA.Create();
         signer.ImportFromPem(key);

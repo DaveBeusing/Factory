@@ -12,6 +12,7 @@ public sealed class QualityResult
     public List<ReviewFinding> ReviewFindings { get; set; } = [];
     public bool HasIndependentApproval => Passed && ReviewPolicy.HasIndependentApproval(this);
     public string HeadSha { get; set; } = "";
+    public string TreeSha { get; set; } = "";
     public string ProjectContractRevision { get; set; } = "";
     public List<CheckReport> Checks { get; set; } = [];
     public List<string> Findings { get; set; } = [];
@@ -41,8 +42,9 @@ public sealed class QualityEngine
         var quality = new QualityResult
         {
             HeadSha = GitOperations.Head(job.Worktree),
-            ProjectContractRevision = SpecificationContracts.ProjectRevision(project)
+            ProjectContractRevision = ReviewPolicy.ProjectRevision(project)
         };
+        quality.TreeSha = GitOperations.Git(job.Worktree, "rev-parse", quality.HeadSha + "^{tree}");
         if (project.Checks.Count == 0)
         {
             quality.Findings.Add("No executable project checks configured");

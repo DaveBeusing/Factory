@@ -50,7 +50,7 @@ internal static class WindowsPackageValidation
                 "-c", "commit.gpgsign=false", "-c", "core.hooksPath=" + Path.Combine(scratch.FullName, "no-hooks"),
                 "commit", "-m", "Create fixture");
             await RunFactoryAsync(executable, freshState, "init", repository, "--name", "Preview fixture");
-            Require(ReadSchema(freshState) == 24, "Fresh installation did not create schema 25");
+            Require(ReadSchema(freshState) == 25, "Fresh installation did not create schema 25");
             var settings = File.ReadAllBytes(Path.Combine(freshState, "settings.json"));
             var store = new StateStore(freshState);
             var project = store.Read().Projects.Single();
@@ -202,7 +202,7 @@ internal static class WindowsPackageValidation
     private static void VerifyUpgradedState(string directory, Guid projectId, byte[] settings)
     {
         // Read the pragma before using StateStore so the verifier cannot perform the upgrade itself.
-        Require(ReadSchema(directory) == 24, "The packaged executable did not migrate to schema 25");
+        Require(ReadSchema(directory) == 25, "The packaged executable did not migrate to schema 25");
         var state = new StateStore(directory).Read();
         Require(state.Projects.Single().Id == projectId, "Project identity changed");
         var usage = state.ProviderUsages.Single();

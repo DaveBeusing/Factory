@@ -84,6 +84,8 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         var pull = await ReadPullAsync(d, ct);
         if (pull.GetProperty("merged").GetBoolean())
         {
+            if (d.Action != "merge")
+                throw new InvalidOperationException("A signed merge verification decision is required for a merged pull request.");
             var mergeCommit = await RequireMergeReceiptAsync(d, pull, ct);
             var merged = new MergedPullRequest(true,
                 pull.GetProperty("base").GetProperty("repo").GetProperty("full_name").GetString() ?? "",
@@ -125,7 +127,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             {
                 StateStore.RecordLifecycle(db, tx, d.ProjectId, "publication-receipt", id, d.Account,
                     "created", "ready", LifecycleReason.RemoteResultVerified,
-                    Json.Stringify(new { url, d.HeadCommit, d.BaseCommit, d.ProjectRevision }), job.ExecutionGeneration, state);
+                    Json.Stringify(new { url, d.HeadCommit, d.BaseCommit, d.ProjectRevision, d.ExpiresAt }), job.ExecutionGeneration, state);
                 return true;
             });
             return new { url, d.HeadCommit, ready = true };

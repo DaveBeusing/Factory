@@ -123,6 +123,17 @@ public sealed partial class StateStore
         return EffectivePlanPolicy(db, tx, project);
     }
 
+    internal object ReadPlanApprovalTarget(string authorization, Guid project, Guid goal)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction(deferred: true);
+        var scope = ReadPlanScope(db, tx, RequirePlanVerifier(authorization), project, goal);
+        var policy = EffectivePlanPolicy(db, tx, project);
+        var sourceRevision = scope.StoredPlan?.Revision;
+        return new { sourceRevision, policyRevision = policy.Revision, rule = policy.Rule.ToString(),
+            expectedApprovalId = LatestApprovalId(db, tx, project, sourceRevision, policy.Revision, scope.SubjectId) };
+    }
+
     internal void SetPlanApproval(string authorization, Guid project, Guid goal, PlanApprovalInput input)
     {
         var verifier = RequirePlanVerifier(authorization);

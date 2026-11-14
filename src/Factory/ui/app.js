@@ -640,6 +640,7 @@ function showScopedPlan(context,goal,details){
  const controls=editable?
   `<div class="head-actions"><button class="button button-muted" data-act="scoped-plan-edit" data-id="${esc(goal.id)}">Edit plan</button>
    <button class="button button-muted" data-act="scoped-plan-generate" data-id="${esc(goal.id)}">${plan?'Regenerate plan':'Generate plan'}</button>
+   ${!details.isLegacy&&plan?.revision?`<button class="button button-muted" data-act="scoped-plan-approval" data-id="${esc(goal.id)}" data-revision="${esc(plan.revision)}">Manage independent approval</button>`:''}
    ${adoptable?`<button class="button button-primary" data-act="scoped-plan-adopt" data-id="${esc(goal.id)}" data-revision="${esc(plan.revision)}">Adopt reviewed plan</button>`:''}</div>`:'';
  inspectorPanel('Plan details',planGoalContext(details)+preflightDetails(plan?.preflight)+
   (plan?`<h3>Proposed work packages</h3><p>Revision <code>${esc(plan.revision||'Legacy plan')}</code></p>
@@ -653,6 +654,25 @@ async function handleScopedPlanning(action,id,revision){
  if(action==='scoped-goal-create'){openScopedGoalForm(context);return;}
  if(!goal)return;
  const path=scopedPlanPath(context,id);
+ if(action==='scoped-plan-approval'){
+  const decision=await api(path+'/approval');
+  requireScopedPlanning(context);
+  if(decision.rule!=='IndependentApproval'||decision.sourceRevision!==revision)
+   throw Error('The plan revision or approval policy changed. Reload the plan.');
+  openForm('Record independent plan approval',goal.objective,
+   `<p>Revision <code>${esc(revision)}</code></p><p>Policy <code>${esc(decision.policyRevision)}</code></p>`+
+   field('minutes','Validity in minutes','60','number')+
+   field('revoke','Revoke my existing approval',false,'checkbox')+
+   field('reviewed','I independently reviewed this exact plan revision',false,'checkbox'),
+   async form=>{
+    requireScopedPlanning(context);
+    const revoke=form.elements.revoke.checked;
+    if(!revoke&&!form.elements.reviewed.checked)throw Error('Confirm the independent review.');
+    await api(path+'/approval','POST',{...decision,revoke,minutes:Number(values(form).minutes)});
+    notify('Plan approval recorded');
+   },'Record approval');
+  return;
+ }
  if(action==='scoped-plan-adopt'){
   if(!revision)return;
   openForm('Adopt reviewed plan',context.project.name+' · '+goal.objective,

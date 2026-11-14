@@ -85,7 +85,9 @@ public sealed partial class StateStore
                     revision.GetString() == ReviewPolicy.ProjectRevision(project))
                 {
                     url = doc.RootElement.GetProperty("url").GetString() ?? url;
-                    ready = row.GetString(1) == "ready";
+                    ready = row.GetString(1) == "ready" && approved &&
+                        doc.RootElement.TryGetProperty("expiresAt", out var expires) && expires.GetDateTimeOffset() > DateTimeOffset.UtcNow;
+                    if (row.GetString(1) == "ready" && !ready) blockers.Add("PR readiness must be rechecked.");
                     if (doc.RootElement.TryGetProperty("mergeCommit", out var merged))
                         mergedCommit = merged.GetString();
                 }
@@ -94,7 +96,7 @@ public sealed partial class StateStore
             if (integrated is null && !settings.AllowPush) blockers.Add("Publication is disabled in controller settings.");
             var status = integrated is not null ? "verified integrated" :
                 mergedCommit is not null ? "merged" :
-                ready || job.State == JobStates.PrReady && job.PrUrl.Length > 0 ? "PR ready" :
+                ready ? "PR ready at last verification" :
                 url.Length > 0 ? "PR created" : "No confirmed PR";
             jobs.Add(new { job.Id, job.Title, job.State, job.HeadSha, prUrl = url,
                 reviewApproved = approved, reviewer = approval?.Reviewer, reviewerSession = approval?.ReviewerSession,

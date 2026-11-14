@@ -283,7 +283,10 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             var expected = new WorkflowEvent(d.Repository, d.WorkflowId, runId, attempt,
                 suite, d.PullNumber, d.BaseBranch, d.BaseCommit, d.HeadCommit);
             eventProof = d.EventProof ?? store.FindWorkflowDelivery(expected);
-            VerifyWorkflowEvent(eventProof, expected);
+            if (eventProof is null && d.WorkflowFile is not null)
+                await new ActionsEventAttestation(github).VerifyAsync(expected, d.WorkflowFile, ct);
+            else
+                VerifyWorkflowEvent(eventProof, expected);
         }
         var jobs = await ReadAsync(["api", "--paginate", "--slurp",
             $"{prefix}/actions/runs/{runId}/attempts/{attempt}/jobs?per_page=100"], ct);
@@ -313,7 +316,8 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             checkIds.Add(match[0].GetProperty("id").GetInt64());
         }
         return Json.Stringify(new { d.WorkflowId, runId, attempt, suite, d.PullNumber, d.HeadCommit, d.BaseCommit,
-            association = missingLinks ? "signed-workflow-event" : "github-workflow-link",
+            association = !missingLinks ? "github-workflow-link" :
+                eventProof is null ? "github-actions-attestation" : "signed-workflow-event",
             eventProof,
             checkIds });
     }

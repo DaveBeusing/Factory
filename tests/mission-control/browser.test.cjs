@@ -69,7 +69,15 @@ browserTest('project quality presets, modal notifications and Factory doctor', a
   const doctor = page.locator('.doctor-panel');
   await doctor.getByText('dotnet', { exact: true }).waitFor();
   assert.equal(await doctor.getByText('git', { exact: true }).count(), 1);
-  assert.equal(await doctor.getByText(home, { exact: true }).count(), 1);
+  const statePath = await doctor.locator('.kv').filter({ hasText: 'State directory' }).locator('strong').innerText();
+  const normalizePath = value => {
+    const normalized = path.resolve(value);
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  };
+  const canonicalHome = execFileSync('dotnet', [path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll'), 'doctor'], {
+    encoding: 'utf8', env: { ...process.env, FACTORY_HOME: home }
+  }).split(/\r?\n/).find(line => line.startsWith('State: ')).slice('State: '.length);
+  assert.equal(normalizePath(statePath), normalizePath(canonicalHome));
   await doctor.getByRole('button', { name: 'Refresh' }).click();
   await doctor.getByText('dotnet', { exact: true }).waitFor();
 }, undefined, { weekly: { usedPercent: 35, remainingPercent: 65 } });

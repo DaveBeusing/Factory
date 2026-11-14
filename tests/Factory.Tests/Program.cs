@@ -2032,9 +2032,45 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
         project.Origin = "https://github.com/example/repo";
         project.BaseBranch = "master";
         deliveryStore.Change(s => s.Projects.Add(project));
-        deliveryStore.RecordWorkflowDelivery(delivery);
-        deliveryStore.RecordWorkflowDelivery(delivery);
-        Assert(new StateStore(home.FullName).FindWorkflowDelivery(workflowEvent) == delivery);
+        var oldSecret = Environment.GetEnvironmentVariable("FACTORY_GITHUB_WEBHOOK_SECRET");
+        var oldPrivateKey = Environment.GetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PRIVATE_KEY");
+        using var shutdown = new CancellationTokenSource();
+        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        Environment.SetEnvironmentVariable("FACTORY_GITHUB_WEBHOOK_SECRET", webhookSecret);
+        Environment.SetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PRIVATE_KEY", eventKey.ExportPkcs8PrivateKeyPem());
+        var host = DashboardHost.RunAsync(deliveryStore, new FactorySettings
+        {
+            ApiToken = Guid.NewGuid().ToString("N"), WorkerTokenKey = new string('a', 64)
+        }, $"http://127.0.0.1:{port}", shutdown.Token);
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            async Task<System.Net.HttpStatusCode> Send(string signature)
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, "/api/github/workflow-events")
+                {
+                    Content = new ByteArrayContent(payload)
+                };
+                request.Headers.Add("X-GitHub-Event", "workflow_run");
+                request.Headers.Add("X-Hub-Signature-256", signature);
+                using var response = await client.SendAsync(request);
+                return response.StatusCode;
+            }
+            Assert(await Send(webhookSignature) == System.Net.HttpStatusCode.NoContent);
+            Assert(await Send(webhookSignature) == System.Net.HttpStatusCode.NoContent);
+            Assert(await Send("sha256=" + new string('0', 64)) == System.Net.HttpStatusCode.BadRequest);
+            Assert(new StateStore(home.FullName).FindWorkflowDelivery(workflowEvent)?.Event == delivery.Event);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { await host; } catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }
+            Environment.SetEnvironmentVariable("FACTORY_GITHUB_WEBHOOK_SECRET", oldSecret);
+            Environment.SetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PRIVATE_KEY", oldPrivateKey);
+        }
         decision = decision with { EventProof = null };
         receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
         Assert(receipt.Contains("\"association\": \"signed-workflow-event\"") && receipt.Contains("132435614163"));

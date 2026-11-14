@@ -1441,6 +1441,25 @@ Test("Versioned specifications require evidence and ordered ownership", () =>
     }
 });
 
+Test("Scheduler serializes shared resources and explains the decision", () =>
+{
+    var project = new ProjectInfo { MaxParallel = 4 };
+    var first = new FactoryJob { ProjectId = project.Id, Priority = 90, ExpectedPaths = ["a.cs"], SharedResources = ["schema:sqlite"] };
+    var second = new FactoryJob { ProjectId = project.Id, Priority = 80, ExpectedPaths = ["b.cs"], SharedResources = ["schema:SQLite"] };
+    var other = new FactoryJob { ProjectId = project.Id, Priority = 70, ExpectedPaths = ["c.cs"], SharedResources = ["interface:checks"] };
+    var state = new FactoryState { Projects = [project], Jobs = [second, other, first] };
+    var decisions = new List<SchedulingDecision>();
+    var chosen = JobScheduler.SelectWithReasons(state, 4, "local", null, 512, decisions);
+    Assert(chosen.Select(j => j.Id).SequenceEqual([first.Id, other.Id]));
+    Assert(decisions.Single(d => d.JobId == second.Id) == new SchedulingDecision(second.Id, "ownership_conflict", first.Id));
+    first.State = JobStates.Preparing;
+    first.LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(1);
+    Assert(JobScheduler.Select(state, 4).Single().Id == other.Id);
+    first.SharedResources = ["unknown"];
+    Assert(JobScheduler.Select(state, 4).Count == 0);
+});
+
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -1492,6 +1511,7 @@ Test("Dependency integration gate", () =>
     var a = new FactoryJob(); var b = new FactoryJob { DependsOn = [a.Id] };
     Assert(!DependencyGraph.DependenciesSatisfied(b, [a,b]));
     a.Integrated = true;
+    a.State = JobStates.Integrated;
     Assert(DependencyGraph.DependenciesSatisfied(b, [a,b]));
 });
 Test("Unknown files conflict", () =>
@@ -2430,7 +2450,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 21, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 22, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -3048,7 +3068,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 21);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 22);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3548,7 +3568,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 21);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 22);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

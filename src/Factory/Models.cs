@@ -143,6 +143,7 @@ public sealed class FactoryJob
     public int MaxRounds { get; set; } = 3;
     public List<Guid> DependsOn { get; set; } = [];
     public List<string> ExpectedPaths { get; set; } = [];
+    public List<string> SharedResources { get; set; } = [];
     public List<string> RequiredExecutionCapabilities { get; set; } = [];
     public string Branch { get; set; } = "";
     public string Worktree { get; set; } = "";

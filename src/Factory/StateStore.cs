@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 21;
+    private const int DatabaseVersion = 22;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -315,7 +315,17 @@ public sealed partial class StateStore
             if (schemaVersion < 18) UpgradeProjectReviews(db, tx);
             if (schemaVersion < 19) UpgradeLifecycleAudit(db, tx);
             if (schemaVersion < 20) UpgradeFactoryPolicy(db, tx);
-            UpgradeIssueIntake(db, tx);
+            if (schemaVersion < 21) UpgradeIssueIntake(db, tx);
+            Execute(db, tx, """
+                CREATE TABLE IF NOT EXISTS jobs_shared_resources(
+                    owner_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                    position INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id,position)
+                );
+                INSERT INTO jobs_shared_resources(owner_id,position,value)
+                SELECT id,0,'unknown' FROM jobs
+                WHERE NOT EXISTS(SELECT 1 FROM jobs_shared_resources r WHERE r.owner_id=jobs.id);
+                PRAGMA user_version=22;
+                """);
         }
         tx.Commit();
     }

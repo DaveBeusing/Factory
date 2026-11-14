@@ -23,6 +23,7 @@ public static class DependencyGraph
     public static bool Conflict(FactoryJob a, FactoryJob b)
     {
         if (a.ProjectId != b.ProjectId) return false;
+        if (SchedulingResources.Conflict(a, b)) return true;
         // Unknown scope is conservatively treated as potentially overlapping.
         if (a.ExpectedPaths.Count == 0 || b.ExpectedPaths.Count == 0) return true;
         try
@@ -40,7 +41,8 @@ public static class DependencyGraph
         return false;
     }
     public static bool DependenciesSatisfied(FactoryJob job, IReadOnlyList<FactoryJob> all)
-        => job.DependsOn.All(id => all.Any(other => other.Id == id && other.Integrated));
+        => job.DependsOn.All(id => all.Any(other => other.Id == id && other.ProjectId == job.ProjectId &&
+            other.Integrated && other.State == JobStates.Integrated));
 }
 
 public static class JobExecutionModes
@@ -57,15 +59,20 @@ public sealed class JobScheduler
     // Execution mode is part of the eligibility contract; the safe default is local.
     public static IReadOnlyList<FactoryJob> Select(FactoryState state, int limit,
         string executionMode = JobExecutionModes.Local, Func<FactoryJob, bool>? eligibility = null,
-        int reservationTokens = GoalBudgetLedger.DefaultReservationTokens)
+        int reservationTokens = GoalBudgetLedger.DefaultReservationTokens) =>
+        SelectWithReasons(state, limit, executionMode, eligibility, reservationTokens, null);
+
+    internal static IReadOnlyList<FactoryJob> SelectWithReasons(FactoryState state, int limit,
+        string executionMode, Func<FactoryJob, bool>? eligibility, int reservationTokens,
+        ICollection<SchedulingDecision>? decisions)
     {
         if (!JobExecutionModes.IsSupported(executionMode))
             throw new ArgumentException("Unsupported execution mode", nameof(executionMode));
         if (reservationTokens < BudgetedAgentRuntime.MinimumTurnAllowance)
             throw new ArgumentOutOfRangeException(nameof(reservationTokens));
-        if (state.Paused || limit <= 0) return [];
+        var now = DateTimeOffset.UtcNow;
         var active = state.Jobs.Where(j => JobStates.Active.Contains(j.State) &&
-            j.LeaseUntil > DateTimeOffset.UtcNow).ToList();
+            j.LeaseUntil > now).OrderBy(j => j.Id).ToList();
         var chosen = new List<FactoryJob>();
         var capacity = Math.Max(0, limit - active.Count);
         var counts = active.GroupBy(j => j.ProjectId).ToDictionary(g => g.Key, g => g.Count());
@@ -73,12 +80,14 @@ public sealed class JobScheduler
         // even before each selected job is atomically claimed in SQLite.
         var planned = new Dictionary<Guid, long>();
         foreach (var job in state.Jobs.Where(j => j.State == JobStates.Queued &&
-            JobExecutionModes.Matches(j, executionMode) && (eligibility is null || eligibility(j)))
+            JobExecutionModes.Matches(j, executionMode))
             .OrderByDescending(j => j.Priority)
-            .ThenBy(j => j.CreatedAt))
+            .ThenBy(j => j.CreatedAt).ThenBy(j => j.Id))
         {
-            if (chosen.Count >= capacity) break;
-           if (!DependencyGraph.DependenciesSatisfied(job, state.Jobs)) continue;
+            if (state.Paused) { decisions?.Add(new(job.Id, "queue_paused")); continue; }
+            if (chosen.Count >= capacity) { decisions?.Add(new(job.Id, "global_capacity")); if (decisions is null) break; continue; }
+            if (eligibility is not null && !eligibility(job)) { decisions?.Add(new(job.Id, "worker_ineligible")); continue; }
+            if (!DependencyGraph.DependenciesSatisfied(job, state.Jobs)) { decisions?.Add(new(job.Id, "dependency_not_integrated")); continue; }
            long allocation = 0;
            if (job.GoalId is { } goalId)
            {
@@ -86,12 +95,15 @@ public sealed class JobScheduler
                var available = allocation == 0 ? 0 :
                    GoalBudgetLedger.Available(state, goalId) - planned.GetValueOrDefault(goalId);
                allocation = Math.Min(allocation, Math.Max(0, available));
-               if (allocation < BudgetedAgentRuntime.MinimumTurnAllowance) continue;
+               if (allocation < BudgetedAgentRuntime.MinimumTurnAllowance) { decisions?.Add(new(job.Id, "goal_budget")); continue; }
            }
             var project = state.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
-           if (project == null || project.Status != "active" || counts.GetValueOrDefault(job.ProjectId) >= project.MaxParallel) continue;
-           if (active.Concat(chosen).Any(j => DependencyGraph.Conflict(job, j))) continue;
+           if (project == null || project.Status != "active") { decisions?.Add(new(job.Id, "project_inactive")); continue; }
+           if (counts.GetValueOrDefault(job.ProjectId) >= project.MaxParallel) { decisions?.Add(new(job.Id, "project_capacity")); continue; }
+           var blocker = active.Concat(chosen).FirstOrDefault(j => DependencyGraph.Conflict(job, j));
+           if (blocker is not null) { decisions?.Add(new(job.Id, "ownership_conflict", blocker.Id)); continue; }
            chosen.Add(job);
+           decisions?.Add(new(job.Id, "eligible"));
            if (job.GoalId is { } selectedGoal)
                planned[selectedGoal] = checked(planned.GetValueOrDefault(selectedGoal) + allocation);
            counts[job.ProjectId] = counts.GetValueOrDefault(job.ProjectId) + 1;

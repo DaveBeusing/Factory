@@ -273,6 +273,13 @@ public static class DashboardHost
         app.MapPut("/api/goals/{id:guid}", (Guid id, GoalInput input) => Results.Ok(MissionControlManager.UpdateGoal(store, id, input)));
         app.MapPost("/api/goals/{id:guid}/action", (Guid id, ControlInput input) =>
             Results.Ok(MissionControlManager.SetGoalStatus(store, id, input.Action)));
+        app.MapGet("/api/scheduler/decisions", () =>
+        {
+            var decisions = new List<SchedulingDecision>();
+            JobScheduler.SelectWithReasons(store.Read(), settings.MaxParallel, JobExecutionModes.Local, null,
+                settings.GoalReservationTokens, decisions);
+            return Results.Ok(decisions);
+        });
         app.MapPost("/api/jobs", (JobInput input) => Results.Created("/api/state", MissionControlManager.CreateJob(store, input, settings)));
         app.MapPut("/api/jobs/{id:guid}", (Guid id, JobInput input) => Results.Ok(MissionControlManager.UpdateJob(store, id, input)));
         // An explicit administrator-approved amendment is required for blocked scope violations.

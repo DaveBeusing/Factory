@@ -34,13 +34,26 @@ let planProject="";
 const generatingPlans=new Set();
 const number=value=>Number(value||0).toLocaleString();
 let settings={}, usage=null, providerData=null, projectReview=null, analysisProject='', health=null, view='overview', search='', filter='all', streamController=null,lastHeartbeat=0, connected=false, lastStateUpdate=0, modalHandler=null, inspector=null, planDraft=null, planGoal=null;
-let connectionRevision=0, loadingStateRevision=null;
+let connectionRevision=0, loadingStateRevision=null, apiRequests=new AbortController();
 const projectAccess=()=>token.startsWith('factory-viewer-');
 let recoveryRequest=0, projectRecovery={projects:[],selected:'',loading:false};
 let scopedPlanning={projects:[],selected:''}, scopedPlanEditor=null, scopedPlanRequest=0;
 let scopedAnalysis={projects:[],selected:''};
 let scopedActivity={projects:[],selected:'',entries:[]}, activityController=null;
-async function api(path,method='GET',body){if(!token)throw new Error('Connect your API token first');if(projectAccess()&&!path.startsWith('viewer/'))throw new Error('This action requires an administrator connection');const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store'});if(!res.ok){let msg='Request failed ('+res.status+')';try{let obj=await res.json();msg=obj.error||obj.title||msg}catch{}const error=new Error(msg);error.status=res.status;throw error}if(res.status===204||res.status===202)return null;return res.json()}
+async function api(path,method='GET',body){
+ if(!token)throw new Error('Connect your API token first');
+ if(projectAccess()&&!path.startsWith('viewer/'))throw new Error('This action requires an administrator connection');
+ const signal=apiRequests.signal;
+ const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',signal});
+ let result=null;
+ if(res.status!==204&&res.status!==202){
+  if(res.ok)result=await res.json();
+  else try{result=await res.json()}catch{}
+ }
+ signal.throwIfAborted();
+ if(!res.ok){const error=new Error(result?.error||result?.title||'Request failed ('+res.status+')');error.status=res.status;throw error}
+ return result;
+}
 const notify=(message,error=false)=>{const el=document.createElement('div');el.className='toast'+(error?' error':'');el.innerHTML=`<span class="toast-icon">${ico(error?'shield':'check')}</span><span>${esc(message)}</span>`;$('toast-stack').append(el);setTimeout(()=>el.remove(),5500)};
 function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.classList.toggle('hidden',!val)); }
 function nav(v){if(view==='events'&&v!=='events'&&projectAccess())stopProjectActivity();view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=({plans:'Goal planner',analysis:'Project review'})[v]||v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
@@ -79,12 +92,19 @@ async function refreshState(){
   if(loadingStateRevision===revision)loadingStateRevision=null;
  }
 }
-async function refreshUsage(){if(!token||projectAccess())return;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render();refreshInspectorProviderCapacity()}
+async function refreshUsage(){if(!token||projectAccess())return;const revision=connectionRevision;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{if(revision!==connectionRevision)return;usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render();refreshInspectorProviderCapacity()}
 async function connect(nextToken){
  const revision=++connectionRevision;
  const credentialChanged=nextToken!==undefined&&nextToken!==token;
  if(nextToken!==undefined){
   if(nextToken!==token){
+   apiRequests.abort();
+   apiRequests=new AbortController();
+   settings={};usage=null;providerData=null;managedWorkers=[];
+   projectReview=null;analysisProject='';reviewRequest++;reviewingProjects.clear();
+   plansCache.clear();planGoals.clear();planProject='';planDraft=null;planGoal=null;planDraftGoal=null;
+   scopedPlanEditor=null;scopedPlanRequest++;
+   condition('#usage-nav',false);
    lastHeartbeat=0;
    connected=false;
    health=null;
@@ -135,8 +155,8 @@ async function connect(nextToken){
  startStream();refreshUsage();fetchSettings();fetchManagedWorkers();fetchProviders();
 }
 async function fetchSettings(){try{settings=await api('settings')}catch{}}
-async function fetchProviders(){try{providerData=await api('providers')}catch{providerData=null}condition('#usage-nav',!!usage||!!providerData);render();refreshInspectorProviderCapacity()}
-async function fetchManagedWorkers(){try{managedWorkers=await api('workers/managed')}catch{managedWorkers=[]}}
+async function fetchProviders(){const revision=connectionRevision;try{providerData=await api('providers')}catch{if(revision!==connectionRevision)return;providerData=null}condition('#usage-nav',!!usage||!!providerData);render();refreshInspectorProviderCapacity()}
+async function fetchManagedWorkers(){const revision=connectionRevision;try{managedWorkers=await api('workers/managed')}catch{if(revision===connectionRevision)managedWorkers=[]}}
 async function mutate(path, method='POST',data){try{const result=await api(path,method,data);notify('Changes applied');await refreshState();if(path.includes('/plans/'))render();return result}catch(e){notify(e.message,true);throw e}}
 function header(title,desc,action,actionLabel){return `<div class="page-head"><div><div class="eyebrow">MISSION CONTROL / ${esc(view.toUpperCase())}</div><h1>${esc(title)}</h1><p>${esc(desc)}</p></div>${action?`<div class="head-actions"><button class="button button-primary" data-act="${esc(action)}">${ico('plus')}${esc(actionLabel||'Create new')}</button></div>`:''}</div>`}
 function metric(label,value,foot,iconName){return `<div class="metric-card"><div class="metric-top">${esc(label)}${ico(iconName)}</div><div class="metric-value">${esc(value)}</div><div class="metric-foot">${esc(foot)}</div></div>`}
@@ -278,6 +298,7 @@ async function loadProjectReview(id){
 }
 async function startProjectReview(){
  const id=analysisProject||state.projects[0]?.id;
+ const revision=connectionRevision;
  if(!id||reviewingProjects.has(id))return;
  reviewingProjects.add(id);render();
  try{
@@ -287,7 +308,7 @@ async function startProjectReview(){
    projectReview=review;
   }
   notify('Project review saved');
- }finally{reviewingProjects.delete(id);if(view==='analysis')render();await fetchProviders()}
+ }finally{if(revision===connectionRevision){reviewingProjects.delete(id);if(view==='analysis')render();await fetchProviders()}}
 }
 function createReviewGoal(findingId){
  const review=projectReview;

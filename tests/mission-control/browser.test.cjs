@@ -136,7 +136,8 @@ browserTest('loads project decisions and protects evidence at the API boundary',
     data.intake = [{ number: 1, title: 'Old connection only', decision: 'accepted' }];
     arrived();
     await held;
-    await route.fulfill({ json: data });
+    try { await route.fulfill({ json: data }); }
+    catch (error) { if (!/aborted|closed|interception/i.test(error.message)) throw error; }
   });
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await started;
@@ -157,9 +158,7 @@ browserTest('loads project decisions and protects evidence at the API boundary',
     await pending;
     assert.equal(await page.locator('#decision-project').count(), 0);
     assert.equal(await page.locator('#decision-evidence').count(), 0);
-    const response = page.waitForResponse(r => r.url().endsWith('/decision-evidence'));
     release();
-    await response;
     finishHandshake();
     await page.getByText('Invalid token or server unreachable', { exact: true }).waitFor();
     await page.getByText('No registered projects.', { exact: true }).waitFor();

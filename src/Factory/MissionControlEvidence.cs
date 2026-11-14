@@ -72,21 +72,9 @@ public sealed partial class StateStore
             using var integration = Command(db, tx, """
                 SELECT integrated_sha FROM scheduling_integrations WHERE job_id=$job AND project_id=$project AND head_sha=$head;
                 """, ("$job", job.Id), ("$project", projectId), ("$head", job.HeadSha));
-            var storedIntegration = state.VerifiedIntegrations.Contains(job.Id) ? integration.ExecuteScalar() as string : null;
-            string? integrated = null;
-            if (storedIntegration is not null)
-            {
-                using var target = Command(db, tx, """
-                    SELECT reference FROM lifecycle_audit WHERE project_id=$project AND entity_id=$job
-                      AND entity_kind='integration-target' AND reason_code='IntegrationVerified' AND generation=$generation
-                    ORDER BY rowid DESC LIMIT 1;
-                    """, ("$project", projectId), ("$job", job.Id), ("$generation", job.ExecutionGeneration));
-                if (target.ExecuteScalar() is string recorded &&
-                    JsonSerializer.Deserialize<IntegrationTarget>(recorded, Json.Options) ==
-                    new IntegrationTarget(job.HeadSha, storedIntegration, project.Origin, project.BaseBranch, project.Path))
-                    integrated = storedIntegration;
-            }
-            var historicalIntegration = integrated is null ? storedIntegration : null;
+            var storedIntegration = integration.ExecuteScalar() as string;
+            var integrated = state.VerifiedIntegrations.Contains(job.Id) ? storedIntegration : null;
+            var historicalIntegration = state.HistoricalIntegrations.Contains(job.Id) ? storedIntegration : null;
             var remaining = Math.Max(0, Math.Clamp(job.MaxRounds, 1, ReviewPolicy.MaxCycles) - cycles.Count);
             var blockers = new List<string>();
             if (!string.IsNullOrWhiteSpace(job.Error)) blockers.Add(job.Error);

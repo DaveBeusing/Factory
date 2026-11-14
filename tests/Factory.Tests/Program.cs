@@ -2200,7 +2200,12 @@ Test("Decision evidence treats legacy PR links as historical and returns readine
         });
         using var verified = System.Text.Json.JsonDocument.Parse(Json.Stringify(store.ReadDecisionEvidence(project.Id, new())));
         Assert(verified.RootElement.GetProperty("jobs")[0].GetProperty("integrated").GetString() == merged);
+        var dependent = new FactoryJob { ProjectId = project.Id, DependsOn = [job.Id] };
+        store.Change(state => state.Jobs.Add(dependent));
+        Assert(JobScheduler.Select(store.Read(), 1, JobExecutionModes.Local).Any(candidate => candidate.Id == dependent.Id));
         store.Change(state => state.Projects.Single().Origin = "https://github.com/example/another-target");
+        Assert(!JobScheduler.Select(new StateStore(home.FullName).Read(), 1, JobExecutionModes.Local)
+            .Any(candidate => candidate.Id == dependent.Id));
         using var historical = System.Text.Json.JsonDocument.Parse(Json.Stringify(new StateStore(home.FullName).ReadDecisionEvidence(project.Id, new())));
         entry = historical.RootElement.GetProperty("jobs")[0];
         Assert(entry.GetProperty("integrated").ValueKind == System.Text.Json.JsonValueKind.Null);

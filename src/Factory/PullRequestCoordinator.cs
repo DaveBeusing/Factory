@@ -277,9 +277,14 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         var runId = latest.GetProperty("id").GetInt64();
         var attempt = latest.GetProperty("run_attempt").GetInt32();
         var missingLinks = latest.GetProperty("pull_requests").GetArrayLength() == 0;
+        WorkflowEventProof? eventProof = null;
         if (missingLinks)
-            VerifyWorkflowEvent(d.EventProof, new WorkflowEvent(d.Repository, d.WorkflowId, runId, attempt,
-                suite, d.PullNumber, d.BaseBranch, d.BaseCommit, d.HeadCommit));
+        {
+            var expected = new WorkflowEvent(d.Repository, d.WorkflowId, runId, attempt,
+                suite, d.PullNumber, d.BaseBranch, d.BaseCommit, d.HeadCommit);
+            eventProof = d.EventProof ?? store.FindWorkflowDelivery(expected);
+            VerifyWorkflowEvent(eventProof, expected);
+        }
         var jobs = await ReadAsync(["api", "--paginate", "--slurp",
             $"{prefix}/actions/runs/{runId}/attempts/{attempt}/jobs?per_page=100"], ct);
         var hostedJobs = jobs.EnumerateArray().SelectMany(page => page.GetProperty("jobs").EnumerateArray()).ToArray();
@@ -309,7 +314,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         }
         return Json.Stringify(new { d.WorkflowId, runId, attempt, suite, d.PullNumber, d.HeadCommit, d.BaseCommit,
             association = missingLinks ? "signed-workflow-event" : "github-workflow-link",
-            eventProof = missingLinks ? d.EventProof : null,
+            eventProof,
             checkIds });
     }
 

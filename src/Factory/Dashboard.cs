@@ -55,7 +55,9 @@ public static class DashboardHost
             ctx.Response.Headers["Content-Security-Policy"] =
                 "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
             var isViewerRequest = ctx.GetEndpoint()?.Metadata.GetMetadata<ProjectViewerEndpoint>() is not null;
-            if (ctx.Request.Path.StartsWithSegments("/api") && !isViewerRequest)
+            var isWorkflowWebhook = HttpMethods.IsPost(ctx.Request.Method) &&
+                string.Equals(ctx.Request.Path.Value, "/api/github/workflow-events", StringComparison.OrdinalIgnoreCase);
+            if (ctx.Request.Path.StartsWithSegments("/api") && !isViewerRequest && !isWorkflowWebhook)
             {
                 var path = ctx.Request.Path.Value;
                 var workerId = ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString();
@@ -323,19 +325,23 @@ public static class DashboardHost
             Results.Ok(new { approved = store.IsReviewApproved(id) }));
         app.MapPost("/api/jobs/{id:guid}/publication", async (Guid id, SignedPullRequestDecision decision, CancellationToken ct) =>
             Results.Ok(await new PullRequestCoordinator(store, settings).ExecuteAsync(id, decision, ct)));
-        app.MapPost("/api/workflow-event-proof", async (HttpRequest request, CancellationToken ct) =>
+        app.MapPost("/api/github/workflow-events", async (HttpRequest request, CancellationToken ct) =>
         {
             var secret = Environment.GetEnvironmentVariable("FACTORY_GITHUB_WEBHOOK_SECRET");
             var privateKey = Environment.GetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PRIVATE_KEY");
             if (string.IsNullOrWhiteSpace(secret) || string.IsNullOrWhiteSpace(privateKey))
                 return Results.NotFound();
+            if (request.Headers["X-GitHub-Event"].ToString() != "workflow_run")
+                return Results.BadRequest("Expected a workflow_run delivery.");
             var payload = new byte[1_000_001];
             var length = await request.Body.ReadAtLeastAsync(payload, payload.Length, false, ct);
             if (length == payload.Length) return Results.BadRequest("GitHub event exceeds the size limit.");
             using var signer = System.Security.Cryptography.RSA.Create();
             signer.ImportFromPem(privateKey);
-            return Results.Ok(WorkflowEventIssuer.Issue(payload[..length],
-                request.Headers["X-Hub-Signature-256"].ToString(), secret, signer));
+            var proof = WorkflowEventIssuer.Issue(payload[..length],
+                request.Headers["X-Hub-Signature-256"].ToString(), secret, signer);
+            store.RecordWorkflowDelivery(proof);
+            return Results.NoContent();
         });
         app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, string? pullRequestUrl, CancellationToken ct) =>
         {

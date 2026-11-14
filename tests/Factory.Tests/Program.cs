@@ -2027,7 +2027,15 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
             throw new Exception("An unauthenticated event was signed.");
         }
         catch (ArgumentException ex) when (ex.Message.Contains("webhook authentication")) { }
-        decision = decision with { EventProof = WorkflowEventIssuer.Issue(payload, webhookSignature, webhookSecret, eventKey) };
+        var delivery = WorkflowEventIssuer.Issue(payload, webhookSignature, webhookSecret, eventKey);
+        var deliveryStore = new StateStore(home.FullName);
+        project.Origin = "https://github.com/example/repo";
+        project.BaseBranch = "master";
+        deliveryStore.Change(s => s.Projects.Add(project));
+        deliveryStore.RecordWorkflowDelivery(delivery);
+        deliveryStore.RecordWorkflowDelivery(delivery);
+        Assert(new StateStore(home.FullName).FindWorkflowDelivery(workflowEvent) == delivery);
+        decision = decision with { EventProof = null };
         receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
         Assert(receipt.Contains("\"association\": \"signed-workflow-event\"") && receipt.Contains("132435614163"));
         required = [new("build", 15368, "CR_other_pull")];

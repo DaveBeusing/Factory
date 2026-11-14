@@ -47,3 +47,57 @@ internal static class WorkflowEventIssuer
             Encoding.UTF8.GetBytes(Json.Stringify(evidence)), HashAlgorithmName.SHA256, RSASignaturePadding.Pss)));
     }
 }
+
+public sealed partial class StateStore
+{
+    internal void RecordWorkflowDelivery(WorkflowEventProof proof)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        var projects = Load(db, tx).Projects.Where(project =>
+            string.Equals(project.BaseBranch, proof.Event.BaseBranch, StringComparison.Ordinal) &&
+            MatchesWorkflowRepository(project.Origin, proof.Event.Repository)).ToArray();
+        if (projects.Length == 0)
+            throw new InvalidOperationException("The delivery does not match a registered repository and base.");
+        var payload = Json.Stringify(proof);
+        foreach (var project in projects)
+        {
+            using var query = Command(db, tx, """
+                SELECT reference FROM lifecycle_audit WHERE project_id=$project AND entity_kind='workflow-delivery';
+                """, ("$project", project.Id));
+            using var rows = query.ExecuteReader();
+            var duplicate = false;
+            while (rows.Read())
+            {
+                var existing = JsonSerializer.Deserialize<WorkflowEventProof>(rows.GetString(0), Json.Options);
+                if (existing?.Event == proof.Event) { duplicate = true; break; }
+            }
+            rows.Close();
+            if (!duplicate)
+                RecordLifecycle(db, tx, project.Id, "workflow-delivery", project.Id, "github-webhook", "received",
+                    "authenticated", LifecycleReason.ApprovalGranted, reference: payload);
+        }
+        tx.Commit();
+    }
+
+    internal WorkflowEventProof? FindWorkflowDelivery(WorkflowEvent expected)
+    {
+        using var db = Open();
+        using var query = Command(db, null, """
+            SELECT reference FROM lifecycle_audit WHERE entity_kind='workflow-delivery' ORDER BY at DESC;
+            """);
+        using var rows = query.ExecuteReader();
+        while (rows.Read())
+        {
+            var proof = JsonSerializer.Deserialize<WorkflowEventProof>(rows.GetString(0), Json.Options);
+            if (proof?.Event == expected) return proof;
+        }
+        return null;
+    }
+
+    private static bool MatchesWorkflowRepository(string origin, string repository)
+    {
+        try { return string.Equals(GitHubWorkerResultVerifier.GitHubRepository(origin), repository, StringComparison.OrdinalIgnoreCase); }
+        catch (InvalidOperationException) { return false; }
+    }
+}

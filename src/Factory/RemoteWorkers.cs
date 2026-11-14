@@ -221,6 +221,7 @@ public static class WorkerProtocol
                 {
                     StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, j.LeaseOwner, j.State,
                         JobStates.Blocked, LifecycleReason.LeaseFenced, generation: j.ExecutionGeneration, state: s);
+                    StateStore.CloseInterruptedReview(db, tx, j, ExecutionFailureKind.Policy, "Remote provider lease no longer authorized");
                     RemoteProviderRouting.Fence(s, j, "Remote provider lease no longer authorized");
                     return false;
                 }
@@ -235,6 +236,7 @@ public static class WorkerProtocol
            if (remaining < 0)
            {
                GoalBudgetLedger.Hold(s, j, "remote worker exceeded its reserved budget");
+               StateStore.CloseInterruptedReview(db, tx, j, ExecutionFailureKind.Policy, "Remote worker budget exceeded.");
                StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, j.LeaseOwner, j.State,
                    JobStates.Blocked, LifecycleReason.LeaseFenced, generation: j.ExecutionGeneration, state: s);
                j.ExecutionGeneration++;
@@ -410,9 +412,14 @@ public static class WorkerProtocol
                 var scopeBlocked = req.Job is { State: JobStates.Blocked, Stage: "scope" } candidate &&
                     candidate.Id == j.Id && candidate.ProjectId == j.ProjectId &&
                     candidate.Attempt == j.Attempt && candidate.Mode == JobExecutionModes.Remote;
+                var gitUncertain = req.Job is { } interrupted &&
+                    interrupted.Id == j.Id && interrupted.ProjectId == j.ProjectId && interrupted.Attempt == j.Attempt &&
+                    interrupted.Mode == JobExecutionModes.Remote &&
+                    interrupted.Stage is "interrupted_git" or "commit" or "push" or "pr" or "merge";
                 j.State = JobStates.Blocked;
-                j.Stage = scopeBlocked ? "scope" : "remote_verification_failed";
-                j.Error = scopeBlocked ? req.Job!.Error : pendingReview is not null
+                j.Stage = gitUncertain ? "interrupted_git" : scopeBlocked ? "scope" : "remote_verification_failed";
+                j.Error = gitUncertain ? "Remote Git effects are uncertain; reconcile before retry." :
+                    scopeBlocked ? req.Job!.Error : pendingReview is not null
                     ? "Unverified or exhausted final goal usage" : failure;
                 if (StateStore.ReviewCyclesUsed(db, tx, j.Id) >= Math.Clamp(j.MaxRounds, 1, ReviewPolicy.MaxCycles))
                     j.Error += " Review cycle limit reached; review the preserved evidence before authorizing a replacement.";

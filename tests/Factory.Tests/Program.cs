@@ -1648,6 +1648,9 @@ Test("Uncertain publication closes the round durably and blocks reviewed retry",
         store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
         var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "fault-injection", 60, local: true));
         Assert(store.BeginReviewCycle(job.Id, fence, 3) == 1);
+        store.SetFencedStage(job.Id, fence, JobStates.Building, "agent");
+        store.SetFencedStage(job.Id, fence, JobStates.Gating, "checks");
+        store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
         store.SetFencedStage(job.Id, fence, JobStates.AwaitingApproval, "push");
         var failure = ExecutionFailure.From("push", new TimeoutException("Response lost"));
         Assert(failure.Kind == ExecutionFailureKind.UncertainSideEffect);

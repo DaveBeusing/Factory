@@ -386,6 +386,7 @@ public static class WorkerProtocol
             StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, j.LeaseOwner, previousState, j.State,
                 j.State == JobStates.PrReady ? LifecycleReason.RemoteResultVerified : LifecycleReason.RemoteResultRejected,
                 reference: j.State == JobStates.PrReady ? j.HeadSha : null, generation: j.ExecutionGeneration, state: s);
+            StateStore.FinishRemoteReviewCycle(db, tx, j, req);
             GoalBudgetLedger.Settle(s, j);
             j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null;
             j.UpdatedAt = DateTimeOffset.UtcNow;

@@ -54,6 +54,11 @@ public sealed class FactoryEngine
                 candidate => ProfileAllows(s, s.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
                 reservationTokens: _settings.GoalReservationTokens);
            if (!selected.Any(x => x.Id == id)) return false;
+           if (StateStore.ReviewCyclesUsed(db, tx, id) >= Math.Clamp(j.MaxRounds, 1, ReviewPolicy.MaxCycles))
+           {
+               StateStore.BlockExhaustedReviews(db, tx, j, s);
+               return false;
+           }
            JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true,
                 state: s, reservationTokens: _settings.GoalReservationTokens);
            var runtime = _runtimeOverridden ? "custom" :
@@ -176,20 +181,7 @@ public sealed class FactoryEngine
         {
             // The previous generation may not publish an outcome.
         }
-        catch (TokenBudgetExceededException ex)
-        {
-            if (JobRecovery.Matches(_store.Job(id), fence))
-                Stage(id, fence, JobStates.Blocked, "budget", ex.Message);
-        }
-        catch (ScopeViolationException ex)
-        {
-            if (JobRecovery.Matches(_store.Job(id), fence))
-            {
-                Stage(id, fence, JobStates.Blocked, "scope", ex.Message);
-                _store.Event(id, "scope_violation", ex.Message);
-            }
-        }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (executionCancel.IsCancellationRequested)
         {
             try { _store.InterruptFencedStage(id, fence); }
             catch (LostExecutionLeaseException) { }
@@ -198,8 +190,7 @@ public sealed class FactoryEngine
         {
             var current = _store.Job(id);
             if (JobRecovery.Matches(current, fence))
-                Stage(id, fence, current.Stage is "commit" or "push" or "pr" ? JobStates.Blocked : JobStates.Failed,
-                    current.Stage, ex.Message);
+                _store.RecordExecutionFailure(id, fence, ExecutionFailure.From(current.Stage, ex), ex.Message);
         }
         finally
         {
@@ -327,7 +318,8 @@ public sealed class FactoryEngine
         }
         if (!report.Passed)
         {
-            Stage(id, fence,JobStates.Blocked, "quality", "Quality gate did not pass within allotted rounds");
+            Stage(id, fence, JobStates.Blocked, "quality",
+                "Quality gate did not pass within allotted rounds. Review the preserved evidence and authorize a replacement work package.");
            return;
         }
         ct.ThrowIfCancellationRequested();

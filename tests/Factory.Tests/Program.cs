@@ -1,6 +1,12 @@
 using System.Diagnostics;
 using Factory;
 
+if (args is ["--command-timeout-fixture"])
+{
+    await Task.Delay(TimeSpan.FromSeconds(15));
+    return 0;
+}
+
 if (args is ["--measure-queue-load"])
 {
     await QueueLoadBaseline.RunAsync();
@@ -1622,6 +1628,77 @@ Test("Review admission survives restart and cannot exceed three cycles", () =>
         store.FinishReviewCycle(job.Id, fence, 2, report);
         Assert(store.BeginReviewCycle(job.Id, fence, 99) == 3);
         Assert(new StateStore(home.FullName).BeginReviewCycle(job.Id, fence, 99) == 0);
+        store.RecordExecutionFailure(job.Id, fence,
+            ExecutionFailure.From("review", new TimeoutException()), "Reviewer timed out.");
+        store.UpdateJob(job.Id, j => { j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null; });
+        var restarted = new StateStore(home.FullName);
+        Assert(restarted.Job(job.Id).State == JobStates.Blocked);
+        try
+        {
+            MissionControlManager.ControlJob(restarted, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("Exhausted review cycles were reset by retry.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("cycle limit")) { }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
+await TestAsync("Command timeout exits quality gating as a typed transient failure", async () =>
+{
+    var repo = Directory.CreateTempSubdirectory("factory-check-timeout-");
+    try
+    {
+        GitOperations.Git(repo.FullName, "init", "-b", "master");
+        GitOperations.Git(repo.FullName, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Fixture");
+        var project = new ProjectInfo { BaseBranch = "master", Checks = [new CheckCommand
+        {
+            Name = "timeout", Executable = "dotnet", TimeoutSeconds = 1,
+            Arguments = [typeof(FakeAgent).Assembly.Location, "--command-timeout-fixture"]
+        }] };
+        var job = new FactoryJob { Worktree = repo.FullName, ExpectedPaths = ["src/"] };
+        try
+        {
+            await new QualityEngine(new FakeAgent()).GateAsync(project, job, CancellationToken.None);
+            throw new Exception("Quality gating swallowed the check timeout.");
+        }
+        catch (TimeoutException ex)
+        {
+            Assert(ExecutionFailure.From("checks", ex).Kind == ExecutionFailureKind.Transient);
+        }
+    }
+    finally { try { repo.Delete(true); } catch { } }
+});
+
+Test("Uncertain publication closes the round durably and blocks reviewed retry", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-uncertain-publication-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo();
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "fault-injection", 60, local: true));
+        Assert(store.BeginReviewCycle(job.Id, fence, 3) == 1);
+        store.SetFencedStage(job.Id, fence, JobStates.Building, "agent");
+        store.SetFencedStage(job.Id, fence, JobStates.Gating, "checks");
+        store.SetFencedStage(job.Id, fence, JobStates.Reviewing, "review");
+        store.SetFencedStage(job.Id, fence, JobStates.AwaitingApproval, "push");
+        var failure = ExecutionFailure.From("push", new TimeoutException("Response lost"));
+        Assert(failure.Kind == ExecutionFailureKind.UncertainSideEffect);
+        store.RecordExecutionFailure(job.Id, fence, failure, "Response lost");
+        store.UpdateJob(job.Id, j => { j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null; });
+        var reopened = new StateStore(home.FullName);
+        Assert(reopened.Job(job.Id).Stage == "interrupted_git");
+        Assert(reopened.Read().Events.Any(e => e.JobId == job.Id && e.Message.Contains("UncertainSideEffect")));
+        try
+        {
+            MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("An uncertain publication was replayed.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("explicit reconciliation")) { }
+        Assert(reopened.Job(job.Id).State == JobStates.Blocked);
     }
     finally { try { home.Delete(true); } catch { } }
 });
@@ -2166,6 +2243,134 @@ Test("Git scope scanner includes committed, staged, unstaged, renamed and untrac
     finally { try { Directory.Delete(root, true); } catch { } }
 });
 
+await TestAsync("Remote timeout preserves its disposition and the next same-worker claim has a fresh local round", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-remote-followup-");
+    try
+    {
+        var store = new StateStore(Path.Combine(home.FullName, "controller"));
+        var project = new ProjectInfo { Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(s =>
+        {
+            s.Projects.Add(project);
+            s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        GrantRemoteWorker(store, "worker-01", project.Id);
+        var settings = new FactorySettings { AllowPush = true };
+        var first = FinishLocalRound();
+        first.Job.State = JobStates.Failed;
+        first.Job.Stage = "transient";
+        first.Job.Error = "Runtime deadline expired";
+        var report = new WorkerStatus { WorkerId = first.WorkerId, JobId = job.Id, Job = first.Job,
+            ExecutionGeneration = first.Job.ExecutionGeneration, LeaseToken = first.Job.LeaseToken };
+        Assert(await WorkerProtocol.CompleteAsync(store, report, new RefusingWorkerVerifier(), settings: settings));
+        var reopened = new StateStore(store.Home);
+        Assert(reopened.Job(job.Id) is { State: JobStates.Blocked, Stage: "transient", Error: "Runtime deadline expired" });
+        MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+        var second = FinishLocalRound();
+        Assert(second.Job.ExecutionGeneration > first.Job.ExecutionGeneration);
+        Assert(RemoteWorker.ClaimState(home.FullName, first.Job.ExecutionGeneration).Read().Jobs.Count == 1);
+        var cloneReport = new WorkerStatus { WorkerId = second.WorkerId, JobId = job.Id,
+            ExecutionGeneration = second.Job.ExecutionGeneration, LeaseToken = second.Job.LeaseToken };
+        try
+        {
+            await RemoteWorker.CloneForClaimAsync(second, cloneReport,
+                () => Task.FromException(new TimeoutException("Clone deadline expired")));
+            throw new Exception("Clone timeout was swallowed.");
+        }
+        catch (TimeoutException) { }
+        Assert(await WorkerProtocol.CompleteAsync(reopened, cloneReport, new RefusingWorkerVerifier(), settings: settings));
+        Assert(reopened.Job(job.Id) is { Stage: "transient", Error: "Clone deadline expired" });
+        MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+        var third = FinishLocalRound();
+        third.Job.State = JobStates.Failed;
+        third.Job.Stage = "deterministic";
+        third.Job.Error = "Builder returned an unsuccessful result";
+        var builderReport = new WorkerStatus { WorkerId = third.WorkerId, JobId = job.Id, Job = third.Job,
+            ExecutionGeneration = third.Job.ExecutionGeneration, LeaseToken = third.Job.LeaseToken };
+        Assert(await WorkerProtocol.CompleteAsync(reopened, builderReport, new RefusingWorkerVerifier(), settings: settings));
+        Assert(reopened.Job(job.Id) is { State: JobStates.Blocked, Stage: "deterministic" } stopped &&
+            stopped.Error.Contains("Review cycle limit"));
+        try
+        {
+            MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("A deterministic failure bypassed the review ceiling.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("cycle limit")) { }
+        new StateStore(store.Home).Change((_, db, tx) =>
+        {
+            using var query = db.CreateCommand();
+            query.Transaction = tx;
+            query.CommandText = "SELECT report FROM review_cycles WHERE job_id=$id ORDER BY cycle;";
+            query.Parameters.AddWithValue("$id", job.Id.ToString());
+            using var rows = query.ExecuteReader();
+            foreach (var kind in new[] { "Transient", "Transient", "Deterministic" })
+            {
+                Assert(rows.Read());
+                using var evidence = System.Text.Json.JsonDocument.Parse(rows.GetString(0));
+                Assert(evidence.RootElement.GetProperty("kind").GetString() == kind);
+                Assert(evidence.RootElement.GetProperty("stage").GetString() == kind.ToLowerInvariant());
+            }
+            Assert(!rows.Read());
+            return true;
+        });
+
+        WorkerClaim FinishLocalRound()
+        {
+            var claim = WorkerProtocol.Claim(store, settings, "worker-01") ?? throw new Exception("Missing remote claim");
+            Assert(store.StartRemoteBuilder(new(claim.WorkerId, project.Id, job.Id,
+                claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), settings));
+            var local = RemoteWorker.ClaimState(home.FullName, claim.Job.ExecutionGeneration);
+            local.Change(s => { s.Projects.Add(project); s.Jobs.Add(new FactoryJob { Id = job.Id, ProjectId = project.Id }); });
+            var fence = local.Change(s => JobRecovery.Assign(s.Jobs.Single(), "worker", 60, local: true));
+            Assert(local.BeginReviewCycle(job.Id, fence, 1) == 1);
+            local.FinishReviewCycle(job.Id, fence, 1, new QualityResult());
+            Assert(local.BeginReviewCycle(job.Id, fence, 1) == 0);
+            return claim;
+        }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
+await TestAsync("Remote worktree conflict remains quarantined after restart", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-remote-conflict-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo { Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(s =>
+        {
+            s.Projects.Add(project);
+            s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        GrantRemoteWorker(store, "worker-01", project.Id);
+        var settings = new FactorySettings { AllowPush = true };
+        var claim = WorkerProtocol.Claim(store, settings, "worker-01")!;
+        Assert(store.StartRemoteBuilder(new(claim.WorkerId, project.Id, job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), settings));
+        claim.Job.State = JobStates.Blocked;
+        claim.Job.Stage = "reconcile";
+        var report = new WorkerStatus { WorkerId = claim.WorkerId, JobId = job.Id, Job = claim.Job,
+            ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken };
+        Assert(await WorkerProtocol.CompleteAsync(store, report, new RefusingWorkerVerifier(), settings: settings));
+        var reopened = new StateStore(home.FullName);
+        Assert(reopened.Job(job.Id) is { Stage: "reconcile", State: JobStates.Blocked });
+        Assert(!await WorkerProtocol.CompleteAsync(reopened, report, new RefusingWorkerVerifier(), settings: settings));
+        try
+        {
+            MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("Remote conflict was replayed without reconciliation.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("explicit reconciliation")) { }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 await TestAsync("Remote scope block reaches the controller as amendable scope", async () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-scope-remote-" + Guid.NewGuid().ToString("N"));
@@ -2313,6 +2518,35 @@ await TestAsync("Local queue cannot claim or execute remote jobs", async () =>
         }
     }
     finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Internal runtime cancellation in the last cycle blocks as transient", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-runtime-deadline-");
+    try
+    {
+        var repo = Directory.CreateDirectory(Path.Combine(home.FullName, "repo")).FullName;
+        GitOperations.Git(repo, "init", "-b", "master");
+        GitOperations.Git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Fixture");
+        var store = new StateStore(Path.Combine(home.FullName, "state"));
+        var project = new ProjectInfo { Path = repo,
+            Checks = [new CheckCommand { Name = "git", Executable = "git", Arguments = ["rev-parse", "HEAD"] }] };
+        store.Change(s => s.Projects.Add(project));
+        var job = store.AddJob(new FactoryJob { ProjectId = project.Id, Title = "Deadline", ExpectedPaths = ["src/"] });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "seed", 60, local: true));
+        for (var round = 1; round <= 2; round++)
+        {
+            Assert(store.BeginReviewCycle(job.Id, fence, 3) == round);
+            store.FinishReviewCycle(job.Id, fence, round, new QualityResult());
+        }
+        store.UpdateJob(job.Id, j => { j.State = JobStates.Queued; j.LeaseOwner = ""; j.LeaseUntil = null; j.LeaseToken = ""; });
+        await new FactoryEngine(store, new FactorySettings(), agent: new DeadlineAgent()).RunQueueAsync(CancellationToken.None);
+        var result = new StateStore(store.Home).Job(job.Id);
+        Assert(result is { State: JobStates.Blocked, Stage: "transient" } && result.Error.Contains("Review cycle limit"),
+            result.State + "/" + result.Stage + ": " + result.Error);
+    }
+    finally { try { home.Delete(true); } catch { } }
 });
 
 await TestAsync("Scope violation blocks before commit and requires approved amendment", async () =>
@@ -3680,7 +3914,14 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
             ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken };
         Assert(await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier()));
         var blocked = store.Job(job.Id);
-        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "remote_verification_failed");
+        Assert(blocked.State == JobStates.Blocked && blocked.Stage == "interrupted_git");
+        try
+        {
+            MissionControlManager.ControlJob(new StateStore(home), job.Id,
+                new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("An unverified remote PR was allowed to replay.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("explicit reconciliation")) { }
         Assert(string.IsNullOrEmpty(blocked.PrUrl) && string.IsNullOrEmpty(blocked.HeadSha) &&
             string.IsNullOrEmpty(blocked.EvidenceFile), "Unverified worker metadata was persisted");
         Assert(blocked.TokensIn == 10, "Remote usage accounting was dropped");
@@ -4478,7 +4719,7 @@ await TestAsync("Unverified remote final usage holds budget until reviewed recon
         Assert(await WorkerProtocol.CompleteAsync(store, report,
             new FixedWorkerVerifier(new VerifiedWorkerResult("{\"verifiedBy\":\"test\"}"))));
         var result = store.Job(job.Id);
-        Assert(result.State == JobStates.Blocked && result.Stage == "remote_verification_failed");
+        Assert(result.State == JobStates.Blocked && result.Stage == "interrupted_git");
         var held = store.Read().BudgetReservations.Single();
         Assert(held.State == GoalBudgetLedger.Held && held.Consumed == 120 &&
             GoalBudgetLedger.Available(store.Read(), goal.Id) == 0);
@@ -4486,8 +4727,6 @@ await TestAsync("Unverified remote final usage holds budget until reviewed recon
             new FixedWorkerVerifier(new VerifiedWorkerResult("{}"))),
             "Replayed completion settled a stale reservation");
 
-        MissionControlManager.ControlJob(store, job.Id,
-            new ControlInput { Action = "retry", Reviewed = true });
         Assert(GoalBudgetLedger.Allocation(store.Read(), store.Job(job.Id), 1000) == 0,
             "Job retried before uncertain budget was reconciled");
         GoalBudgetLedger.Reconcile(store, goal.Id, held.Id, 100, 20, true,
@@ -4557,6 +4796,14 @@ internal sealed class ProviderCrashFixture : IAgentRuntime
         await Task.Delay(Timeout.Infinite, cancellation);
         throw new InvalidOperationException("Fixture must be stopped by its parent");
     }
+}
+
+internal sealed class DeadlineAgent : IAgentRuntime
+{
+    public Task<AgentRunResult> RunAsync(string directory, string prompt, string previousSession,
+        CancellationToken cancellation, Action<string>? onSession = null, bool readOnly = false,
+        Action<AgentTokenUsage>? onUsage = null) =>
+        Task.FromCanceled<AgentRunResult>(new CancellationToken(canceled: true));
 }
 
 internal sealed class FakeAgent : IAgentRuntime

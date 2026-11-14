@@ -11,3 +11,7 @@ Remote completion closes the controller's reserved review cycle in the completio
 After the approved pull request merges, call `POST /api/jobs/{id}/verify?pullRequestUrl=<URL-encoded GitHub PR URL>`. The controller requires the expected repository and job branch, approved head, configured base branch, successful required GitHub checks, and a complete permitted PR file list. It verifies the merge commit in the remote base and records the PR evidence and integration together, after rechecking the signed approval.
 
 The signed approval requirement applies to every new remote integration confirmation. Legacy `PrReady` rows without a signed review cannot be confirmed through the integration endpoint. Use a fresh authorized build and review to obtain current evidence.
+
+The controller counts admitted cycles throughout the lifetime of the job, including rounds interrupted by lease loss. Reconciliation and resume preserve that count. Exhaustion leaves a blocked handover with the existing review evidence. A new contract requires separate authorization.
+
+Execution failures record a typed disposition and the durable checkpoint. Timeouts away from Git mutations require an explicit retry. Policy failures require the relevant budget or scope decision. Worktree conflicts require reconciliation. Uncertain commit, push, PR or merge operations stay blocked for operator reconciliation. Inspect both the local checkpoint and authoritative GitHub state before authorizing any replacement work.

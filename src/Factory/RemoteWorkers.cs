@@ -96,7 +96,10 @@ public static class WorkerProtocol
                     continue;
                 var requiresProviderLease = RemoteProviderRouting.Required(project, job);
                 if (StateStore.ReviewCyclesUsed(db, tx, job.Id) >= Math.Clamp(job.MaxRounds, 1, ReviewPolicy.MaxCycles))
+                {
+                    StateStore.BlockExhaustedReviews(db, tx, job, s);
                     continue;
+                }
                 var routes = requiresProviderLease ? RemoteProviderRouting.Plan(s, settings, job) : null;
                 if (requiresProviderLease && routes is null) continue;
                 JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
@@ -218,6 +221,7 @@ public static class WorkerProtocol
                 {
                     StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, j.LeaseOwner, j.State,
                         JobStates.Blocked, LifecycleReason.LeaseFenced, generation: j.ExecutionGeneration, state: s);
+                    StateStore.CloseInterruptedReview(db, tx, j, ExecutionFailureKind.Policy, "Remote provider lease no longer authorized");
                     RemoteProviderRouting.Fence(s, j, "Remote provider lease no longer authorized");
                     return false;
                 }
@@ -232,6 +236,7 @@ public static class WorkerProtocol
            if (remaining < 0)
            {
                GoalBudgetLedger.Hold(s, j, "remote worker exceeded its reserved budget");
+               StateStore.CloseInterruptedReview(db, tx, j, ExecutionFailureKind.Policy, "Remote worker budget exceeded.");
                StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, j.LeaseOwner, j.State,
                    JobStates.Blocked, LifecycleReason.LeaseFenced, generation: j.ExecutionGeneration, state: s);
                j.ExecutionGeneration++;
@@ -407,10 +412,29 @@ public static class WorkerProtocol
                 var scopeBlocked = req.Job is { State: JobStates.Blocked, Stage: "scope" } candidate &&
                     candidate.Id == j.Id && candidate.ProjectId == j.ProjectId &&
                     candidate.Attempt == j.Attempt && candidate.Mode == JobExecutionModes.Remote;
+                var gitUncertain = req.Job is { } interrupted &&
+                    interrupted.Id == j.Id && interrupted.ProjectId == j.ProjectId && interrupted.Attempt == j.Attempt &&
+                    interrupted.Mode == JobExecutionModes.Remote &&
+                    (interrupted.State == JobStates.PrReady || !string.IsNullOrWhiteSpace(interrupted.PrUrl) ||
+                     interrupted.Stage is "interrupted_git" or "commit" or "push" or "pr" or "merge");
+                var requiresReconciliation = req.Job is { State: JobStates.Blocked, Stage: "reconcile" } conflict &&
+                    conflict.Id == j.Id && conflict.ProjectId == j.ProjectId &&
+                    conflict.Attempt == j.Attempt && conflict.Mode == JobExecutionModes.Remote;
+                var executionFailure = req.Job is { State: JobStates.Failed or JobStates.Blocked,
+                    Stage: "transient" or "deterministic" or "budget" } reportedFailure &&
+                    reportedFailure.Id == j.Id && reportedFailure.ProjectId == j.ProjectId &&
+                    reportedFailure.Attempt == j.Attempt && reportedFailure.Mode == JobExecutionModes.Remote
+                    ? reportedFailure : null;
                 j.State = JobStates.Blocked;
-                j.Stage = scopeBlocked ? "scope" : "remote_verification_failed";
-                j.Error = scopeBlocked ? req.Job!.Error : pendingReview is not null
+                j.Stage = gitUncertain ? "interrupted_git" : requiresReconciliation ? "reconcile" :
+                    scopeBlocked ? "scope" : executionFailure?.Stage ?? "remote_verification_failed";
+                j.Error = gitUncertain ? "Remote Git effects are uncertain; reconcile before retry." :
+                    requiresReconciliation ? "Remote execution reported a conflict; reconcile before retry." :
+                    executionFailure is not null && !string.IsNullOrWhiteSpace(executionFailure.Error) ? executionFailure.Error :
+                    scopeBlocked ? req.Job!.Error : pendingReview is not null
                     ? "Unverified or exhausted final goal usage" : failure;
+                if (StateStore.ReviewCyclesUsed(db, tx, j.Id) >= Math.Clamp(j.MaxRounds, 1, ReviewPolicy.MaxCycles))
+                    j.Error += " Review cycle limit reached; review the preserved evidence before authorizing a replacement.";
                 s.Events.Add(new FactoryEvent { JobId = j.Id,
                     Type = scopeBlocked ? "scope_violation" : "remote_rejected", Message = j.Error });
             }
@@ -433,6 +457,25 @@ public static class WorkerProtocol
 
 public static class RemoteWorker
 {
+    internal static async Task CloneForClaimAsync(WorkerClaim claim, WorkerStatus report,
+        Func<Task> clone)
+    {
+        try { await clone(); }
+        catch (TimeoutException ex)
+        {
+            report.Job = new FactoryJob
+            {
+                Id = claim.Job.Id, ProjectId = claim.Project.Id, Attempt = claim.Job.Attempt,
+                Mode = JobExecutionModes.Remote, State = JobStates.Failed, Stage = "transient",
+                Error = ex.Message
+            };
+            throw;
+        }
+    }
+
+    internal static StateStore ClaimState(string jobDir, long generation) =>
+        new(Path.Combine(jobDir, "claims", generation.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
     public static async Task RunAsync(Uri server, string token, string workspace, string workerId,
         CancellationToken ct)
     {
@@ -469,16 +512,18 @@ public static class RemoteWorker
                 throw new InvalidOperationException("Remote worker received a job for another execution mode");
            var jobDir = Path.Combine(workspace, claim.Job.Id.ToString("N"));
            Directory.CreateDirectory(jobDir);
-           var localState = new StateStore(Path.Combine(jobDir, "state"));
+           var admissions = new StateStore(Path.Combine(jobDir, "state"));
            var report = new WorkerStatus { WorkerId = workerId, JobId = claim.Job.Id,
                 TokensIn = claim.Job.TokensIn, TokensOut = claim.Job.TokensOut,
                 ExecutionGeneration = claim.Job.ExecutionGeneration,
                 LeaseToken = claim.Job.LeaseToken, ProviderLeaseId = claim.ProviderLeaseId };
-           if (!localState.ConsumeWorkerClaim(report.JobId, report.ExecutionGeneration)) continue;
+           if (!admissions.ConsumeWorkerClaim(report.JobId, report.ExecutionGeneration)) continue;
            using (var admitted = await http.PostAsJsonAsync("api/worker/start",
                new WorkerStartRequest(workerId, claim.Project.Id, report.JobId, report.ExecutionGeneration,
                    report.LeaseToken, report.ProviderLeaseId), ct))
                if (!admitted.IsSuccessStatusCode) continue;
+           // The controller owns the lifetime budget. Keep one local cycle and its evidence per admitted claim.
+           var localState = ClaimState(jobDir, report.ExecutionGeneration);
            using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
            using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
            var heartbeat = Task.Run(async () =>
@@ -519,9 +564,12 @@ public static class RemoteWorker
                var repoPath = Path.Combine(jobDir, "repository");
                if (!Directory.Exists(Path.Combine(repoPath, ".git")))
                 {
-                    var clone = await Commands.RunAsync("git", ["clone", "--branch", claim.Project.BaseBranch,
-                        "--single-branch", claim.Project.Origin, repoPath], jobDir, 300, cancellationToken: executionCancel.Token);
-                   Commands.Require(clone, "git clone");
+                    await CloneForClaimAsync(claim, report, async () =>
+                    {
+                        var clone = await Commands.RunAsync("git", ["clone", "--branch", claim.Project.BaseBranch,
+                            "--single-branch", claim.Project.Origin, repoPath], jobDir, 300, cancellationToken: executionCancel.Token);
+                        Commands.Require(clone, "git clone");
+                    });
                }
                 claim.Project.Path = repoPath;
                claim.Project.Origin = GitOperations.Origin(repoPath) ?? claim.Project.Origin;

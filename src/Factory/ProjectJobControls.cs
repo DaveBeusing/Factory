@@ -213,6 +213,8 @@ public sealed partial class StateStore
         if (request.Action is "resume" or "cancel") RequireSettledJobProviderUsage(db, tx, jobId);
         try
         {
+            if (request.Action == "resume")
+                RequireReviewCapacity(db, tx, jobId, ReadJob(db, tx, jobId, projectId)!.MaxRounds);
             MissionControlManager.ApplyInactiveJobControl(job,
                 new ControlInput { Action = request.Action, Reviewed = request.Reviewed, Reason = reason });
         }
@@ -276,7 +278,11 @@ public sealed partial class StateStore
         using var tx = db.BeginTransaction();
         VerifyGrant(tx);
         var current = ReadRecoveryTarget(db, tx, projectId, jobId);
-        try { JobRecovery.VerifyRecoverySnapshot(snapshot, current); }
+        try
+        {
+            JobRecovery.VerifyRecoverySnapshot(snapshot, current);
+            RequireReviewCapacity(db, tx, jobId, current.MaxRounds);
+        }
         catch (InvalidOperationException)
         {
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Recovery state changed. Review the job again.");

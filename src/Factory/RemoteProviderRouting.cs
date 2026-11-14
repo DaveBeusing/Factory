@@ -153,9 +153,15 @@ public static class RemoteProviderRouting
                 var previous = (job.State, job.LeaseOwner, job.ExecutionGeneration);
                 var result = Record(state, settings, dispatch.Grant, receipt);
                 if (job.State != previous.State)
+                {
+                    StateStore.CloseInterruptedReview(db, tx, new FactoryJob
+                    {
+                        Id = job.Id, ExecutionGeneration = previous.ExecutionGeneration, HeadSha = job.HeadSha
+                    }, ExecutionFailureKind.Conflict, job.Error);
                     StateStore.RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, previous.LeaseOwner,
                         previous.State, job.State, LifecycleReason.LeaseFenced,
                         reference: request.TurnId.ToString(), generation: previous.ExecutionGeneration, state: state);
+                }
                 return result;
             });
             if (!accepted) throw new InvalidOperationException("Remote provider turn requires reconciliation");
@@ -169,6 +175,8 @@ public static class RemoteProviderRouting
                 var job = state.Jobs.Single(j => j.Id == request.JobId);
                 if (turn.State == "active" && job.ExecutionGeneration == request.ExecutionGeneration)
                 {
+                    StateStore.CloseInterruptedReview(db, tx, job, ExecutionFailureKind.Conflict,
+                        "Trusted executor result was unavailable.");
                     StateStore.RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, job.LeaseOwner, job.State,
                         JobStates.Blocked, LifecycleReason.LeaseFenced, reference: turn.Id.ToString(),
                         generation: job.ExecutionGeneration, state: state);

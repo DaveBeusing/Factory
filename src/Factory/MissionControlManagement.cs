@@ -288,6 +288,8 @@ public static class MissionControlManager
             Require(input.DependsOn.All(x => x != id && s.Jobs.Any(a => a.Id == x && a.ProjectId == j.ProjectId)), "Unknown or cross-project dependency");
             Require(j.Attempt == 0 || j.ExpectedPaths.SequenceEqual(input.ExpectedPaths),
                 "Executed work-package scope can only change through an explicit reviewed scope amendment");
+            Require(j.Attempt == 0 || (j.Risk == input.Risk && j.DependsOn.SequenceEqual(input.DependsOn)),
+                "Executed work-package risk and dependencies require a separately reviewed replacement work package.");
             var before = (j.Title, j.Description, j.Priority, j.Risk, j.Mode, j.GoalId, j.DependsOn, j.ExpectedPaths, j.RequiredExecutionCapabilities);
             j.Title = input.Title.Trim(); j.Description = input.Description.Trim(); j.Priority = input.Priority;
             j.Risk = input.Risk; j.Mode = input.Mode; j.GoalId = input.GoalId;
@@ -382,6 +384,8 @@ public static class MissionControlManager
             Require(j.ControlRevision == expected && !IsActive(j) && string.IsNullOrEmpty(j.LeaseOwner),
                 "The job is executing or already has a project control request");
             var previous = j.State;
+            if (action is "retry" or "resume")
+                StateStore.RequireReviewCapacity(db, tx, j.Id, j.MaxRounds);
             ApplyInactiveJobControl(j, input);
             if (j.State != previous)
                 StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, "local-operator", previous, j.State,
@@ -415,9 +419,9 @@ public static class MissionControlManager
                 "Scope violation must be resolved through a reviewed contract amendment before retry");
             Require(j.Stage is not ("reconcile" or "interrupted_git"),
                 "Interrupted execution requires explicit reconciliation before retry or resumption");
+            Require(j.Stage is not ("commit" or "push" or "pr" or "merge"),
+                "Uncertain Git effects require reconciliation before retry or resumption");
             Require(!j.StartedAt.HasValue || input.Reviewed, "Inspect the existing worktree and acknowledge review before restarting");
-            Require(!j.StartedAt.HasValue || j.Stage is not ("commit" or "push" or "pr") || input.Reviewed,
-                "Git side effects must be reviewed before restarting");
             j.State = JobStates.Queued; j.Error = ""; j.RequestedState = "";
         }
         j.UpdatedAt = DateTimeOffset.UtcNow;

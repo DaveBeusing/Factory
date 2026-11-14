@@ -58,6 +58,33 @@ public sealed partial class StateStore
         return Convert.ToInt32(count.ExecuteScalar());
     }
 
+    internal static void BlockExhaustedReviews(SqliteConnection db, SqliteTransaction tx, FactoryJob job, FactoryState state)
+    {
+        RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, "controller", job.State,
+            JobStates.Blocked, LifecycleReason.ExecutionBlocked, reference: job.HeadSha,
+            generation: job.ExecutionGeneration, state: state);
+        job.State = JobStates.Blocked;
+        job.Stage = "quality";
+        job.Error = "Review cycle limit reached. Review the preserved evidence and authorize a replacement work package.";
+        job.UpdatedAt = DateTimeOffset.UtcNow;
+    }
+
+    internal static void RequireReviewCapacity(SqliteConnection db, SqliteTransaction tx, Guid id, int maxRounds)
+    {
+        if (ReviewCyclesUsed(db, tx, id) >= Math.Clamp(maxRounds, 1, ReviewPolicy.MaxCycles))
+            throw new InvalidOperationException("Review cycle limit reached; authorize a replacement work package.");
+    }
+
+    internal static void CloseInterruptedReview(SqliteConnection db, SqliteTransaction tx, FactoryJob job,
+        ExecutionFailureKind kind, string message)
+    {
+        Execute(db, tx, """
+            UPDATE review_cycles SET head_sha=$head,report=$report
+            WHERE job_id=$id AND generation=$generation AND report IS NULL;
+            """, ("$id", job.Id), ("$generation", job.ExecutionGeneration), ("$head", job.HeadSha),
+            ("$report", Json.Stringify(new { kind = kind.ToString(), findings = new[] { new ReviewFinding("controller", message) } })));
+    }
+
     private static void ReserveReviewCycle(SqliteConnection db, SqliteTransaction tx, Guid id, long generation, int cycle) =>
         Execute(db, tx, "INSERT INTO review_cycles(job_id,cycle,generation) VALUES($id,$cycle,$generation);",
             ("$id", id), ("$cycle", cycle), ("$generation", generation));
@@ -163,7 +190,17 @@ public sealed partial class StateStore
         var result = request.Job;
         var head = result is not null && result.Id == job.Id && result.ProjectId == job.ProjectId &&
             result.Attempt == job.Attempt && IntegrationVerifier.IsCommitSha(result.HeadSha) ? result.HeadSha : null;
-        var report = Json.Stringify(new { assurance = "UNKNOWN", head, outcome = job.State, quality,
+        var failureKind = job.Stage switch
+        {
+            "transient" => ExecutionFailureKind.Transient,
+            "deterministic" => ExecutionFailureKind.Deterministic,
+            "reconcile" => ExecutionFailureKind.Conflict,
+            "scope" or "budget" => ExecutionFailureKind.Policy,
+            "interrupted_git" => ExecutionFailureKind.UncertainSideEffect,
+            _ => (ExecutionFailureKind?)null
+        };
+        var report = Json.Stringify(new { assurance = "UNKNOWN", head, outcome = job.State,
+            stage = job.Stage, kind = failureKind?.ToString(), quality,
             findings = string.IsNullOrEmpty(job.Error) ? Array.Empty<ReviewFinding>() :
                 new[] { new ReviewFinding("controller", job.Error) },
             workerReport = request.Evidence is { Length: <= 1_000_000 } ? request.Evidence : null });

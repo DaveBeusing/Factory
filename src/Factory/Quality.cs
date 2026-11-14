@@ -101,7 +101,7 @@ public sealed class QualityEngine
                 });
                if (!response.Ok) quality.Findings.Add("Check failed: " + check.Name);
            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException and not TimeoutException)
             {
                 quality.Findings.Add("Check exception: " + check.Name + ": " + ex.Message);
            }
@@ -168,7 +168,7 @@ public sealed class QualityEngine
                 return (Role: role, Verdict: verdict, Message: result.FinalText[..Math.Min(3000, result.FinalText.Length)],
                     Session: result.SessionId, Adapter: runtime.GetType().Name);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException and not TokenBudgetExceededException)
+            catch (Exception ex) when (ex is not OperationCanceledException and not TokenBudgetExceededException and not TimeoutException)
             {
                 return (Role: role, Verdict: "CHANGES", Message: "Reviewer exception: " + ex.Message, Session: "", Adapter: "unknown");
             }

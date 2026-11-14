@@ -51,10 +51,12 @@ public static class Commands
             if (inputError is not null && proc.ExitCode == 0)
                 throw new IOException("The child process closed its input before receiving the full request", inputError);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException ex)
         {
             if (!proc.HasExited) proc.Kill(entireProcessTree: true);
             try { await proc.WaitForExitAsync(CancellationToken.None); } catch { }
+            if (timeout.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+                throw new TimeoutException($"Command exceeded its {Math.Max(1, timeoutSeconds)} second timeout.", ex);
             throw;
         }
         return new CommandResult(proc.ExitCode, output.ToString(), error.ToString());

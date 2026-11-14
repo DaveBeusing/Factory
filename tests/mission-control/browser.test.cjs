@@ -233,7 +233,7 @@ browserTest('keeps Mission Control layout, actions and version aligned', async (
   assert.equal(await runQueue.evaluate(element => getComputedStyle(element, '::before').display), 'none');
 });
 
-browserTest('creates a goal from project findings and rejects adoption of a stale plan', async ({ page, nav, form, inspector, api, home }) => {
+browserTest('creates a goal from project findings and rejects adoption of a stale plan', async ({ page, nav, form, inspector, api, home, connection }) => {
   const repo = path.join(home, 'repository');
   await mkdir(repo);
   const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 10_000 }).trim();
@@ -267,6 +267,30 @@ browserTest('creates a goal from project findings and rejects adoption of a stal
   assert.equal(goal.state, 'draft');
   const review = await api(`projects/${goal.projectId}/analysis`);
   assert.equal(review.commit, git('rev-parse', 'master'));
+
+  let releaseGeneration;
+  const holdGeneration = new Promise(resolve => { releaseGeneration = resolve; });
+  const generationRoute = '**/api/plans/' + goal.id + '/generate?*';
+  await page.route(generationRoute, async route => {
+    await holdGeneration;
+    await route.fulfill({ status: 400, json: { error: 'Generation fixture completed' } });
+  });
+  try {
+    const generate = page.locator('[data-act="plan-generate"]').filter({ hasNotText: 'Generating' });
+    await generate.click();
+    await page.getByRole('button', { name: 'Generating…', exact: true }).waitFor();
+    const currentToken = await page.evaluate(() => sessionStorage.getItem('factory-token'));
+    await page.getByRole('button', { name: 'Connection settings, connected' }).click();
+    await connection.getByLabel('API token').fill(currentToken);
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await connection.waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: 'Generating…', exact: true }).waitFor();
+    releaseGeneration();
+    await generate.waitFor();
+  } finally {
+    releaseGeneration();
+    await page.unroute(generationRoute);
+  }
 
   await page.getByRole('button', { name: 'Build plan' }).click();
   await inspector.getByRole('button', { name: 'Add package' }).click();

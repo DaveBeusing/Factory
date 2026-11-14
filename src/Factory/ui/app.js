@@ -31,7 +31,7 @@ const badge = (s) => { const value=String(s||'unknown').replace(/_/g,' ');const 
 const readToken = () => {try{return sessionStorage.getItem('factory-token')||''}catch{return ''}};
 let token=readToken(), state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};
 let planProject="";
-const generatingPlans=new Set();
+const generatingPlans=new Map();
 const number=value=>Number(value||0).toLocaleString();
 let settings={}, usage=null, providerData=null, projectReview=null, analysisProject='', health=null, view='overview', search='', filter='all', streamController=null,lastHeartbeat=0, connected=false, lastStateUpdate=0, modalHandler=null, inspector=null, planDraft=null, planGoal=null;
 let connectionRevision=0, loadingStateRevision=null, apiRequests=new AbortController();
@@ -1423,15 +1423,18 @@ async function act(action,id,index,revision){switch(action){case'open-connection
  case'plan-generate':{
  if(generatingPlans.has(id))break;
  if(plansCache.has(id)&&!confirm('Replace the saved plan with a new proposal?'))break;
- generatingPlans.add(id);render();
- const revisionAtStart=connectionRevision;
+ const operation={};
+ generatingPlans.set(id,operation);render();
+ const current=()=>generatingPlans.get(id)===operation;
  try{
   const expected=plansCache.get(id)?.revision||'00000000-0000-0000-0000-000000000000';
   const plan=await api('plans/'+id+'/generate?wait=true&planRevision='+encodeURIComponent(expected),'POST',{});
+  if(!current())break;
   plansCache.set(id,plan);
   notify('Plan generated');
   if(view==='plans')await act('plan-view',id);
- }finally{if(revisionAtStart===connectionRevision){generatingPlans.delete(id);render();await fetchProviders()}}
+ }catch(error){if(current())throw error}
+ finally{if(current()){generatingPlans.delete(id);render();await fetchProviders()}}
  break;}
  case'plan-edit':await planEditor(id);break;
  case'plan-preflight':{

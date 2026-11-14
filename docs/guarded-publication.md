@@ -1,0 +1,7 @@
+# Guarded publication
+
+`POST /api/jobs/{id}/publication` is an administrator operation. It requires a separate signed project decision. Configure the integration authority public key in `FACTORY_INTEGRATION_PUBLIC_KEY`. The authority signs the UTF-8 bytes of `Json.Stringify(PullRequestDecision)` using RSA-PSS and SHA-256. The approval limits the operation to the exact job, project revision, repository, base branch and commit, head, scope, GitHub account, method and expiry.
+
+Publication requires AllowPush and an eligible signed review. A decision with action draft, method pr-ci and pull number zero authorizes a draft for PR-triggered CI. Merge also requires AutoMerge, which defaults to false. A merge decision names the PR and selected merge method. The PR must already be out of draft and have independent GitHub approval and successful required checks on its exact head.
+
+A durable reservation precedes each mutation. After an uncertain operation, inspect GitHub and the audit records. The coordinator will not resend a reserved mutation. If GitHub reports a matching merge, submit the signed decision again to verify the merge and persist integration.

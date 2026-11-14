@@ -1768,6 +1768,45 @@ Test("Signed review approval survives restart and follows the exact reviewed hea
     }
 });
 
+await TestAsync("Publication defaults to disabled and requires a signed project decision before host access", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-publish-policy-");
+    var oldKey = Environment.GetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var job = new FactoryJob();
+        var decision = new PullRequestDecision(Guid.NewGuid(), job.Id, "", "example/repo", "master",
+            new string('a', 40), new string('b', 40), "publisher", "merge", "merge", 1,
+            DateTimeOffset.UtcNow.AddMinutes(5), PullRequestCoordinator.ScopeRevision(job));
+        Task<CommandResult> Host(string[] args, int timeout, CancellationToken ct) =>
+            throw new Exception("GitHub host was called before authorization.");
+        var settings = new FactorySettings { AllowPush = true };
+        var coordinator = new PullRequestCoordinator(store, settings, Host);
+        async Task Reject(string message)
+        {
+            try
+            {
+                await coordinator.ExecuteAsync(job.Id, new(decision, "AAAA"), CancellationToken.None);
+                throw new Exception("Unauthorized publication was accepted.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains(message)) { }
+        }
+        await Reject("disabled");
+        settings.AutoMerge = true;
+        Environment.SetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY", null);
+        await Reject("authority");
+        using var key = System.Security.Cryptography.RSA.Create(2048);
+        Environment.SetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY", key.ExportSubjectPublicKeyInfoPem());
+        await Reject("invalid signature");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY", oldKey);
+        try { home.Delete(true); } catch { }
+    }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {

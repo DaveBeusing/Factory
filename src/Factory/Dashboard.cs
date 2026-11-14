@@ -321,6 +321,8 @@ public static class DashboardHost
         });
         app.MapGet("/api/jobs/{id:guid}/review-approved", (Guid id) =>
             Results.Ok(new { approved = store.IsReviewApproved(id) }));
+        app.MapPost("/api/jobs/{id:guid}/publication", async (Guid id, SignedPullRequestDecision decision, CancellationToken ct) =>
+            Results.Ok(await new PullRequestCoordinator(store, settings).ExecuteAsync(id, decision, ct)));
         app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, string? pullRequestUrl, CancellationToken ct) =>
         {
             var proof = await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, pullRequestUrl,

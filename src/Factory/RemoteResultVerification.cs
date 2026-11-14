@@ -288,7 +288,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             ? sha : throw new InvalidOperationException("GitHub PR base commit is missing or invalid");
     }
 
-    private async Task<IReadOnlyList<string>> CompareFilePathsAsync(
+    internal async Task<IReadOnlyList<string>> CompareFilePathsAsync(
         string repository, string baseSha, string headSha, CancellationToken ct)
     {
         var response = await _runGitHub(
@@ -309,7 +309,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         return ParsePullFilePaths("[" + files.GetRawText() + "]");
     }
 
-    private async Task<HashSet<string>> RequiredChecksAsync(string repository, int number, string baseBranch,
+    internal async Task<HashSet<string>> RequiredChecksAsync(string repository, int number, string baseBranch,
         string sha, CancellationToken ct)
     {
         const string query = """

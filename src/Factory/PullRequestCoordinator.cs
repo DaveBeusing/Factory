@@ -7,7 +7,8 @@ namespace Factory;
 
 public sealed record PullRequestDecision(Guid ProjectId, Guid JobId, string ProjectRevision, string Repository,
     string BaseBranch, string BaseCommit, string HeadCommit, string Account, string Action, string Method,
-    int PullNumber, DateTimeOffset ExpiresAt, string ScopeRevision, bool BranchChecksAvailable = true);
+    int PullNumber, DateTimeOffset ExpiresAt, string ScopeRevision, bool BranchChecksAvailable = true,
+    string? WorkflowFile = null);
 public sealed record SignedPullRequestDecision(PullRequestDecision Decision, string Signature);
 
 internal sealed class PullRequestCoordinator(StateStore store, FactorySettings settings,
@@ -48,6 +49,8 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             GitOperations.EnforcePaths(changes, project.ProtectedPaths);
             if (d.BranchChecksAvailable)
                 await RequireBranchChecksAsync(d, project, ct);
+            else
+                await RequirePullRequestOnlyAsync(d, project, ct);
             Reserve(signed, job, project);
             await RequireCurrentBaseAsync(d, ct);
             var remoteHead = await ReadAsync(["api", $"repos/{d.Repository}/git/ref/heads/{branch}"], ct);
@@ -57,6 +60,11 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             var created = await MutateAsync(["api", "--method", "POST", $"repos/{d.Repository}/pulls",
                 "-f", "head=" + branch, "-f", "base=" + d.BaseBranch, "-f", "title=" + job.Title,
                 "-F", "draft=true", "-f", "body=Required PR CI evaluation for Factory job " + id], ct);
+            using var receipt = JsonDocument.Parse(created.GetRawText());
+            GitHubWorkerResultVerifier.ValidatePull(receipt, d.Repository, d.BaseBranch, branch, d.HeadCommit);
+            if (!created.GetProperty("draft").GetBoolean() ||
+                created.GetProperty("base").GetProperty("sha").GetString() != d.BaseCommit)
+                throw new InvalidOperationException("The created PR differs from the authorized draft; reconcile it in GitHub.");
             return new { url = created.GetProperty("html_url").GetString(), d.HeadCommit, draft = true };
         }
 
@@ -66,6 +74,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (pull.GetProperty("merged").GetBoolean())
         {
             RequireReservation(d);
+            await RequireMergeReceiptAsync(d, pull, ct);
             return await VerifyAfterMergeAsync(id, url, verifier, ct);
         }
 
@@ -82,7 +91,23 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         RequireCurrentDecision(signed, id);
         await MutateAsync(["api", "--method", "PUT", $"repos/{d.Repository}/pulls/{d.PullNumber}/merge",
             "-f", "sha=" + d.HeadCommit, "-f", "merge_method=" + d.Method], ct);
+        await RequireMergeReceiptAsync(d, await ReadPullAsync(d, ct), ct);
         return await VerifyAfterMergeAsync(id, url, verifier, ct);
+    }
+
+    private async Task RequireMergeReceiptAsync(PullRequestDecision d, JsonElement pull, CancellationToken ct)
+    {
+        // A regular merge commit can prove the exact base and head as parents.
+        if (d.Method != "merge" || !pull.GetProperty("merged").GetBoolean())
+            throw new InvalidOperationException("The signed base and head cannot be confirmed for this merge method.");
+        var sha = pull.GetProperty("merge_commit_sha").GetString();
+        if (sha is null || !IntegrationVerifier.IsCommitSha(sha))
+            throw new InvalidOperationException("Missing merge commit.");
+        var commit = await ReadAsync(["api", $"repos/{d.Repository}/git/commits/{sha}"], ct);
+        if (commit.GetProperty("sha").GetString() != sha ||
+            !commit.GetProperty("parents").EnumerateArray().Select(p => p.GetProperty("sha").GetString())
+                .SequenceEqual(new[] { d.BaseCommit, d.HeadCommit }))
+            throw new InvalidOperationException("The resulting merge did not use the signed base and head.");
     }
 
     private async Task RequireStrictRulesAsync(PullRequestDecision d, CancellationToken ct)
@@ -97,9 +122,35 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             var detail = await ReadAsync(["api",
                 $"repos/{d.Repository}/rulesets/{rule.GetProperty("ruleset_id").GetInt64()}"], ct);
             if (detail.GetProperty("enforcement").GetString() == "active" &&
-                detail.TryGetProperty("bypass_actors", out var bypass) && bypass.GetArrayLength() == 0) return;
+                detail.TryGetProperty("bypass_actors", out var bypass) && bypass.GetArrayLength() == 0 &&
+                detail.GetProperty("rules").EnumerateArray().Any(candidate =>
+                    candidate.GetProperty("type").GetString() == "pull_request" &&
+                    candidate.GetProperty("parameters").GetProperty("required_approving_review_count").GetInt32() > 0 &&
+                    candidate.GetProperty("parameters").GetProperty("dismiss_stale_reviews_on_push").GetBoolean())) return;
         }
         throw new InvalidOperationException("A strict required-check ruleset with no bypass actors is required.");
+    }
+
+    private async Task RequirePullRequestOnlyAsync(PullRequestDecision d, ProjectInfo project, CancellationToken ct)
+    {
+        // An independently signed policy names the workflow. Its hosted source must show PR-only triggers.
+        if (project.Checks.Count != 1 || string.IsNullOrWhiteSpace(d.WorkflowFile) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(d.WorkflowFile, @"^[A-Za-z0-9_.-]+\.ya?ml$"))
+            throw new InvalidOperationException("A verifiable PR-only workflow is required.");
+        var path = $".github/workflows/{d.WorkflowFile}";
+        foreach (var sha in new[] { d.BaseCommit, d.HeadCommit })
+        {
+            var file = await ReadAsync(["api", $"repos/{d.Repository}/contents/{path}?ref={sha}"], ct);
+            var yaml = Encoding.UTF8.GetString(Convert.FromBase64String(file.GetProperty("content").GetString()!));
+            // Accept only the supported explicit trigger form. Other YAML forms require branch CI.
+            var trigger = System.Text.RegularExpressions.Regex.Match(yaml, @"(?m)^on:[ \t]*\r?\n((?:[ \t]+[^\r\n]+\r?\n)+)");
+            if (!trigger.Success ||
+                !System.Text.RegularExpressions.Regex.IsMatch(trigger.Groups[1].Value,
+                    @"\A  pull_request:[ \t]*\r?\n(?:    [^\r\n]+\r?\n)*\z") ||
+                !System.Text.RegularExpressions.Regex.IsMatch(yaml,
+                    "(?m)^  " + System.Text.RegularExpressions.Regex.Escape(project.Checks[0].Name) + ":[ \\t]*$"))
+                throw new InvalidOperationException("The hosted workflow does not prove the required check is PR-only.");
+        }
     }
 
     private void RequireCurrentDecision(SignedPullRequestDecision signed, Guid id)
@@ -126,10 +177,12 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         {
             var name = rule.GetProperty("context").GetString();
             if (!rule.TryGetProperty("integration_id", out var app) || app.ValueKind != JsonValueKind.Number ||
-                !runs.Any(run => run.GetProperty("name").GetString() == name &&
+                runs.Where(run => run.GetProperty("name").GetString() == name &&
                     run.GetProperty("head_sha").GetString() == d.HeadCommit &&
-                    run.GetProperty("app").GetProperty("id").GetInt64() == app.GetInt64() &&
-                    run.GetProperty("conclusion").GetString() == "success"))
+                    run.GetProperty("app").GetProperty("id").GetInt64() == app.GetInt64())
+                    .OrderByDescending(run => run.GetProperty("id").GetInt64()).FirstOrDefault() is not
+                    { ValueKind: JsonValueKind.Object } latest ||
+                latest.GetProperty("conclusion").GetString() != "success")
                 throw new InvalidOperationException("Trusted branch CI is missing or unsuccessful: " + name);
         }
     }
@@ -195,7 +248,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             d.ScopeRevision != ScopeRevision(job) || d.HeadCommit != job.HeadSha || !IntegrationVerifier.IsCommitSha(d.HeadCommit) ||
             !IntegrationVerifier.IsCommitSha(d.BaseCommit) || d.ExpiresAt <= now || d.ExpiresAt > now.AddHours(24) ||
             (d.Action == "draft" ? d.PullNumber != 0 || d.Method != "pr-ci" :
-                d.PullNumber <= 0 || d.Method is not ("merge" or "squash" or "rebase")))
+                d.PullNumber <= 0 || d.Method != "merge"))
             throw new InvalidOperationException("The signed policy decision does not match the current job and target.");
     }
 

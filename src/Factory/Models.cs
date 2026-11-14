@@ -82,6 +82,7 @@ internal static class JobLifecycle
 public sealed class FactoryState
 {
     internal HashSet<Guid> VerifiedIntegrations { get; } = [];
+    internal HashSet<(Guid JobId, long Generation)> StartedBuilders { get; } = [];
     public int Schema { get; set; } = 1;
     public List<ProjectInfo> Projects { get; set; } = [];
     public List<FactoryJob> Jobs { get; set; } = [];

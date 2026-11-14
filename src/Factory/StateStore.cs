@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 22;
+    private const int DatabaseVersion = 23;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -316,7 +316,7 @@ public sealed partial class StateStore
             if (schemaVersion < 19) UpgradeLifecycleAudit(db, tx);
             if (schemaVersion < 20) UpgradeFactoryPolicy(db, tx);
             if (schemaVersion < 21) UpgradeIssueIntake(db, tx);
-            Execute(db, tx, """
+            if (schemaVersion < 22) Execute(db, tx, """
                 CREATE TABLE IF NOT EXISTS jobs_shared_resources(
                     owner_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
                     position INTEGER NOT NULL, value TEXT NOT NULL, PRIMARY KEY(owner_id,position)
@@ -335,6 +335,7 @@ public sealed partial class StateStore
                     AND a.reason_code='IntegrationVerified' AND a.reference IS NOT NULL;
                 PRAGMA user_version=22;
                 """);
+            UpgradeExecutionProfiles(db, tx);
         }
         tx.Commit();
     }
@@ -639,6 +640,9 @@ public sealed partial class StateStore
             """);
         using var verified = integration.ExecuteReader();
         while (verified.Read()) state.VerifiedIntegrations.Add(Guid.Parse(verified.GetString(0)));
+        using var starts = Command(db, tx, "SELECT job_id,generation FROM started_builder_claims;");
+        using var started = starts.ExecuteReader();
+        while (started.Read()) state.StartedBuilders.Add((Guid.Parse(started.GetString(0)), started.GetInt64(1)));
         return state;
     }
 

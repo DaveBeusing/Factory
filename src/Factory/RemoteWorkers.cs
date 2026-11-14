@@ -5,7 +5,9 @@ using System.Text;
 
 namespace Factory;
 
-public sealed class WorkerClaimRequest { public string WorkerId { get; set; } = ""; public int ProtocolVersion { get; set; } }
+public sealed class WorkerClaimRequest { public string WorkerId { get; set; } = ""; public int ProtocolVersion { get; set; } public bool SupportsStartAdmission { get; set; } }
+public sealed record WorkerStartRequest(string WorkerId, Guid ProjectId, Guid JobId, long ExecutionGeneration,
+    string LeaseToken, Guid? ProviderLeaseId);
 public sealed class WorkerClaim
 {
     public string WorkerId { get; set; } = "";
@@ -97,6 +99,11 @@ public static class WorkerProtocol
                 if (requiresProviderLease && routes is null) continue;
                 JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
                     state: s, reservationTokens: settings.GoalReservationTokens);
+                StateStore.RecordExecutionProvenance(db, tx, project, job,
+                    routes?.Single(route => route.Role == "builder").Runtime ?? settings.Runtime,
+                    s.WorkerCapabilityProofs.Where(proof => proof.WorkerId == workerId &&
+                        proof.VerifiedAt <= DateTimeOffset.UtcNow && proof.VerifiedAt > DateTimeOffset.UtcNow.AddDays(-30) &&
+                        WorkerAuthorization.IsKnownCapability(proof.Capability) && !string.IsNullOrWhiteSpace(proof.Evidence)));
                 StateStore.RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, job.LeaseOwner, JobStates.Queued,
                     job.State, LifecycleReason.LeaseClaimed, generation: job.ExecutionGeneration, state: s);
                 RemoteProviderLease? providerLease = null;
@@ -135,7 +142,7 @@ public static class WorkerProtocol
                     Project = project, Job = job, Goal = goalCopy,
                     Settings = new FactorySettings
                     {
-                        Runtime = settings.Runtime, Model = settings.Model,
+                    Runtime = routes?.Single(route => route.Role == "builder").Runtime ?? settings.Runtime, Model = settings.Model,
                         MaxReviewRounds = settings.MaxReviewRounds, AllowPush = true,
                         LeaseSeconds = settings.LeaseSeconds, MaxParallel = 1,
                         GoalReservationTokens = job.GoalId is null
@@ -167,7 +174,7 @@ public static class WorkerProtocol
                 request.LeaseToken, "remote:" + request.WorkerId);
             if (worker is null || job is null || project is null ||
                 !WorkerAuthorization.CanContinue(state, worker, project, job, settings) ||
-                !JobRecovery.Matches(job, fence) ||
+                !JobRecovery.Matches(job, fence) || !state.StartedBuilders.Contains((job.Id, fence.Generation)) ||
                 job.Mode != JobExecutionModes.Remote || job.GoalId is null)
                 return null;
             var providerLease = RemoteProviderRouting.Current(state, job);
@@ -197,6 +204,7 @@ public static class WorkerProtocol
             var project = j is null ? null : s.Projects.FirstOrDefault(p => p.Id == j.ProjectId);
             if (j is null || project is null ||
                 !WorkerAuthorization.CanContinue(s, worker, project, j, settings) ||
+                !s.StartedBuilders.Contains((j.Id, req.ExecutionGeneration)) ||
                 !JobRecovery.Matches(j,
                 new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
                 return false;
@@ -251,6 +259,7 @@ public static class WorkerProtocol
         if (claimed is null || worker is null || claimProject is null ||
             !WorkerAuthorization.CanContinue(state, worker, claimProject, claimed, executionSettings) ||
             claimed.Mode != JobExecutionModes.Remote ||
+            !state.StartedBuilders.Contains((claimed.Id, req.ExecutionGeneration)) ||
             !JobRecovery.Matches(claimed,
                 new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
             return false;
@@ -304,6 +313,7 @@ public static class WorkerProtocol
             if (j is null || currentWorker is null || currentProject is null ||
                 !WorkerAuthorization.CanContinue(s, currentWorker, currentProject, j, executionSettings) ||
                 j.Mode != JobExecutionModes.Remote ||
+                !s.StartedBuilders.Contains((j.Id, req.ExecutionGeneration)) ||
                 !JobRecovery.Matches(j,
                     new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)) ||
                 j.Attempt != claimed.Attempt || j.ProjectId != claimed.ProjectId ||
@@ -397,7 +407,8 @@ public static class RemoteWorker
             register.EnsureSuccessStatusCode();
         while (!ct.IsCancellationRequested)
         {
-            using var claimResponse = await http.PostAsJsonAsync("api/worker/claim", new WorkerClaimRequest { WorkerId = workerId, ProtocolVersion = RemoteProviderRouting.ProtocolVersion }, ct);
+            using var claimResponse = await http.PostAsJsonAsync("api/worker/claim", new WorkerClaimRequest
+            { WorkerId = workerId, ProtocolVersion = RemoteProviderRouting.ProtocolVersion, SupportsStartAdmission = true }, ct);
            claimResponse.EnsureSuccessStatusCode();
            if (claimResponse.StatusCode == System.Net.HttpStatusCode.NoContent)
             {
@@ -407,7 +418,12 @@ public static class RemoteWorker
            }
             var claim = await claimResponse.Content.ReadFromJsonAsync<WorkerClaim>(Json.Options, ct)
                 ?? throw new IOException("Empty worker claim");
-            if (!JobExecutionModes.Matches(claim.Job, JobExecutionModes.Remote))
+            if (claim.WorkerId != workerId || claim.Job.ProjectId != claim.Project.Id ||
+                !BuilderExecutionProfile.Allows(claim.Project, claim.Job) ||
+                !BuilderExecutionProfile.MatchesRuntime(claim.Project, claim.Job, claim.Settings.Runtime) ||
+                (claim.ProviderLeaseId is not null &&
+                    claim.ProviderRoutes?.SingleOrDefault(route => route.Role == "builder")?.Runtime != claim.Settings.Runtime) ||
+                !JobExecutionModes.Matches(claim.Job, JobExecutionModes.Remote))
                 throw new InvalidOperationException("Remote worker received a job for another execution mode");
            var jobDir = Path.Combine(workspace, claim.Job.Id.ToString("N"));
            Directory.CreateDirectory(jobDir);
@@ -416,6 +432,11 @@ public static class RemoteWorker
                 TokensIn = claim.Job.TokensIn, TokensOut = claim.Job.TokensOut,
                 ExecutionGeneration = claim.Job.ExecutionGeneration,
                 LeaseToken = claim.Job.LeaseToken, ProviderLeaseId = claim.ProviderLeaseId };
+           if (!localState.ConsumeWorkerClaim(report.JobId, report.ExecutionGeneration)) continue;
+           using (var admitted = await http.PostAsJsonAsync("api/worker/start",
+               new WorkerStartRequest(workerId, claim.Project.Id, report.JobId, report.ExecutionGeneration,
+                   report.LeaseToken, report.ProviderLeaseId), ct))
+               if (!admitted.IsSuccessStatusCode) continue;
            using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
            using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
            var heartbeat = Task.Run(async () =>

@@ -1566,6 +1566,38 @@ Test("Interrupted Git retries keep ownership until reviewed release", () =>
     finally { try { home.Delete(true); } catch { } }
 });
 
+Test("Builder restrictions cannot be satisfied by worker claims", () =>
+{
+    var project = new ProjectInfo();
+    var job = new FactoryJob { ProjectId = project.Id };
+    foreach (var restriction in new[] { BuilderExecutionProfile.Filesystem, BuilderExecutionProfile.Network,
+        BuilderExecutionProfile.Process, BuilderExecutionProfile.Secrets, "isolation:unknown" })
+    {
+        job.RequiredExecutionCapabilities = [restriction];
+        Assert(!BuilderExecutionProfile.Allows(project, job));
+        Assert(WorkerAuthorization.RequiredCapabilities(project, job, new FactorySettings()) is null);
+    }
+    job.RequiredExecutionCapabilities = [];
+    Assert(BuilderExecutionProfile.Allows(project, job));
+});
+
+Test("Worker claim consumption rejects replay after reopen", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-worker-consumption-");
+    try
+    {
+        var job = Guid.NewGuid();
+        var claims = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+            new StateStore(home.FullName).ConsumeWorkerClaim(job, 1))).ToArray();
+        Task.WaitAll(claims);
+        Assert(claims.Count(claim => claim.Result) == 1);
+        var reopened = new StateStore(home.FullName);
+        Assert(reopened.ConsumeWorkerClaim(job, 2));
+        Assert(!reopened.ConsumeWorkerClaim(job, 1) && !reopened.ConsumeWorkerClaim(job, 2));
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -2057,6 +2089,8 @@ await TestAsync("Remote scope block reaches the controller as amendable scope", 
         });
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), new FactorySettings { AllowPush = true }));
         Assert(claim is not null);
         var reported = new FactoryJob
         {
@@ -2557,7 +2591,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 22, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 23, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -3095,6 +3129,8 @@ Test("Remote budget grants are controller-authorized, fenced and idempotent", ()
             fences.Add(job.Id, store.Change(s => JobRecovery.Assign(
                 s.Jobs.Single(j => j.Id == job.Id), "remote:" + worker, 120,
                 local: false, state: s, reservationTokens: 4096)));
+            var fence = fences[job.Id];
+            Assert(store.StartRemoteBuilder(new(worker, project.Id, job.Id, fence.Generation, fence.Token, null), settings));
         }
 
         WorkerBudgetExtensionRequest Request(FactoryJob job, Guid id)
@@ -3175,7 +3211,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 22);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 23);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3422,6 +3458,8 @@ await TestAsync("Remote goal claims retain remaining budget and failed usage", a
         });
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), new FactorySettings { AllowPush = true }));
         Assert(claim?.Goal is not null && claim.Goal.TokenBudget == 750);
         Assert(claim!.Job.TokensIn == 20);
         Assert(WorkerProtocol.Heartbeat(store, new WorkerStatus
@@ -3538,6 +3576,8 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
         });
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), new FactorySettings { AllowPush = true }));
         Assert(claim != null);
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
             Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
@@ -3572,6 +3612,8 @@ await TestAsync("Controller-verified remote results are atomically bound to the 
         });
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), new FactorySettings { AllowPush = true }));
         Assert(claim != null);
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
             Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
@@ -3675,7 +3717,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 22);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 23);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3799,6 +3841,8 @@ await TestAsync("Remote worker generation fences stale heartbeats and completion
         var settings = new FactorySettings { AllowPush = true };
         GrantRemoteWorker(store, "worker-01", project.Id);
         var first = WorkerProtocol.Claim(store, settings, "worker-01");
+        if (first is not null) Assert(store.StartRemoteBuilder(new(first.WorkerId, first.Project.Id, first.Job.Id,
+            first.Job.ExecutionGeneration, first.Job.LeaseToken, first.ProviderLeaseId), settings));
         Assert(first is not null);
         var stale = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,
             ExecutionGeneration = first!.Job.ExecutionGeneration, LeaseToken = first.Job.LeaseToken };
@@ -3809,6 +3853,8 @@ await TestAsync("Remote worker generation fences stale heartbeats and completion
         Assert(!await WorkerProtocol.CompleteAsync(store, stale, new RefusingWorkerVerifier()));
         store.UpdateJob(job.Id, j => { j.State = JobStates.Queued; j.Stage = "operator_reviewed"; });
         var second = WorkerProtocol.Claim(store, settings, "worker-01");
+        if (second is not null) Assert(store.StartRemoteBuilder(new(second.WorkerId, second.Project.Id, second.Job.Id,
+            second.Job.ExecutionGeneration, second.Job.LeaseToken, second.ProviderLeaseId), settings));
         Assert(second is not null && second.Job.ExecutionGeneration > stale.ExecutionGeneration);
         Assert(second!.Job.LeaseToken != stale.LeaseToken);
         Assert(!WorkerProtocol.Heartbeat(store, stale, settings));
@@ -4151,6 +4197,8 @@ await TestAsync("Unverified remote final usage holds budget until reviewed recon
         var settings = new FactorySettings { AllowPush = true };
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, settings, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), settings));
         Assert(claim is not null);
         var claimed = claim!.Job;
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id,
@@ -4201,6 +4249,8 @@ await TestAsync("Remote reservation overrun fences worker and preserves actual u
         var settings = new FactorySettings { AllowPush = true };
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, settings, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), settings));
         Assert(claim is not null);
         var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,
             ExecutionGeneration = claim!.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,

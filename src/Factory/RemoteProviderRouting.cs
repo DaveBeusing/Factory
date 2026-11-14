@@ -188,6 +188,8 @@ public static class RemoteProviderRouting
         var worker = state.Workers.Single(w => w.Id == request.WorkerId);
         var lease = Current(state, job);
         JobRecovery.Require(job, new(request.ExecutionGeneration, request.LeaseToken, "remote:" + worker.Id));
+        if (!state.StartedBuilders.Contains((job.Id, request.ExecutionGeneration)))
+            throw new InvalidOperationException("Remote execution has not been admitted to start");
         if (lease is null || lease.Id != request.LeaseId || lease.WorkerId != worker.Id ||
             !WorkerAuthorization.CanContinue(state, worker, project, job, settings) ||
             !CanContinue(state, settings, job, lease))
@@ -297,6 +299,7 @@ public static class RemoteProviderRouting
         var turn = state.RemoteProviderTurns.Single(t => t.Id == grant.TurnId);
         var lease = Current(state, job);
         if (lease is null || lease.Id != grant.LeaseId || job.ExecutionGeneration != grant.ExecutionGeneration ||
+            !state.StartedBuilders.Contains((job.Id, grant.ExecutionGeneration)) ||
             !JobStates.Active.Contains(job.State) || job.LeaseUntil is not { } deadline || deadline <= DateTimeOffset.UtcNow ||
             job.LeaseOwner != "remote:" + lease.WorkerId || turn.State != "active")
             return false;

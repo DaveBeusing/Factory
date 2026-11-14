@@ -75,6 +75,10 @@ internal static class RemoteProviderLeaseTests
             Check(!WorkerAuthentication.Authorized("POST", "/api/worker/turn", "Bearer " + token, worker, settings),
                 "Executor credential authorized a worker request");
 
+            store.UpdateJob(job.Id, current => current.RequiredExecutionCapabilities.Add("runtime:exec"));
+            Check(WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion) is null,
+                "Mismatched builder runtime was admitted");
+            store.UpdateJob(job.Id, current => current.RequiredExecutionCapabilities.Clear());
             var claim = WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion)
                 ?? throw new Exception("Versioned worker could not claim the opted-in job");
             Check(claim.ProviderRoutes!.Single(r => r.Role == "review:code").ProviderId == "review-fixture",
@@ -82,6 +86,31 @@ internal static class RemoteProviderLeaseTests
             var status = new WorkerStatus { WorkerId = worker, JobId = job.Id,
                 ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,
                 ProviderLeaseId = claim.ProviderLeaseId, TokensIn = 4000, TokensOut = 4000, UsageComplete = true };
+            var start = new WorkerStartRequest(worker, project.Id, job.Id, status.ExecutionGeneration,
+                status.LeaseToken, claim.ProviderLeaseId);
+            Check(!WorkerProtocol.Heartbeat(store, status, settings), "Heartbeat accepted a claim before start");
+            Check(!await WorkerProtocol.CompleteAsync(store, status, new FixtureVerifier(), settings: settings),
+                "Completion accepted a claim before start");
+            Check(WorkerProtocol.ExtendBudget(store, settings, new WorkerBudgetExtensionRequest
+            {
+                WorkerId = worker, JobId = job.Id, ExecutionGeneration = start.ExecutionGeneration,
+                LeaseToken = start.LeaseToken, RequestId = Guid.NewGuid(), RequestedTokens = 256
+            }) is null, "Budget extension accepted a claim before start");
+            Reject(() => store.Change(state => RemoteProviderRouting.Begin(state, settings, new RemoteProviderTurnRequest
+            {
+                WorkerId = worker, JobId = job.Id, ExecutionGeneration = start.ExecutionGeneration,
+                LeaseToken = start.LeaseToken, LeaseId = claim.ProviderLeaseId!.Value,
+                Role = "builder", Commit = Base, TurnId = Guid.NewGuid()
+            })), "provider dispatch before start");
+            Check(!store.StartRemoteBuilder(start with { ProjectId = Guid.NewGuid() }, settings),
+                "Start accepted the wrong project");
+            Check(!store.StartRemoteBuilder(start with { ExecutionGeneration = start.ExecutionGeneration - 1 }, settings),
+                "Start accepted a stale generation");
+            var starters = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+                new StateStore(scratch.FullName).StartRemoteBuilder(start, settings))));
+            Check(starters.Count(accepted => accepted) == 1, "Concurrent starts were not consumed exactly once");
+            Check(!new StateStore(scratch.FullName).StartRemoteBuilder(start, settings),
+                "A restarted controller accepted a duplicate start");
             Check(WorkerProtocol.Heartbeat(store, status, settings) && store.Job(job.Id).TokensIn == 0,
                 "Worker heartbeat replaced trusted usage");
 
@@ -139,6 +168,8 @@ internal static class RemoteProviderLeaseTests
             var nextJob = NewJob();
             store.Change(state => state.Jobs.Add(nextJob));
             claim = WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion)!;
+            Check(store.StartRemoteBuilder(new(worker, project.Id, claim.Job.Id, claim.Job.ExecutionGeneration,
+                claim.Job.LeaseToken, claim.ProviderLeaseId), settings), "New generation could not start");
             var wrong = Begin(Request("builder", Base));
             Check(!Record(wrong, Receipt(wrong, "different-model")), "Substituted model was accepted");
             var recovered = new StateStore(scratch.FullName).Read();
@@ -154,6 +185,8 @@ internal static class RemoteProviderLeaseTests
             store.UpdateJob(expiringJob.Id, current => current.ExpectedPaths = ["independent.txt"]);
             claim = WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion)
                 ?? throw new Exception("Disjoint job could not claim while remote ownership was quarantined");
+            Check(store.StartRemoteBuilder(new(worker, project.Id, claim.Job.Id, claim.Job.ExecutionGeneration,
+                claim.Job.LeaseToken, claim.ProviderLeaseId), settings), "New generation could not start");
             var interrupted = Begin(Request("builder", Base));
             store.Change(state => state.Jobs.Single(j => j.Id == expiringJob.Id).LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
             Check(JobRecovery.QuarantineExpired(store, JobExecutionModes.Remote).Contains(expiringJob.Id) &&

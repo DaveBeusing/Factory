@@ -13,7 +13,7 @@ public static class WorkerAuthentication
 
     private static readonly string[] WorkerEndpoints =
     [
-        "/api/worker/register", "/api/worker/claim",
+        "/api/worker/register", "/api/worker/claim", "/api/worker/start",
         "/api/worker/heartbeat", "/api/worker/complete", "/api/worker/budget/extend", "/api/worker/turn"
     ];
 

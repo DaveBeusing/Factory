@@ -382,6 +382,8 @@ public static class DashboardHost
         {
             if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
                 return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
+            if (!req.SupportsStartAdmission)
+                return Results.Conflict(new { error = "Upgrade the worker to use one-shot start admission." });
             var claim = WorkerProtocol.Claim(store, settings, req.WorkerId, req.ProtocolVersion);
             return claim is null ? (IResult)Results.NoContent() : Results.Ok(claim);
         });
@@ -418,6 +420,12 @@ public static class DashboardHost
             if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
                 return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
             return Results.Ok(await RemoteProviderRouting.ExecuteAsync(store, settings, req, ct));
+        });
+        app.MapPost("/api/worker/start", (HttpContext ctx, WorkerStartRequest req) =>
+        {
+            if (!WorkerAuthentication.MatchesIdentity(ctx.Request.Headers[WorkerAuthentication.WorkerIdHeader].ToString(), req.WorkerId))
+                return (IResult)Results.StatusCode(StatusCodes.Status403Forbidden);
+            return store.StartRemoteBuilder(req, settings) ? (IResult)Results.Ok() : Results.Conflict();
         });
         app.MapPost("/api/worker/heartbeat", (HttpContext ctx, WorkerStatus req) =>
         {

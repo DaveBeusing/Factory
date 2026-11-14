@@ -31,6 +31,18 @@ public sealed class FactoryEngine
         _plugins = plugins ?? [];
     }
 
+    private bool ProfileAllows(FactoryState state, ProjectInfo project, FactoryJob job)
+    {
+        if (_executionMode != JobExecutionModes.Local) return BuilderExecutionProfile.Allows(project, job);
+        var runtime = _settings.Runtime;
+        if (!_runtimeOverridden)
+        {
+            try { runtime = ProviderRouter.EffectiveCodexRuntime(_settings, ProviderRouter.Resolve(_settings, state, project.Id, "builder")); }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { return false; }
+        }
+        return BuilderExecutionProfile.AllowsLocal(project, job, runtime, _runtimeOverridden);
+    }
+
     private bool Claim(Guid id)
     {
         return _store.Change((s, db, tx) =>
@@ -39,10 +51,16 @@ public sealed class FactoryEngine
            if (!JobExecutionModes.Matches(j, _executionMode) || j.State != JobStates.Queued ||
                 !DependencyGraph.DependenciesSatisfied(j, s.Jobs) || s.Paused) return false;
            var selected = JobScheduler.Select(s, _settings.MaxParallel, _executionMode,
+                candidate => ProfileAllows(s, s.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
                 reservationTokens: _settings.GoalReservationTokens);
            if (!selected.Any(x => x.Id == id)) return false;
            JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true,
                 state: s, reservationTokens: _settings.GoalReservationTokens);
+           var runtime = _runtimeOverridden ? "custom" :
+                _executionMode == JobExecutionModes.Local
+                    ? ProviderRouter.EffectiveCodexRuntime(_settings, ProviderRouter.Resolve(_settings, s, j.ProjectId, "builder"))
+                    : _settings.Runtime;
+           StateStore.RecordExecutionProvenance(db, tx, s.Projects.Single(p => p.Id == j.ProjectId), j, runtime);
            StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, _workerId, JobStates.Queued,
                j.State, LifecycleReason.LeaseClaimed, generation: j.ExecutionGeneration, state: s);
            s.Events.Add(new FactoryEvent { JobId = id, Type = "claimed", Message = _workerId });
@@ -86,7 +104,9 @@ public sealed class FactoryEngine
                 try { await running[id]; } catch (Exception ex) { _store.Event(id, "worker_error", ex.Message); }
                 running.Remove(id);
            }
-            var selected = JobScheduler.Select(_store.Read(), _settings.MaxParallel, _executionMode,
+            var snapshot = _store.Read();
+            var selected = JobScheduler.Select(snapshot, _settings.MaxParallel, _executionMode,
+                candidate => ProfileAllows(snapshot, snapshot.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
                 reservationTokens: _settings.GoalReservationTokens);
            foreach (var j in selected)
             {
@@ -125,7 +145,12 @@ public sealed class FactoryEngine
         if (!JobExecutionModes.Matches(claimed, _executionMode))
             throw new InvalidOperationException("Job is not claimed by this runner for its execution mode");
         JobRecovery.Require(claimed, fence);
+        var admission = _store.Read();
+        if (!ProfileAllows(admission, admission.Projects.Single(p => p.Id == claimed.ProjectId), claimed))
+            throw new InvalidOperationException("The runner cannot enforce the requested execution profile.");
 
+        if (!_store.StartBuilderClaim(id, fence))
+            throw new LostExecutionLeaseException("This execution claim is stale or has already started.");
         using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
         var heartbeat = Task.Run(async () =>
@@ -217,6 +242,9 @@ public sealed class FactoryEngine
         IAgentRuntime RuntimeFor(string role)
         {
             var snapshot = _store.Read();
+            if (role == "builder" && !ProfileAllows(snapshot, snapshot.Projects.Single(project => project.Id == p.Id),
+                snapshot.Jobs.Single(job => job.Id == j.Id)))
+                throw new InvalidOperationException("The builder route no longer satisfies the execution profile.");
             var selected = _runtimeOverridden || _remoteProviderRuntime is not null ? (ProviderSelection?)null :
                 ProviderRouter.Select(_settings, snapshot, p.Id, role, j.Risk);
             var meter = selected is { } choice

@@ -181,7 +181,7 @@ public sealed class FactoryEngine
         {
             // The previous generation may not publish an outcome.
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (executionCancel.IsCancellationRequested)
         {
             try { _store.InterruptFencedStage(id, fence); }
             catch (LostExecutionLeaseException) { }

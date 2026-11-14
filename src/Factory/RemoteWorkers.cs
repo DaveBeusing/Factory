@@ -417,9 +417,14 @@ public static class WorkerProtocol
                     interrupted.Mode == JobExecutionModes.Remote &&
                     (interrupted.State == JobStates.PrReady || !string.IsNullOrWhiteSpace(interrupted.PrUrl) ||
                      interrupted.Stage is "interrupted_git" or "commit" or "push" or "pr" or "merge");
+                var requiresReconciliation = req.Job is { State: JobStates.Blocked, Stage: "reconcile" } conflict &&
+                    conflict.Id == j.Id && conflict.ProjectId == j.ProjectId &&
+                    conflict.Attempt == j.Attempt && conflict.Mode == JobExecutionModes.Remote;
                 j.State = JobStates.Blocked;
-                j.Stage = gitUncertain ? "interrupted_git" : scopeBlocked ? "scope" : "remote_verification_failed";
+                j.Stage = gitUncertain ? "interrupted_git" : requiresReconciliation ? "reconcile" :
+                    scopeBlocked ? "scope" : "remote_verification_failed";
                 j.Error = gitUncertain ? "Remote Git effects are uncertain; reconcile before retry." :
+                    requiresReconciliation ? "Remote execution reported a conflict; reconcile before retry." :
                     scopeBlocked ? req.Job!.Error : pendingReview is not null
                     ? "Unverified or exhausted final goal usage" : failure;
                 if (StateStore.ReviewCyclesUsed(db, tx, j.Id) >= Math.Clamp(j.MaxRounds, 1, ReviewPolicy.MaxCycles))

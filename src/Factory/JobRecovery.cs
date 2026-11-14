@@ -18,7 +18,7 @@ internal sealed record ExecutionFailure(ExecutionFailureKind Kind, string State,
         (_, ScopeViolationException) => new(ExecutionFailureKind.Policy, JobStates.Blocked, "scope"),
         ("commit" or "push" or "pr" or "merge", _) => new(ExecutionFailureKind.UncertainSideEffect, JobStates.Blocked, "interrupted_git"),
         (_, TokenBudgetExceededException) => new(ExecutionFailureKind.Policy, JobStates.Blocked, "budget"),
-        (_, TimeoutException) => new(ExecutionFailureKind.Transient, JobStates.Failed, "transient"),
+        (_, TimeoutException or OperationCanceledException) => new(ExecutionFailureKind.Transient, JobStates.Failed, "transient"),
         ("worktree", _) => new(ExecutionFailureKind.Conflict, JobStates.Blocked, "reconcile"),
         _ => new(ExecutionFailureKind.Deterministic, JobStates.Failed, "deterministic")
     };

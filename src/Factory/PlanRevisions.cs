@@ -52,10 +52,26 @@ public sealed partial class StateStore
             : null;
     }
 
+    internal static bool HasAdoptedSpecification(SqliteConnection db, SqliteTransaction tx, Guid? goalId)
+    {
+        if (goalId is null) return false;
+        using var query = Command(db, tx, """
+            SELECT r.content FROM goal_plan_revisions r JOIN lifecycle_audit a ON a.reference=r.revision
+            WHERE r.goal_id=$goal AND a.entity_id=r.goal_id AND a.entity_kind='plan'
+                AND a.reason_code='PlanAdopted' ORDER BY r.id DESC LIMIT 1;
+            """, ("$goal", goalId));
+        return query.ExecuteScalar() is string content &&
+            JsonSerializer.Deserialize<FactoryPlan>(content, Json.Options)?.ContractVersion == 1;
+    }
+
     internal static FactoryPlan InsertPlanRevision(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan,
         string actor = "local-operator")
     {
         var previous = ReadStoredPlanRevision(db, tx, plan.GoalId);
+        if (previous?.ContractVersion == 1 && plan.ContractVersion != 1)
+            throw new ArgumentException("An existing specification cannot be downgraded to a legacy plan.");
+        plan.PreviousRevision = previous?.Revision;
+        plan.Changes = SpecificationContracts.Diff(previous, plan);
         plan.Revision = Guid.NewGuid();
         BindIntakePlan(db, tx, plan);
         Execute(db, tx, """

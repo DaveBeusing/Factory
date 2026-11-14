@@ -137,6 +137,7 @@ public sealed partial class StateStore
         VerifyPlanSave(current, draft);
         verify?.Invoke(db, tx, current);
         VerifyPlanCheckout(scope.Project, current.Project, draft.BaseCommit);
+        VerifySpecification(db, tx, draft);
         cancellation.ThrowIfCancellationRequested();
         InsertPlanRevision(db, tx, draft, current.SubjectId.ToString());
         AuditPlan(db, tx, current, draft, operation, reviewed: null);
@@ -164,6 +165,7 @@ public sealed partial class StateStore
         var current = ReadPlanScope(db, tx, verifier, projectId, goalId);
         RequireDraftPlanTarget(current);
         Planning.VerifyAdoptionTarget(plan, current.StoredPlan, scope.Project, current.Project, current.Goal);
+        VerifySpecification(db, tx, plan);
         if (DecidePlanAdoption(db, tx, plan, current.SubjectId.ToString()) != PolicyOutcome.Allow)
         {
             tx.Commit();
@@ -184,6 +186,23 @@ public sealed partial class StateStore
 
     private static string RequirePlanVerifier(string authorization) =>
         ReadViewerVerifier(authorization) ?? throw new ScopedProjectRejected(DraftGoalStatus.Unauthorized);
+
+    internal static void VerifySpecification(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan,
+        FactoryState? state = null)
+    {
+        if (plan.ContractVersion == 0) return;
+        state ??= Load(db, tx);
+        SpecificationContracts.Verify(plan, state.Projects.Single(p => p.Id == plan.ProjectId), state.Jobs);
+        foreach (var dependency in plan.Packages.SelectMany(p => p.IntegratedPrerequisites).Distinct())
+        {
+            using var proof = Command(db, tx, """
+                SELECT 1 FROM lifecycle_audit WHERE project_id=$project AND entity_kind='job' AND entity_id=$job
+                    AND reason_code='IntegrationVerified' AND lower(reference)=lower($commit) LIMIT 1;
+                """, ("$project", plan.ProjectId), ("$job", dependency.JobId), ("$commit", dependency.IntegratedCommit));
+            if (proof.ExecuteScalar() is null)
+                throw new InvalidOperationException("The prerequisite has no durable integration proof.");
+        }
+    }
 
     private (PlanScope Scope, FactoryState Snapshot) ReadPlanPreflight(SqliteConnection db, string verifier,
         Guid projectId, Guid goalId, Guid? requestedProjectId = null)

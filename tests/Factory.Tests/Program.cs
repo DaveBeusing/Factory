@@ -1358,6 +1358,42 @@ Test("Issue intake deduplicates concurrent scans and re-evaluates policy and edi
 });
 
 
+Test("Versioned specifications require evidence and ordered ownership", () =>
+{
+    var plan = new FactoryPlan
+    {
+        ContractVersion = 1,
+        Packages = [new() { Title = "Implementation", Description = "Implement", Files = ["src"] },
+            new() { Title = "Follow-up", Description = "Follow up", Files = ["src/File.cs"],
+                AcceptanceEvidence = [new("Behavior is checked", "console")] }]
+    };
+    Reject("acceptance");
+    plan.Packages[0].AcceptanceEvidence.Add(new("Behavior is checked", "console"));
+    Reject("ownership");
+    plan.Packages[1].DependsOn.Add(0);
+    Planning.Validate(plan);
+    var project = new ProjectInfo();
+    try
+    {
+        SpecificationContracts.Verify(plan, project, []);
+        throw new Exception("An unconfigured check was accepted.");
+    }
+    catch (InvalidOperationException) { }
+    project.Checks.Add(new CheckCommand { Name = "console" });
+    SpecificationContracts.Verify(plan, project, []);
+    Assert(SpecificationContracts.Diff(null, plan).Count == 2);
+
+    void Reject(string expected)
+    {
+        try
+        {
+            Planning.Validate(plan);
+            throw new Exception("Invalid specification was accepted.");
+        }
+        catch (ArgumentException ex) when (ex.Message.Contains(expected, StringComparison.OrdinalIgnoreCase)) { }
+    }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {

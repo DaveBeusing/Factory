@@ -12,6 +12,8 @@ public sealed class PlannedPackage
     public int Priority { get; set; } = 50;
     public List<string> Files { get; set; } = [];
     public List<int> DependsOn { get; set; } = [];
+    public List<AcceptanceEvidence> AcceptanceEvidence { get; set; } = [];
+    public List<IntegratedPrerequisite> IntegratedPrerequisites { get; set; } = [];
 }
 
 public sealed class FactoryPlan
@@ -21,6 +23,9 @@ public sealed class FactoryPlan
     public string BaseCommit { get; set; } = "";
     public string GoalRevision { get; set; } = "";
     public Guid? Revision { get; set; }
+    public int ContractVersion { get; set; }
+    public Guid? PreviousRevision { get; set; }
+    public List<SpecificationChange> Changes { get; set; } = [];
     public List<PlannedPackage> Packages { get; set; } = [];
     // Source/PR evidence used when drafting the work packages. Never interpreted as completeness proof.
     public WorkPackagePreflightReport? Preflight { get; set; }
@@ -94,6 +99,9 @@ public static class Planning
             "Work packages must be independently reviewable and based on master, never stacked on other PR branches. " +
             "Return ONLY valid JSON with a packages array, each item with title, description, risk (low|medium|high), " +
             "priority (0..100), files string array and dependsOn integer array (zero-based indices). " +
+            "For a versioned specification set contractVersion to 1 and include acceptanceEvidence " +
+            "(objects with criterion and check) using these configured check names: " +
+            Json.Stringify(p.Checks.Select(c => c.Name).ToArray()) + ". " +
             "Describe existing code evidence, completion gaps and relevant PRs in each description. " +
             "Any assumption must be stated in description. Goal: " + goal.Objective +
             "\nAcceptance criteria:\n" + string.Join("\n", goal.AcceptanceCriteria) +
@@ -124,6 +132,8 @@ public static class Planning
                 throw new InvalidOperationException("Project checkout or master changed; refresh the plan");
             if (store.ReadPlanRevision(db, tx, goal.Id)?.Revision != plan.Revision)
                 throw new InvalidOperationException("Plan changed; reopen the latest revision before saving");
+            Validate(plan);
+            StateStore.VerifySpecification(db, tx, plan, state);
             return StateStore.InsertPlanRevision(db, tx, plan);
         });
     }
@@ -163,6 +173,7 @@ public static class Planning
             visits[i] = 2; return false;
         }
         if (Enumerable.Range(0, visits.Length).Any(Walk)) throw new ArgumentException("Dependency cycle");
+        SpecificationContracts.Validate(plan);
     }
     public static IReadOnlyList<FactoryJob> Adopt(StateStore store, Guid goalId, string mode,
         bool reviewedExistingWork = false, Guid planRevision = default)
@@ -186,6 +197,7 @@ public static class Planning
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             VerifyAdoptionTarget(plan, StateStore.ReadStoredPlanRevision(db, tx, goalId),
                 requestedProject, project, goal);
+            StateStore.VerifySpecification(db, tx, plan, state);
             if (StateStore.DecidePlanAdoption(db, tx, plan, "local-operator") != PolicyOutcome.Allow)
                 return null;
             var jobs = BuildAdoptedJobs(plan, goal, mode);
@@ -258,10 +270,12 @@ public static class Planning
         var jobs = plan.Packages.Select(pkg => new FactoryJob
         {
             ProjectId = goal.ProjectId, GoalId = goal.Id, Title = pkg.Title, Description = pkg.Description,
-            Risk = pkg.Risk, Priority = pkg.Priority, ExpectedPaths = pkg.Files, Mode = mode
+            Risk = pkg.Risk, Priority = pkg.Priority, ExpectedPaths = pkg.Files.ToList(), Mode = mode
         }).ToList();
         for (var i = 0; i < jobs.Count; i++)
-            jobs[i].DependsOn = plan.Packages[i].DependsOn.Select(index => jobs[index].Id).ToList();
+            jobs[i].DependsOn = plan.Packages[i].DependsOn.Select(index => jobs[index].Id)
+                .Concat(plan.ContractVersion == 1 ? plan.Packages[i].IntegratedPrerequisites.Select(p => p.JobId) : [])
+                .ToList();
         if (DependencyGraph.WouldCycle(jobs)) throw new InvalidOperationException("Cyclic plan");
         return jobs;
     }

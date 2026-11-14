@@ -262,6 +262,12 @@ public static class MissionControlManager
             var j = s.Jobs.Single(x => x.Id == id);
             Require(j.State is JobStates.Queued or JobStates.Paused or JobStates.Failed or JobStates.Blocked or JobStates.Stopped, "Only inactive jobs can be edited");
             Require(j.ProjectId == input.ProjectId, "Cannot move job between projects");
+            if (StateStore.HasAdoptedSpecification(db, tx, j.GoalId))
+                Require(j.GoalId == input.GoalId && j.Title == input.Title.Trim() &&
+                    j.Description == input.Description.Trim() && j.Risk == input.Risk && j.Mode == input.Mode &&
+                    j.ExpectedPaths.SequenceEqual(input.ExpectedPaths) && j.DependsOn.SequenceEqual(input.DependsOn) &&
+                    j.RequiredExecutionCapabilities.SequenceEqual(input.RequiredExecutionCapabilities),
+                    "Adopted specifications require a separately reviewed replacement plan to change their contract.");
             if (input.GoalId.HasValue) Require(s.Goals.Any(g => g.Id == input.GoalId && g.ProjectId == j.ProjectId), "Goal not in project");
             if (input.GoalId is { } targetGoal)
                 Require(!StateStore.RequiresIntakePlanAdoption(db, tx, targetGoal),
@@ -299,9 +305,11 @@ public static class MissionControlManager
         Require(!string.IsNullOrWhiteSpace(input.Reason) && input.Reason.Trim().Length >= 10 &&
             input.Reason.Length <= 1000, "Scope amendment requires a 10-1000 character justification");
         WorkPackageScope.ValidateDeclaration(input.ExpectedPaths);
-        return store.Change(state =>
+        return store.Change((state, db, tx) =>
         {
             var job = state.Jobs.Single(j => j.Id == id);
+            Require(!StateStore.HasAdoptedSpecification(db, tx, job.GoalId),
+                "Adopted specifications require a separately reviewed replacement plan to change their contract.");
             Require(job.State == JobStates.Blocked && job.Stage == "scope" &&
                 string.IsNullOrEmpty(job.LeaseOwner),
                 "Only a blocked, unclaimed scope violation can be amended");

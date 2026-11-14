@@ -34,6 +34,54 @@ function dashboardUrl(child) {
 
 const root = path.resolve(__dirname, '../..');
 
+browserTest('project quality presets, modal notifications and Factory doctor', async ({ page, nav, form, home }) => {
+  const track = page.locator('.overview-allowance .progress-track');
+  const fill = track.locator('.progress-fill');
+  await fill.waitFor();
+  assert.equal(await fill.evaluate(el => el.style.width), '35%');
+  await track.hover();
+  assert.equal(await fill.evaluate(el => getComputedStyle(el, '::after').animationName), 'progress-flow');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  assert.equal(await fill.evaluate(el => getComputedStyle(el, '::after').animationName), 'none');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+
+  await nav.getByRole('button', { name: 'Projects' }).click();
+  await page.getByRole('button', { name: 'Add project', exact: true }).first().click();
+  const editor = form.getByLabel('Quality checks (JSON array)');
+  const presets = form.getByLabel('Add quality check preset');
+  await editor.fill('[{"name":"custom","executable":"git","arguments":[],"timeoutSeconds":20}]');
+  await presets.click();
+  await form.getByRole('button', { name: '.NET · Strict' }).click();
+  const toast = form.getByText('Added 3 quality checks.');
+  await toast.waitFor({ state: 'visible' });
+  assert.ok(await toast.evaluate(el => {
+    const rect = el.getBoundingClientRect();
+    return el.closest('dialog:modal') && rect.bottom <= innerHeight;
+  }));
+  const checks = JSON.parse(await editor.inputValue());
+  assert.deepEqual(checks.map(check => check.name), ['custom', 'format', 'build', 'tests']);
+  assert.ok(checks.find(check => check.name === 'build').arguments.includes('--warnaserror'));
+  await editor.fill('{');
+  await form.getByRole('button', { name: 'Register project', exact: true }).click();
+  await form.getByText('Invalid checks JSON').waitFor({ state: 'visible' });
+  await form.getByRole('button', { name: 'Cancel' }).click();
+  await nav.getByRole('button', { name: 'Settings' }).click();
+  const doctor = page.locator('.doctor-panel');
+  await doctor.getByText('dotnet', { exact: true }).waitFor();
+  assert.equal(await doctor.getByText('git', { exact: true }).count(), 1);
+  const statePath = await doctor.locator('.kv').filter({ hasText: 'State directory' }).locator('strong').innerText();
+  const normalizePath = value => {
+    const normalized = path.resolve(value);
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  };
+  const canonicalHome = execFileSync('dotnet', [path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll'), 'doctor'], {
+    encoding: 'utf8', env: { ...process.env, FACTORY_HOME: home }
+  }).split(/\r?\n/).find(line => line.startsWith('State: ')).slice('State: '.length);
+  assert.equal(normalizePath(statePath), normalizePath(canonicalHome));
+  await doctor.getByRole('button', { name: 'Refresh' }).click();
+  await doctor.getByText('dotnet', { exact: true }).waitFor();
+}, undefined, { weekly: { usedPercent: 35, remainingPercent: 65 } });
+
 function browserTest(name, exercise, seed = async () => {}, allowance = {}) {
   test(name, { timeout: 60_000 }, () => withDashboard(exercise, seed, allowance));
 }

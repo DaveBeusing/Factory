@@ -148,6 +148,10 @@ public static class DashboardHost
         app.MapPost("/api/projects/{id:guid}/analysis/goals", (Guid id, ReviewGoalInput input) =>
             Results.Created("/api/state", ProjectReviewer.CreateDraftGoal(store, id, input)));
         app.MapGet("/api/health", () => Results.Ok(Health(store)));
+        app.MapGet("/api/doctor", async (CancellationToken ct) => Results.Ok(await Doctor.InspectAsync(store.Home, ct)));
+        app.MapGet("/api/check-presets/{preset}", (string preset) => preset is "dotnet" or "dotnet-strict" or "cmake"
+            ? Asset($"Factory.Presets.checks-{preset}.json", "application/json")
+            : Results.NotFound());
         app.MapGet("/api/workers/managed", () => Results.Ok(ManagedWorkers.RunningIds()));
         app.MapGet("/api/events/stream", async (HttpContext ctx) =>
         {

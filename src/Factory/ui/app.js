@@ -54,9 +54,24 @@ async function api(path,method='GET',body){
  if(!res.ok){const error=new Error(result?.error||result?.title||'Request failed ('+res.status+')');error.status=res.status;throw error}
  return result;
 }
-const notify=(message,error=false)=>{const el=document.createElement('div');el.className='toast'+(error?' error':'');el.innerHTML=`<span class="toast-icon">${ico(error?'shield':'check')}</span><span>${esc(message)}</span>`;$('toast-stack').append(el);setTimeout(()=>el.remove(),5500)};
+const toastHost=()=>$('connection-modal').open?$('connection-modal'):
+ $('form-modal').open?$('form-modal'):$('palette').open?$('palette'):document.body;
+function notify(message,error=false){
+ const stack=$('toast-stack');
+ toastHost().append(stack);
+ const last=stack.lastElementChild;
+ if(last?.textContent===message&&last.classList.contains('error')===error)return;
+ const toast=document.createElement('div');
+ toast.className='toast'+(error?' error':'');
+ toast.innerHTML=`<span class="toast-icon" aria-hidden="true">${ico(error?'shield':'check')}</span><span>${esc(message)}</span>`;
+ stack.append(toast);
+ setTimeout(()=>toast.remove(),5500);
+}
+for(const dialog of document.querySelectorAll('dialog')){
+ dialog.addEventListener('close',()=>toastHost().append($('toast-stack')));
+}
 function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.classList.toggle('hidden',!val)); }
-function nav(v){if(view==='events'&&v!=='events'&&projectAccess())stopProjectActivity();view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=({plans:'Goal planner',analysis:'Project review'})[v]||v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
+function nav(v){if(view==='events'&&v!=='events'&&projectAccess())stopProjectActivity();view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=({plans:'Goal planner',analysis:'Project review'})[v]||v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});if(v==='settings'&&!doctor)loadDoctor();}
 function statusFromHealth(){
  const since=lastHeartbeat?Date.now()-lastHeartbeat:Infinity;
  const status=projectAccess()?(connected?'connected':'offline'):!token?'offline':!lastHeartbeat?(connected?'connecting':'offline'):connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
@@ -100,7 +115,7 @@ async function connect(nextToken){
   if(nextToken!==token){
    apiRequests.abort();
    apiRequests=new AbortController();
-   settings={};usage=null;providerData=null;managedWorkers=[];
+   settings={};usage=null;providerData=null;managedWorkers=[];doctor=null;
    projectReview=null;analysisProject='';reviewRequest++;reviewingProjects.clear();
    plansCache.clear();planGoals.clear();planProject='';planDraft=null;planGoal=null;planDraftGoal=null;
    generatingPlans.clear();
@@ -165,7 +180,7 @@ function card(title,desc,body,link,actions='',className=''){return `<section cla
 function empty(iconName,title,desc,action,label){return `<div class="empty"><div class="empty-icon">${ico(iconName)}</div><h3>${esc(title)}</h3><p>${esc(desc)}</p>${action?`<button class="button button-muted" data-act="${action}">${ico('plus')}${esc(label||'Create new')}</button>`:''}</div>`}
 function eventItems(events,count=8){return events.length?events.slice(-count).reverse().map(e=>`<div class="event-line"><div class="event-marker"></div><div><strong>${esc(e.type.replaceAll('_',' '))}</strong><small>${esc(relative(e.at))}${e.jobId?' · '+esc(e.jobId.slice(0,8)):''}</small><p>${esc(shorten(e.message,150))}</p></div></div>`).join(''):empty('activity','No activity yet','Factory events will appear here as work is performed.');}
 function workerActive(w){return Date.now()-new Date(w.heartbeat).getTime()<20000}
-function usageCards(className=''){if(!usage)return '';const format=(w,label)=>{if(!w||!Number.isFinite(w.usedPercent)||!Number.isFinite(w.remainingPercent))return '';const used=Math.max(0,Math.min(100,w.usedPercent));return `<div class="usage-card"><div class="usage-top"><h3>${esc(label)}</h3>${badge(usage.stale?'cached':'available')}</div><div class="usage-percent">${w.remainingPercent.toFixed(1)}% <span>remaining</span></div><div class="progress-track" style="margin:13px 0 7px"><div class="progress-fill" style="width:${used.toFixed(2)}%"></div></div><div class="usage-values"><span>${used.toFixed(1)}% used</span><span>${w.remainingPercent.toFixed(1)}% free</span></div><div class="usage-note">${w.resetsAt?'Resets '+esc(dateTime(w.resetsAt)):'Reset time not reported'}${usage.observedAt?' · Updated '+esc(relative(usage.observedAt)):''}</div></div>`};return `<div class="usage-layout${className?' '+esc(className):''}">${format(usage.weekly,'Weekly allowance')}${format(usage.shortWindow,'Short window')}</div>`}
+function usageCards(className=''){if(!usage)return '';const format=(w,label)=>{if(!w||!Number.isFinite(w.usedPercent)||!Number.isFinite(w.remainingPercent))return '';const used=Math.max(0,Math.min(100,w.usedPercent));return `<div class="usage-card"><div class="usage-top"><h3>${esc(label)}</h3>${badge(usage.stale?'cached':'available')}</div><div class="usage-percent">${w.remainingPercent.toFixed(1)}% <span>remaining</span></div><div class="progress-track" style="margin:13px 0 7px"><div class="progress-fill" data-progress="${used.toFixed(2)}"></div></div><div class="usage-values"><span>${used.toFixed(1)}% used</span><span>${w.remainingPercent.toFixed(1)}% free</span></div><div class="usage-note">${w.resetsAt?'Resets '+esc(dateTime(w.resetsAt)):'Reset time not reported'}${usage.observedAt?' · Updated '+esc(relative(usage.observedAt)):''}</div></div>`};return `<div class="usage-layout${className?' '+esc(className):''}">${format(usage.weekly,'Weekly allowance')}${format(usage.shortWindow,'Short window')}</div>`}
 function rowProjects(list){return list.map(p=>{const jobs=state.jobs.filter(j=>j.projectId===p.id);return `<tr><td><strong>${esc(p.name)}</strong><small class="mono">${esc(shorten(p.path,60))}</small></td><td>${badge(p.status||'active')}</td><td class="mono">${esc(p.baseBranch)}</td><td>${jobs.length}</td><td>${p.maxParallel}</td><td><div class="tiny-actions"><button class="tiny-button" data-inspect="project:${p.id}">Inspect</button><button class="tiny-button" data-edit="project:${p.id}">Configure</button></div></td></tr>`}).join('')}
 function rowJobs(list){const pMap=Object.fromEntries(state.projects.map(p=>[p.id,p.name]));return list.map(j=>`<tr><td><strong>${esc(shorten(j.title,60))}</strong><small class="mono">${esc(j.id.slice(0,8))} · ${esc(j.mode)}</small></td><td>${esc(pMap[j.projectId]||'Unknown')}</td><td>${badge(j.state)}</td><td>${badge(j.risk)}</td><td>${j.priority}</td><td><div class="tiny-actions"><button class="tiny-button" data-inspect="job:${j.id}">Inspect</button><button class="tiny-button" data-edit="job:${j.id}" ${['queued','paused','stopped','failed','blocked'].includes(j.state)?'':'disabled'}>Edit</button></div></td></tr>`).join('')}
 function table(columns,rows){return `<div class="table-wrap"><table><thead><tr>${columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`}
@@ -176,7 +191,7 @@ function renderOverview(){const active=state.jobs.filter(j=>['preparing','buildi
  const jobsBody=pipeline.length?table(['Job','Project','Stage','Risk','Priority','Actions'],rowJobs(pipeline)):empty('layers','No jobs yet','Create a job or generate a plan to begin execution.','create-job','Create job');
  const workerBody=state.workers.length?state.workers.slice(0,7).map(w=>`<div class="list-item"><span class="list-icon">${ico('cpu')}</span><span class="list-text"><strong>${esc(w.id)}</strong><small>${esc(w.platform)} · ${esc(relative(w.heartbeat))}</small></span><span class="list-end">${badge(!w.enabled?'disabled':w.draining?'draining':workerActive(w)?'online':'offline')}</span></div>`).join(''):empty('cpu','No registered workers','Register a worker to track its connection and operational state.','create-worker','Register worker');
  result+=`<div class="content-grid">${card('Job pipeline','Latest work packages and execution states',jobsBody,'jobs')}${card('Worker fleet','Heartbeat-verified connected workers',workerBody,'workers')}</div>`;
- const goalBody=state.goals.length?state.goals.slice(-5).reverse().map(g=>{const total=state.jobs.filter(j=>j.goalId===g.id);const done=total.filter(j=>j.integrated).length;return `<div class="list-item"><span class="list-icon">${ico('target')}</span><span class="list-text"><strong>${esc(shorten(g.objective,66))}</strong><small>${total.length} packages · ${done} integrated</small>${total.length?`<div class="progress-track" style="margin-top:8px"><div class="progress-fill" style="width:${Math.round(done/total.length*100)}%"></div></div>`:''}</span>${badge(g.state)}</div>`}).join(''):empty('target','No goals yet','A goal keeps plans and work packages aligned to an outcome.','create-goal','Set a goal');
+ const goalBody=state.goals.length?state.goals.slice(-5).reverse().map(g=>{const total=state.jobs.filter(j=>j.goalId===g.id);const done=total.filter(j=>j.integrated).length;return `<div class="list-item"><span class="list-icon">${ico('target')}</span><span class="list-text"><strong>${esc(shorten(g.objective,66))}</strong><small>${total.length} packages · ${done} integrated</small>${total.length?`<div class="progress-track" style="margin-top:8px"><div class="progress-fill" data-progress="${Math.round(done/total.length*100)}"></div></div>`:''}</span>${badge(g.state)}</div>`}).join(''):empty('target','No goals yet','A goal keeps plans and work packages aligned to an outcome.','create-goal','Set a goal');
  result+=`<div class="content-grid">${card('Current goals','Outcome-driven execution',goalBody,'goals')}${card('Recent activity','Live actions, reviews and changes',eventItems(state.events,7),'events')}</div>`;result+=`<section class="card stacked-card overview-intelligence"><div class="card-head"><div><h2>Operational intelligence</h2><p>Observed queue, review, integration and budget state</p></div><button class="subtle-link" data-view="recovery">Recovery center</button></div><div class="card-body">${renderOperationalPulse()}</div></section>`;return result}
 function filtered(items,fields){return items.filter(x=>(filter==='all'||x.state===filter||x.status===filter)&&fields.some(k=>String(x[k]||'').toLowerCase().includes(search.toLowerCase())))}
 function toolbar(viewName,statuses){return `<div class="toolbar"><div class="filters"><input class="filter-input" id="table-search" placeholder="Search ${esc(viewName)}..." value="${esc(search)}" aria-label="Search ${esc(viewName)}"><select class="filter-select" id="table-filter" aria-label="Filter by status"><option value="all">All statuses</option>${statuses.map(x=>`<option value="${x}" ${x===filter?'selected':''}>${esc(x)}</option>`).join('')}</select></div><small class="muted">${esc(viewName)} · live state</small></div>`}
@@ -329,7 +344,7 @@ function createReviewGoal(findingId){
     inspect('goal',goal.id);
   },'Create draft goal');
 }
-function renderGoals(){const items=filtered(state.goals,['objective']);const map=Object.fromEntries(state.projects.map(p=>[p.id,p.name]));return header('Goals','Define outcomes, acceptance criteria and token budgets.','create-goal','Create goal')+`<section class="card">${toolbar('goals',['draft','active','paused','stopped','completed','archived'])}<div class="cards-list" style="padding:18px">${items.length?items.map(g=>{const jobs=state.jobs.filter(j=>j.goalId===g.id);const done=jobs.filter(j=>j.integrated).length;return `<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('target')}</span><div><div class="entity-name">${esc(shorten(g.objective,85))}</div><div class="entity-sub">${esc(map[g.projectId]||'Unknown project')}</div></div></div><div class="entity-body">${g.acceptanceCriteria.length} acceptance criteria · ${g.tokenBudget.toLocaleString()} tokens<br>${jobs.length} work packages · ${done} integrated</div>${jobs.length?`<div class="progress-track"><div class="progress-fill" style="width:${Math.round(done/jobs.length*100)}%"></div></div>`:''}<div class="entity-foot">${badge(g.state)}<div class="tiny-actions"><button class="tiny-button" data-inspect="goal:${g.id}">Inspect</button><button class="tiny-button" data-edit="goal:${g.id}">Edit</button><button class="tiny-button" data-act="project-plans" data-id="${g.projectId}">Plan goals</button></div></div></div>`}).join(''):empty('target','No matching goals','Create a goal and set clear success criteria.','create-goal','Create goal')}</div></section>`}
+function renderGoals(){const items=filtered(state.goals,['objective']);const map=Object.fromEntries(state.projects.map(p=>[p.id,p.name]));return header('Goals','Define outcomes, acceptance criteria and token budgets.','create-goal','Create goal')+`<section class="card">${toolbar('goals',['draft','active','paused','stopped','completed','archived'])}<div class="cards-list" style="padding:18px">${items.length?items.map(g=>{const jobs=state.jobs.filter(j=>j.goalId===g.id);const done=jobs.filter(j=>j.integrated).length;return `<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('target')}</span><div><div class="entity-name">${esc(shorten(g.objective,85))}</div><div class="entity-sub">${esc(map[g.projectId]||'Unknown project')}</div></div></div><div class="entity-body">${g.acceptanceCriteria.length} acceptance criteria · ${g.tokenBudget.toLocaleString()} tokens<br>${jobs.length} work packages · ${done} integrated</div>${jobs.length?`<div class="progress-track"><div class="progress-fill" data-progress="${Math.round(done/jobs.length*100)}"></div></div>`:''}<div class="entity-foot">${badge(g.state)}<div class="tiny-actions"><button class="tiny-button" data-inspect="goal:${g.id}">Inspect</button><button class="tiny-button" data-edit="goal:${g.id}">Edit</button><button class="tiny-button" data-act="project-plans" data-id="${g.projectId}">Plan goals</button></div></div></div>`}).join(''):empty('target','No matching goals','Create a goal and set clear success criteria.','create-goal','Create goal')}</div></section>`}
 function providerAccountAllowance(provider){
  if(provider.kind!=='codex'||(!usage?.weekly&&!usage?.shortWindow))return 'Unavailable';
  const windows=[['Weekly',usage.weekly],['Short window',usage.shortWindow]];
@@ -421,7 +436,7 @@ async function loadDecisionEvidence(){
 }
 function renderJobs(){const items=filtered(state.jobs,['title','description','state','risk']);return header('Jobs','Inspect execution, manage priority and safely control work packages.','create-job','Create job')+`<section class="card">${toolbar('jobs',['queued','preparing','building','gating','reviewing','reworking','awaiting_approval','pr_ready','completed_local','integrated','paused','stopped','cancelled','failed','blocked'])}${items.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(items.slice().reverse())):empty('layers','No matching jobs','Create a work package or adopt an approved plan.','create-job','Create job')}</section>`}
 function renderWorkers(){const w=state.workers;return header('Workers','Monitor health and control remote-worker admission. Drain/disable never force-kills a running process.','create-worker','Register worker')+`<div class="grid metrics-grid">${metric('Registered',w.length,'Known workers','cpu')}${metric('Online',w.filter(workerActive).length,'Heartbeat < 20 seconds','activity')}${metric('Draining',w.filter(x=>x.draining).length,'No new work assigned','pause')}${metric('Available',w.filter(x=>x.enabled&&!x.draining&&workerActive(x)).length,'Eligible for claims','check')}</div><div class="cards-list">${w.length?w.map(x=>`<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('cpu')}</span><div><div class="entity-name">${esc(x.id)}</div><div class="entity-sub">${esc(x.platform)}</div></div></div><div class="entity-body"><div class="worker-heartbeat"><span class="live-dot ${workerActive(x)?'':'offline'}"></span>${workerActive(x)?'Live heartbeat':'Heartbeat unavailable'} · ${esc(relative(x.heartbeat))}</div><p>Admission: ${x.enabled?(x.draining?'Draining':'Enabled'):'Disabled'}</p></div><div class="entity-foot">${badge(!x.enabled?'disabled':x.draining?'draining':workerActive(x)?'online':'offline')}<div class="tiny-actions"><button class="tiny-button" data-inspect="worker:${encodeURIComponent(x.id)}">Inspect</button><button class="tiny-button" data-act="worker-edit" data-id="${encodeURIComponent(x.id)}">Edit</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${managedWorkers.includes(x.id)?'stop':'start'}">${managedWorkers.includes(x.id)?'Stop local':'Start local'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${x.draining||!x.enabled?'enable':'drain'}">${x.draining||!x.enabled?'Enable':'Drain'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:disable" ${!x.enabled?'disabled':''}>Disable</button></div></div></div>`).join(''):empty('cpu','No registered workers','Register a remote worker, then start it with the same ID to track its heartbeat.','create-worker','Register worker')}</div>`}
-function renderQueue(){const queued=state.jobs.filter(j=>j.state==='queued');const active=state.jobs.filter(j=>['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state));const waiting=queued.filter(j=>j.dependsOn.some(dep=>!state.jobs.some(o=>o.id===dep&&o.integrated)));return header('Queue & scheduling','Control admission, prioritize work and inspect dependency blockers.')+`<div class="overview-hero"><div class="overview-hero-left"><div class="hero-orb">${ico('queue')}</div><div><h2>${state.paused?'Queue paused':'Scheduler ready'}</h2><p>${queued.length} queued · ${active.length} active · ${waiting.length} waiting for dependencies</p></div></div><div class="queue-controls"><button class="button button-primary" data-act="queue-run">${ico('play')} Run</button><button class="button button-muted" data-act="queue-pause">${ico('pause')} Pause</button><button class="button button-muted" data-act="queue-resume">${ico('refresh')} Resume</button><button class="button button-danger" data-act="queue-stop">${ico('stop')} Stop</button></div></div><div class="grid metrics-grid">${metric('Ready or queued',queued.length,'Eligible after constraints','layers')}${metric('Active',active.length,'Working or validating','activity')}${metric('Waiting dependencies',waiting.length,'Must integrate predecessors','route')}${metric('Global concurrency',settings.maxParallel??'—','Configured worker slots','cpu')}</div>${card('Work schedule','Prioritized by eligibility and conflict',queued.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(queued.slice().sort((a,b)=>b.priority-a.priority))):empty('check','Queue is empty','No pending jobs. Add a job or adopt a plan.','create-job','Add job'))}${card('In flight','Active jobs continue during queue pause',active.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(active)):empty('activity','Nothing running','Start the queue when jobs are ready.'),null,'','stacked-card')}`}
+function renderQueue(){const queued=state.jobs.filter(j=>j.state==='queued');const active=state.jobs.filter(j=>['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state));const waiting=queued.filter(j=>j.dependsOn.some(dep=>!state.jobs.some(o=>o.id===dep&&o.integrated)));return header('Queue & scheduling','Control admission, prioritize work and inspect dependency blockers.')+`<div class="overview-hero overview-home-hero queue-hero"><div class="overview-hero-left"><div class="hero-orb">${ico('queue')}</div><div><h2>${state.paused?'Queue paused':'Scheduler ready'}</h2><p>${queued.length} queued · ${active.length} active · ${waiting.length} waiting for dependencies</p></div></div><div class="head-actions queue-controls"><button class="button button-primary" data-act="queue-run">${ico('play')} Run</button><button class="button button-muted" data-act="queue-pause">${ico('pause')} Pause</button><button class="button button-muted" data-act="queue-resume">${ico('refresh')} Resume</button><button class="button button-danger" data-act="queue-stop">${ico('stop')} Stop</button></div></div><div class="grid metrics-grid">${metric('Ready or queued',queued.length,'Eligible after constraints','layers')}${metric('Active',active.length,'Working or validating','activity')}${metric('Waiting dependencies',waiting.length,'Must integrate predecessors','route')}${metric('Global concurrency',settings.maxParallel??'—','Configured worker slots','cpu')}</div>${card('Work schedule','Prioritized by eligibility and conflict',queued.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(queued.slice().sort((a,b)=>b.priority-a.priority))):empty('check','Queue is empty','No pending jobs. Add a job or adopt a plan.','create-job','Add job'))}${card('In flight','Active jobs continue during queue pause',active.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(active)):empty('activity','Nothing running','Start the queue when jobs are ready.'),null,'','stacked-card')}`}
 function stopProjectActivity(){
  activityController?.abort();
  activityController=null;
@@ -541,7 +556,31 @@ function renderUsage(){
  body+='<p class="subtext capacity-note">Reported USD sums available provider estimates and may omit turns. Unknown provider account allowances are never estimated from local token use. Provider budgets are total local token ceilings, not rolling provider quotas.</p>';
  return body;
 }
-function renderSettings(){return header('Settings & policies','Review and configure execution limits and publication guardrails.')+`<div class="content-grid">${card('Runtime policy','Changes are stored in ~/.factory/settings.json',`<div class="job-info-grid">${[['Global concurrency',settings.maxParallel],['Agent sessions',settings.maxAgentSessions],['Review rounds',settings.maxReviewRounds],['Lease seconds',settings.leaseSeconds],['Push enabled',settings.allowPush?'Yes':'No'],['Auto-merge',settings.autoMerge?'Yes':'No']].map(([a,b])=>`<div class="kv"><small>${esc(a)}</small><strong>${esc(b)}</strong></div>`).join('')}</div><button class="button button-muted settings-edit-button" data-act="edit-settings">${ico('edit')} Edit configuration</button>`)}${card('Operational safety','Safeguards for reliable execution',`<div class="list-stack">${[['shield','Human-controlled integration','Merging and publishing remain permission-gated'],['route','Dependency-aware execution','Jobs do not start before integrated dependencies'],['activity','Event history','Actions are recorded in persistent state'],['cpu','Worker isolation','Separate Git worktrees; not OS sandboxes']].map(([i,t,d])=>`<div class="list-item"><span class="list-icon">${ico(i)}</span><div class="list-text"><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div>`)}</div>`}
+const kv=(label,value)=>`<div class="kv"><small>${esc(label)}</small><strong>${esc(value)}</strong></div>`;
+let doctor=null;
+async function loadDoctor(){
+ if(doctor?.loading||!token||projectAccess())return;
+ const revision=connectionRevision;
+ doctor={loading:true};
+ render();
+ try {
+  const report=await api('doctor');
+  if(revision===connectionRevision)doctor={report};
+ } catch(error){
+  if(revision===connectionRevision)doctor={error:error.message};
+ } finally {
+  if(revision===connectionRevision&&view==='settings')render();
+ }
+}
+function renderDoctor(){
+ const report=doctor?.report;
+ const rows=report?.tools.map(tool=>`<div class="list-item"><span class="list-icon">${ico('cpu')}</span><div class="list-text doctor-tool"><strong>${esc(tool.name)}</strong><small>${esc([tool.version||tool.error||'Unavailable',tool.executable].filter(Boolean).join(' · '))}</small></div>${badge(tool.version?'available':'unavailable')}</div>`).join('');
+ const content=report?`<div class="list-stack">${rows}</div>${kv('State directory',report.stateDirectory)}${kv('API token file',report.settingsFile)}`:
+  `<p class="doctor-status" role="status">${doctor?.loading?'<span class="spinner" aria-hidden="true"></span> Checking tools…':esc(doctor?.error||'Diagnostics will run when Settings opens.')}</p>`;
+ return card('Factory doctor','Controller tools and local state',content,null,
+  `<button class="button button-muted" data-act="doctor-refresh" ${doctor?.loading?'disabled':''}>${ico('refresh')} Refresh</button>`);
+}
+function renderSettings(){return header('Settings & policies','Review and configure execution limits and publication guardrails.')+`<div class="content-grid">${card('Runtime policy','Changes are stored in ~/.factory/settings.json',`<div class="job-info-grid">${[['Global concurrency',settings.maxParallel],['Agent sessions',settings.maxAgentSessions],['Review rounds',settings.maxReviewRounds],['Lease seconds',settings.leaseSeconds],['Push enabled',settings.allowPush?'Yes':'No'],['Auto-merge',settings.autoMerge?'Yes':'No']].map(([a,b])=>`<div class="kv"><small>${esc(a)}</small><strong>${esc(b)}</strong></div>`).join('')}</div><button class="button button-muted settings-edit-button" data-act="edit-settings">${ico('edit')} Edit configuration</button>`)}${card('Operational safety','Safeguards for reliable execution',`<div class="list-stack">${[['shield','Human-controlled integration','Merging and publishing remain permission-gated'],['route','Dependency-aware execution','Jobs do not start before integrated dependencies'],['activity','Event history','Actions are recorded in persistent state'],['cpu','Worker isolation','Separate Git worktrees; not OS sandboxes']].map(([i,t,d])=>`<div class="list-item"><span class="list-icon">${ico(i)}</span><div class="list-text"><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div>`)}</div><div class="doctor-panel">${renderDoctor()}</div>`}
 
 function recoveryCandidates(){
  const held=new Set((state.budgetReservations||[]).filter(r=>r.state==='held').map(r=>r.jobId));
@@ -918,6 +957,9 @@ function renderOperationalPulse(){
 const JobStatesActiveUi=['preparing','building','gating','reviewing','reworking','awaiting_approval'];
 
 let renderedMain;
+function setProgress(root){
+ for(const fill of root.querySelectorAll('[data-progress]'))fill.style.width=`${fill.dataset.progress}%`;
+}
 function render(){
  const scoped=projectAccess();
  document.body.classList.toggle('project-access',scoped);
@@ -939,7 +981,7 @@ function render(){
  }
 const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals,analysis:renderAnalysis,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings,decisions:renderDecisions};const next=(renders[view]||renderOverview)();
  const mainChanged=next!==renderedMain;
- if(mainChanged){$('main').innerHTML=next;renderedMain=next;}
+ if(mainChanged){$('main').innerHTML=next;setProgress($('main'));renderedMain=next;}
  for(const name of ['projects','goals','jobs','workers'])document.querySelectorAll(`[data-count="${name}"]`).forEach(el=>el.textContent=(state[name]||[]).length||'');
   document.querySelectorAll('[data-count="recovery"]').forEach(el=>el.textContent=recoveryCandidates().length||'');
  if(!mainChanged)return;
@@ -951,19 +993,47 @@ const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals
  if(selector)selector.addEventListener('change',e=>{analysisProject=e.target.value;loadProjectReview(analysisProject)});
  const s=$('table-search');if(s){s.addEventListener('input',e=>{const pos=e.target.selectionStart;search=e.target.value;render();$('table-search').focus();$('table-search').setSelectionRange(pos,pos)});$('table-filter').addEventListener('change',e=>{filter=e.target.value;render()})}}
 // Dialogs, forms and commands ------------------------------------------------
-const field=(key,label,value='',type='text',options=[],hint='')=>{let control='';if(type==='select')control=`<select name="${key}" id="field-${key}">${options.map(([v,l])=>`<option value="${esc(v)}" ${String(value)===String(v)?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
+const field=(key,label,value='',type='text',options=[],hint='',action='')=>{let control='';if(type==='select')control=`<select name="${key}" id="field-${key}">${options.map(([v,l])=>`<option value="${esc(v)}" ${String(value)===String(v)?'selected':''}>${esc(l)}</option>`).join('')}</select>`;
 else if(type==='textarea'||type==='code')control=`<textarea name="${key}" id="field-${key}" class="${type==='code'?'code-field':''}" rows="${type==='code'?7:4}">${esc(value)}</textarea>`;
 else if(type==='checkbox')control=`<label class="checkbox-line"><input name="${key}" type="checkbox" ${value?'checked':''}> ${esc(label)}</label>`;
 else control=`<input name="${key}" id="field-${key}" type="${type}" value="${esc(value)}" ${type==='number'?'min="0"':''}>`;
-return type==='checkbox'?control:`<div class="field"><label for="field-${key}">${esc(label)}</label>${control}${hint?`<small>${esc(hint)}</small>`:''}</div>`};
+return type==='checkbox'?control:`<div class="field"><div class="field-heading"><label for="field-${key}">${esc(label)}</label>${action}</div>${control}${hint?`<small>${esc(hint)}</small>`:''}</div>`};
 const projectOptions=()=>state.projects.filter(p=>p.status!=='archived').map(p=>[p.id,p.name]);
 const goalOptions=()=>[['','No linked goal'],...state.goals.filter(g=>g.state==='active').map(g=>[g.id,shorten(g.objective,70)])];
 function openForm(title,subtitle,html,handler,submit='Save changes'){$('modal-title').textContent=title;$('modal-subtitle').textContent=subtitle;$('modal-fields').innerHTML=html;$('modal-submit').textContent=submit;modalHandler=handler;if(!$('form-modal').open)$('form-modal').showModal();}
 function values(form){return Object.fromEntries([...new FormData(form).entries()].map(([k,v])=>[k,v.toString()]))}
 const lines=s=>String(s||'').split(/\r?\n|;/).map(x=>x.trim()).filter(Boolean);
 const checksJson=x=>JSON.stringify(x||[],null,2);
+const checkPresets=[['dotnet','.NET · Build and test'],['dotnet-strict','.NET · Strict'],['cmake','CMake · Configure, build and test']];
+function projectChecksField(checks){
+ const picker=`<details class="preset-picker"><summary class="icon-button" aria-label="Add quality check preset" title="Add quality check preset">${ico('plus')}</summary><div class="preset-options">${checkPresets.map(([id,label])=>`<button class="palette-entry" type="button" data-check-preset="${id}">${esc(label)}</button>`).join('')}</div></details>`;
+ return field('checks','Quality checks (JSON array)',checksJson(checks),'code',[],'Each check needs name, executable, arguments and timeoutSeconds.',picker);
+}
+$('modal-fields').addEventListener('click',async event=>{
+ const button=event.target.closest('[data-check-preset]');
+ if(!button)return;
+ const editor=$('field-checks');
+ button.disabled=true;
+ try {
+  const preset=await api('check-presets/'+button.dataset.checkPreset);
+  if(!$('form-modal').open||editor!==$('field-checks'))return;
+  let checks;
+  try { checks=JSON.parse(editor.value); } catch { throw Error('Fix the checks JSON before adding a preset.'); }
+  if(!Array.isArray(checks))throw Error('Checks must be a JSON array.');
+  const names=new Set(checks.map(check=>String(check?.name??'').toLowerCase()));
+  const added=preset.checks.filter(check=>!names.has(check.name.toLowerCase()));
+  if(added.length){
+   editor.value=checksJson([...checks,...added]);
+   notify(`Added ${added.length} quality ${added.length===1?'check':'checks'}.`);
+  } else notify('These quality check names are already in use.');
+  button.closest('details').open=false;
+  editor.focus();
+ } catch(error){
+  if($('form-modal').open&&editor===$('field-checks'))notify(error.message,true);
+ } finally {button.disabled=false;}
+});
 function formProject(id){const p=state.projects.find(p=>p.id===id),v=p||{name:'',path:'',baseBranch:'master',maxParallel:2,checks:[],protectedPaths:['.github/workflows/','.factory/','.agents/','factory/']};
- const html=field('name','Project name',v.name)+field('path','Git repository root',v.path)+field('baseBranch','Base branch',v.baseBranch)+field('maxParallel','Maximum parallel jobs',v.maxParallel,'number')+field('checks','Quality checks (JSON array)',checksJson(v.checks),'code',[],'Each check needs name, executable, arguments and timeoutSeconds.')+field('protectedPaths','Protected paths, one per line',v.protectedPaths.join('\n'),'textarea');
+ const html=field('name','Project name',v.name)+field('path','Git repository root',v.path)+field('baseBranch','Base branch',v.baseBranch)+field('maxParallel','Maximum parallel jobs',v.maxParallel,'number')+projectChecksField(v.checks)+field('protectedPaths','Protected paths, one per line',v.protectedPaths.join('\n'),'textarea');
  openForm(p?'Configure project':'Register project','Quality gates are required before jobs can execute.',html,async f=>{const x=values(f);let checks;try{checks=JSON.parse(x.checks)}catch{throw Error('Invalid checks JSON')};if(!Array.isArray(checks))throw Error('Checks must be a JSON array');await mutate(p?`projects/${p.id}`:'projects',p?'PUT':'POST',{name:x.name,path:x.path,baseBranch:x.baseBranch,maxParallel:Number(x.maxParallel),checks,protectedPaths:lines(x.protectedPaths)})},p?'Update project':'Register project')}
 function formProviderReconciliation(id){
  const reservation=(providerData?.heldReservations||[]).find(x=>x.id===id);
@@ -1287,7 +1357,7 @@ async function renderGoalBudget(goalId){
     <div><small>Total budget</small><strong>${nf(total)}</strong></div><div><small>Observed consumption</small><strong>${nf(used)}</strong></div>
     <div><small>Active liabilities</small><strong>${nf(active)}</strong></div><div><small>Held liabilities</small><strong>${nf(held)}</strong></div>
     <div><small>Unreserved capacity</small><strong>${nf(budget.available)}</strong></div>
-   </div><div class="progress-track" role="meter" aria-label="Consumed and reserved goal capacity" aria-valuenow="${percent.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" style="width:${percent.toFixed(1)}%"></div></div>
+   </div><div class="progress-track" role="meter" aria-label="Consumed and reserved goal capacity" aria-valuenow="${percent.toFixed(1)}" aria-valuemin="0" aria-valuemax="100"><div class="progress-fill" data-progress="${percent.toFixed(1)}"></div></div>
    <p class="subtext">Goal-budget accounting is separate from provider account allowances. Final usage that is unknown must remain unsettled.</p>
    <h3>Reservations</h3>${rows.length?table(['Job','Status','Reserved','Consumed','Outstanding'],records):'<p class="subtext">No reservations reported.</p>'}
    ${rows.some(r=>r.pendingProviderTurns)?`<p><button class="button button-muted" data-act="linked-provider-usage">Review linked provider turns in Capacity</button></p>`:''}
@@ -1348,8 +1418,8 @@ async function reconcileGoalBudget(goalId){
 
 function showInspector(){inspector=true;$('inspector').classList.add('open');$('inspector').setAttribute('aria-hidden','false');$('inspector-backdrop').classList.add('open')}
 function closeInspector(){scopedPlanEditor=null;scopedPlanRequest++;inspectorKey=null;inspector=null;$('inspector').classList.remove('open');$('inspector').setAttribute('aria-hidden','true');$('inspector-backdrop').classList.remove('open')}
-function inspectorPanel(title,body){inspectorKey=null;$('inspector-title').textContent=title;$('inspector-body').innerHTML=body;showInspector()}
-function inspect(type,id){const entity=(type==='project'?state.projects:type==='goal'?state.goals:type==='worker'?state.workers:state.jobs).find(x=>(type==='worker'?x.id: x.id)===id);if(!entity)return;let body='';const kv=(label,v)=>`<div class="kv"><small>${esc(label)}</small><strong>${esc(v)}</strong></div>`;
+function inspectorPanel(title,body){inspectorKey=null;$('inspector-title').textContent=title;$('inspector-body').innerHTML=body;setProgress($('inspector-body'));showInspector()}
+function inspect(type,id){const entity=(type==='project'?state.projects:type==='goal'?state.goals:type==='worker'?state.workers:state.jobs).find(x=>(type==='worker'?x.id: x.id)===id);if(!entity)return;let body='';
  if(type==='job'){const j=entity;body=`${badge(j.state)}<div class="job-info-grid" style="margin-top:18px">${kv('Priority',j.priority)}${kv('Risk',j.risk)}${kv('Execution mode',j.mode)}${kv('Stage',j.stage)}${kv('Attempt',j.attempt)}${kv('Tokens',Number(j.tokensIn||0)+Number(j.tokensOut||0))}</div><h3>Description</h3><p class="subtext">${esc(j.description)}</p>${j.error?`<div class="badge danger">${esc(j.error)}</div>`:''}${kv('Branch',j.branch||'—')}${kv('Worktree',j.worktree||'—')}${kv('Head commit',j.headSha||'—')}${kv('Dependencies',j.dependsOn.join(', ')||'None')}${safeUrl(j.prUrl)?`<p><a href="${esc(safeUrl(j.prUrl))}" rel="noopener noreferrer" target="_blank">View pull request ↗</a></p>`:''}<hr class="panel-divider"><h3>Controls</h3><div class="queue-controls">${['queued'].includes(j.state)?`<button class="button button-primary" data-act="job-start" data-id="${j.id}" ${j.mode==='remote'?'disabled':''}>Run now</button><button class="button button-muted" data-control="job:${j.id}:pause">Pause</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop</button><button class="button button-danger" data-control="job:${j.id}:cancel">Cancel job</button>`:''}${['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state)?`<button class="button button-muted" data-control="job:${j.id}:pause">Pause local</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop local</button>`:''}${['paused','stopped','blocked','failed'].includes(j.state)?`<button class="button button-primary" data-control="job:${j.id}:resume">Review & requeue</button>`:''}${['pr_ready','completed_local'].includes(j.state)?`<button class="button button-muted" data-act="verify" data-id="${j.id}">Verify integration</button>`:''}</div>`;
  body+=jobInspectorDetails(j,kv);
  if(j.mode==='remote')body+='<hr class="panel-divider"><h3>Remote provider turns</h3><div id="inspector-provider-turns" aria-live="polite">Loading provider evidence...</div>';
@@ -1393,7 +1463,7 @@ function preflightDetails(preflight){
  ${section('Open pull requests',links(preflight.openPullRequests),preflight.pullRequestsChecked?'Inventory checked':preflight.pullRequestCheckNote||'Inventory unchecked')}
  ${section('Open issues',links(preflight.openIssues),preflight.issuesChecked?'Inventory checked':preflight.issueCheckNote||'Inventory unchecked')}`;
 }
-async function act(action,id,index,revision){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'project-providers':formProjectProviders(id);break;
+async function act(action,id,index,revision){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'doctor-refresh':await loadDoctor();break;case'project-providers':formProjectProviders(id);break;
  case'decisions-refresh':await loadDecisionEvidence();break;
  case'decision-reverify':await verify(id);await loadDecisionEvidence();break;
  case'decision-review':

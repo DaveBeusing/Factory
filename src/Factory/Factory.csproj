@@ -14,6 +14,7 @@
     <EmbeddedResource Include="ui/index.html" LogicalName="Factory.Ui.Index" />
     <EmbeddedResource Include="ui/app.css" LogicalName="Factory.Ui.Style" />
     <EmbeddedResource Include="ui/app.js" LogicalName="Factory.Ui.Script" />
+    <EmbeddedResource Include="../../examples/checks-*.json" LogicalName="Factory.Presets.%(Filename)%(Extension)" />
     <Content Include="Providers/Codex/Assets/**/*">
       <Link>providers/codex/%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

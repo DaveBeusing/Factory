@@ -139,7 +139,10 @@ public sealed partial class StateStore
         VerifyPlanCheckout(scope.Project, current.Project, draft.BaseCommit);
         if (!SpecificationContracts.CanRevise(current.Goal, Load(db, tx).Jobs))
             throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Existing jobs prevent specification replacement.");
-        VerifySpecification(db, tx, draft);
+        var currentState = Load(db, tx);
+        draft.ProjectContractRevision = SpecificationContracts.ProjectRevision(
+            currentState.Projects.Single(p => p.Id == draft.ProjectId));
+        VerifySpecification(db, tx, draft, currentState);
         cancellation.ThrowIfCancellationRequested();
         InsertPlanRevision(db, tx, draft, current.SubjectId.ToString());
         AuditPlan(db, tx, current, draft, operation, reviewed: null);
@@ -167,8 +170,9 @@ public sealed partial class StateStore
         var current = ReadPlanScope(db, tx, verifier, projectId, goalId);
         RequireDraftPlanTarget(current);
         Planning.VerifyAdoptionTarget(plan, current.StoredPlan, scope.Project, current.Project, current.Goal);
-        VerifySpecificationAdoption(db, tx, current.Goal, plan, Load(db, tx).Jobs);
-        VerifySpecification(db, tx, plan);
+        var currentState = Load(db, tx);
+        VerifySpecificationAdoption(db, tx, current.Goal, plan, currentState.Jobs);
+        VerifySpecification(db, tx, plan, currentState);
         if (DecidePlanAdoption(db, tx, plan, current.SubjectId.ToString()) != PolicyOutcome.Allow)
         {
             tx.Commit();
@@ -178,7 +182,14 @@ public sealed partial class StateStore
         var position = Convert.ToInt32(next.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
         var entity = Entities.Single(map => map.Type == typeof(FactoryJob));
         if (current.Goal.State == "active")
-            Execute(db, tx, "DELETE FROM jobs WHERE goal_id=$goal;", ("$goal", goalId));
+        {
+            foreach (var previous in RetireSpecificationJobs(db, tx, currentState.Jobs, current.Goal,
+                plan, current.SubjectId.ToString()))
+                Execute(db, tx, """
+                    UPDATE jobs SET state=$state,stage=$stage,updated_at=$at WHERE id=$id;
+                    """, ("$state", previous.State), ("$stage", previous.Stage),
+                    ("$at", previous.UpdatedAt), ("$id", previous.Id));
+        }
         foreach (var job in jobs) Upsert(db, tx, entity, job, position++);
         Execute(db, tx, "UPDATE goals SET state='active' WHERE id=$goal AND project_id=$project;",
             ("$goal", goalId), ("$project", projectId));
@@ -197,7 +208,10 @@ public sealed partial class StateStore
     {
         if (plan.ContractVersion == 0) return;
         state ??= Load(db, tx);
-        SpecificationContracts.Verify(plan, state.Projects.Single(p => p.Id == plan.ProjectId), state.Jobs);
+        var project = state.Projects.Single(p => p.Id == plan.ProjectId);
+        if (plan.ProjectContractRevision != SpecificationContracts.ProjectRevision(project))
+            throw new InvalidOperationException("Project checks or security configuration changed; save and review a new specification.");
+        SpecificationContracts.Verify(plan, project, state.Jobs);
         foreach (var dependency in plan.Packages.SelectMany(p => p.IntegratedPrerequisites).Distinct())
         {
             using var proof = Command(db, tx, """

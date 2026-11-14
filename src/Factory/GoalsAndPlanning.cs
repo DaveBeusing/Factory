@@ -26,6 +26,7 @@ public sealed class FactoryPlan
     public int ContractVersion { get; set; }
     public Guid? PreviousRevision { get; set; }
     public List<SpecificationChange> Changes { get; set; } = [];
+    public string ProjectContractRevision { get; set; } = "";
     public List<PlannedPackage> Packages { get; set; } = [];
     // Source/PR evidence used when drafting the work packages. Never interpreted as completeness proof.
     public WorkPackagePreflightReport? Preflight { get; set; }
@@ -134,6 +135,7 @@ public static class Planning
             if (store.ReadPlanRevision(db, tx, goal.Id)?.Revision != plan.Revision)
                 throw new InvalidOperationException("Plan changed; reopen the latest revision before saving");
             SpecificationContracts.ValidateNew(plan);
+            plan.ProjectContractRevision = SpecificationContracts.ProjectRevision(project);
             StateStore.VerifySpecification(db, tx, plan, state);
             return StateStore.InsertPlanRevision(db, tx, plan);
         });
@@ -202,7 +204,8 @@ public static class Planning
             StateStore.VerifySpecification(db, tx, plan, state);
             if (StateStore.DecidePlanAdoption(db, tx, plan, "local-operator") != PolicyOutcome.Allow)
                 return null;
-            state.Jobs.RemoveAll(job => job.GoalId == goalId);
+            if (goal.State == "active")
+                StateStore.RetireSpecificationJobs(db, tx, state.Jobs, goal, plan, "local-operator");
             var jobs = BuildAdoptedJobs(plan, goal, mode);
             state.Jobs.AddRange(jobs);
             goal.State = "active";

@@ -7,13 +7,21 @@ public sealed record SpecificationChange(string Kind, string Package,
 
 internal static class SpecificationContracts
 {
+    internal static string ProjectRevision(ProjectInfo project) =>
+        Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            Json.Stringify(new { project.Checks, project.ProtectedPaths, project.RequiredExecutionCapabilities }))));
+
+    internal static bool IsSuperseded(FactoryJob job) =>
+        job.State == JobStates.Cancelled && job.Stage == "specification_superseded";
+
     internal static bool CanRevise(FactoryGoal goal, IReadOnlyList<FactoryJob> jobs)
     {
         if (goal.State == "draft") return true;
         if (goal.State != "active") return false;
-        var current = jobs.Where(job => job.GoalId == goal.Id).ToArray();
-        return current.Length > 0 && current.All(job => job.State == JobStates.Queued &&
-            job.Attempt == 0 && job.LeaseOwner.Length == 0) &&
+        var current = jobs.Where(job => job.GoalId == goal.Id && !IsSuperseded(job)).ToArray();
+        return current.Length > 0 && current.All(job => job.LeaseOwner.Length == 0 &&
+            (job.State == JobStates.Queued && job.Attempt == 0 ||
+             job.State == JobStates.Blocked && job.Stage == "scope")) &&
             !jobs.Any(job => job.GoalId != goal.Id && current.Any(old => job.DependsOn.Contains(old.Id)));
     }
 

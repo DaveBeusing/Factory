@@ -1066,6 +1066,28 @@ await TestAsync("Plan adoption requires the reviewed plan and current goal revis
         Assert(edit.Result ? adoption.Result == 0 && state.Jobs.Count == 0 :
             adoption.Result == 1 && state.Jobs.Single().Title == "Saved during generation" &&
             state.Goals.Single().Objective == revisedGoal.Objective);
+        if (edit.Result)
+        {
+            var currentGoal = state.Goals.Single();
+            latest = MissionControlManager.SavePlan(store, Draft(currentGoal, "Rebased fixture", latest.Revision));
+            Planning.Adopt(store, goal.Id, "local", true, latest.Revision!.Value);
+        }
+        var attempted = store.Read().Jobs.Single();
+        store.UpdateJob(attempted.Id, job =>
+        {
+            job.State = JobStates.Blocked;
+            job.Stage = "scope";
+            job.Attempt = 1;
+        });
+        var amended = MissionControlManager.SavePlan(store,
+            Draft(store.Read().Goals.Single(), "Reviewed amendment", latest.Revision));
+        store.Change(s => s.Projects.Single().Checks.Single().Arguments = ["version"]);
+        Reject(() => Planning.Adopt(store, goal.Id, "local", true, amended.Revision!.Value), "configuration changed");
+        amended = MissionControlManager.SavePlan(store,
+            Draft(store.Read().Goals.Single(), "Review current configuration", amended.Revision));
+        var replacement = Planning.Adopt(store, goal.Id, "local", true, amended.Revision!.Value).Single();
+        Assert(replacement.Id != attempted.Id && store.Job(attempted.Id).State == JobStates.Cancelled);
+        Assert(store.Job(attempted.Id).Attempt == 1);
     }
     finally { try { Directory.Delete(root, true); } catch { } }
 });

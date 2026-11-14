@@ -602,8 +602,9 @@ function openScopedGoalForm(context,goal,details){
 }
 function showScopedPlan(context,goal,details){
  const plan=details.plan;
- const adoptable=details.state==='draft'&&!details.isLegacy&&plan?.revision&&plan.preflight&&plan.goalRevision===details.goalRevision;
- const controls=details.state==='draft'?
+ const editable=details.state==='draft'||details.state==='active';
+ const adoptable=editable&&!details.isLegacy&&plan?.revision&&plan.preflight&&plan.goalRevision===details.goalRevision;
+ const controls=editable?
   `<div class="head-actions"><button class="button button-muted" data-act="scoped-plan-edit" data-id="${esc(goal.id)}">Edit plan</button>
    <button class="button button-muted" data-act="scoped-plan-generate" data-id="${esc(goal.id)}">${plan?'Regenerate plan':'Generate plan'}</button>
    ${adoptable?`<button class="button button-primary" data-act="scoped-plan-adopt" data-id="${esc(goal.id)}" data-revision="${esc(plan.revision)}">Adopt reviewed plan</button>`:''}</div>`:'';
@@ -639,7 +640,7 @@ async function handleScopedPlanning(action,id,revision){
  if(!scopedPlanningIsCurrent(context)||request!==scopedPlanRequest)return;
  if(action==='scoped-goal-edit'){openScopedGoalForm(context,goal,details);return;}
  if(action==='scoped-plan-edit'){
-  if(details.state!=='draft')throw Error('Only draft goals can be planned');
+  if(!['draft','active'].includes(details.state))throw Error('This goal cannot be replanned');
   scopedPlanEditor={context,goal,details,path};
   planDraftGoal=details;
   planDraft={packages:structuredClone(details.plan?.packages||[])};
@@ -1017,7 +1018,7 @@ function planGoalContext(goal){
 async function planEditor(goalId){
  await loadPlans();
  const goal=planGoals.get(goalId);
- if(!goal||goal.state!=='draft')throw Error('Reload the goal planner before editing this draft');
+ if(!goal||!['draft','active'].includes(goal.state))throw Error('Reload the goal planner before editing this plan');
  const existing=plansCache.get(goalId);
  planGoal=goalId;
  planDraftGoal=goal;

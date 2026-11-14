@@ -228,7 +228,8 @@ public static class DashboardHost
         {
             var state = store.Read();
             var goal = state.Goals.Single(g => g.Id == goalId);
-            if (goal.State != "draft") return (IResult)Results.Conflict(new { error = "Only draft goals can generate plans" });
+            if (!SpecificationContracts.CanRevise(goal, state.Jobs))
+                return (IResult)Results.Conflict(new { error = "Existing jobs prevent specification replacement." });
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             if (wait == true)
                 return Results.Ok(await Planning.ProposeAsync(store, project, goal, settings, CancellationToken.None, planRevision));

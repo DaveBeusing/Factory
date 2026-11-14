@@ -78,6 +78,27 @@ public sealed partial class StateStore
             throw new InvalidOperationException("A new specification revision must be reviewed before replacing jobs.");
     }
 
+    internal static IReadOnlyList<FactoryJob> RetireSpecificationJobs(SqliteConnection db, SqliteTransaction tx,
+        IReadOnlyList<FactoryJob> jobs, FactoryGoal goal, FactoryPlan plan, string actor)
+    {
+        var current = jobs.Where(job => job.GoalId == goal.Id && !SpecificationContracts.IsSuperseded(job)).ToArray();
+        foreach (var job in current)
+        {
+            RequireSettledJobProviderUsage(db, tx, job.Id);
+            using var reservation = Command(db, tx, """
+                SELECT 1 FROM goal_budget_reservations WHERE job_id=$job AND state IN ('active','held') LIMIT 1;
+                """, ("$job", job.Id));
+            if (reservation.ExecuteScalar() is not null)
+                throw new InvalidOperationException("Settle the previous job's goal budget before replacement.");
+            RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, actor, job.State, JobStates.Cancelled,
+                LifecycleReason.SpecificationSuperseded, reference: plan.Revision.ToString());
+            job.State = JobStates.Cancelled;
+            job.Stage = "specification_superseded";
+            job.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        return current;
+    }
+
     internal static FactoryPlan InsertPlanRevision(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan,
         string actor = "local-operator")
     {

@@ -2243,6 +2243,53 @@ Test("Git scope scanner includes committed, staged, unstaged, renamed and untrac
     finally { try { Directory.Delete(root, true); } catch { } }
 });
 
+await TestAsync("Remote timeout preserves its disposition and the next same-worker claim has a fresh local round", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-remote-followup-");
+    try
+    {
+        var store = new StateStore(Path.Combine(home.FullName, "controller"));
+        var project = new ProjectInfo { Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(s =>
+        {
+            s.Projects.Add(project);
+            s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        GrantRemoteWorker(store, "worker-01", project.Id);
+        var settings = new FactorySettings { AllowPush = true };
+        var first = FinishLocalRound();
+        first.Job.State = JobStates.Failed;
+        first.Job.Stage = "transient";
+        first.Job.Error = "Runtime deadline expired";
+        var report = new WorkerStatus { WorkerId = first.WorkerId, JobId = job.Id, Job = first.Job,
+            ExecutionGeneration = first.Job.ExecutionGeneration, LeaseToken = first.Job.LeaseToken };
+        Assert(await WorkerProtocol.CompleteAsync(store, report, new RefusingWorkerVerifier(), settings: settings));
+        var reopened = new StateStore(store.Home);
+        Assert(reopened.Job(job.Id) is { State: JobStates.Blocked, Stage: "transient", Error: "Runtime deadline expired" });
+        MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+        var second = FinishLocalRound();
+        Assert(second.Job.ExecutionGeneration > first.Job.ExecutionGeneration);
+        Assert(RemoteWorker.ClaimState(home.FullName, first.Job.ExecutionGeneration).Read().Jobs.Count == 1);
+
+        WorkerClaim FinishLocalRound()
+        {
+            var claim = WorkerProtocol.Claim(store, settings, "worker-01") ?? throw new Exception("Missing remote claim");
+            Assert(store.StartRemoteBuilder(new(claim.WorkerId, project.Id, job.Id,
+                claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), settings));
+            var local = RemoteWorker.ClaimState(home.FullName, claim.Job.ExecutionGeneration);
+            local.Change(s => { s.Projects.Add(project); s.Jobs.Add(new FactoryJob { Id = job.Id, ProjectId = project.Id }); });
+            var fence = local.Change(s => JobRecovery.Assign(s.Jobs.Single(), "worker", 60, local: true));
+            Assert(local.BeginReviewCycle(job.Id, fence, 1) == 1);
+            local.FinishReviewCycle(job.Id, fence, 1, new QualityResult());
+            Assert(local.BeginReviewCycle(job.Id, fence, 1) == 0);
+            return claim;
+        }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 await TestAsync("Remote worktree conflict remains quarantined after restart", async () =>
 {
     var home = Directory.CreateTempSubdirectory("factory-remote-conflict-");
@@ -2439,7 +2486,8 @@ await TestAsync("Internal runtime cancellation in the last cycle blocks as trans
         GitOperations.Git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
             "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Fixture");
         var store = new StateStore(Path.Combine(home.FullName, "state"));
-        var project = new ProjectInfo { Path = repo };
+        var project = new ProjectInfo { Path = repo,
+            Checks = [new CheckCommand { Name = "git", Executable = "git", Arguments = ["rev-parse", "HEAD"] }] };
         store.Change(s => s.Projects.Add(project));
         var job = store.AddJob(new FactoryJob { ProjectId = project.Id, Title = "Deadline", ExpectedPaths = ["src/"] });
         var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "seed", 60, local: true));

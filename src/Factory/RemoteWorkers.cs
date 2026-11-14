@@ -420,11 +420,15 @@ public static class WorkerProtocol
                 var requiresReconciliation = req.Job is { State: JobStates.Blocked, Stage: "reconcile" } conflict &&
                     conflict.Id == j.Id && conflict.ProjectId == j.ProjectId &&
                     conflict.Attempt == j.Attempt && conflict.Mode == JobExecutionModes.Remote;
+                var transient = req.Job is { State: JobStates.Failed or JobStates.Blocked, Stage: "transient" } timeout &&
+                    timeout.Id == j.Id && timeout.ProjectId == j.ProjectId &&
+                    timeout.Attempt == j.Attempt && timeout.Mode == JobExecutionModes.Remote;
                 j.State = JobStates.Blocked;
                 j.Stage = gitUncertain ? "interrupted_git" : requiresReconciliation ? "reconcile" :
-                    scopeBlocked ? "scope" : "remote_verification_failed";
+                    scopeBlocked ? "scope" : transient ? "transient" : "remote_verification_failed";
                 j.Error = gitUncertain ? "Remote Git effects are uncertain; reconcile before retry." :
                     requiresReconciliation ? "Remote execution reported a conflict; reconcile before retry." :
+                    transient && !string.IsNullOrWhiteSpace(req.Job!.Error) ? req.Job.Error :
                     scopeBlocked ? req.Job!.Error : pendingReview is not null
                     ? "Unverified or exhausted final goal usage" : failure;
                 if (StateStore.ReviewCyclesUsed(db, tx, j.Id) >= Math.Clamp(j.MaxRounds, 1, ReviewPolicy.MaxCycles))
@@ -451,6 +455,9 @@ public static class WorkerProtocol
 
 public static class RemoteWorker
 {
+    internal static StateStore ClaimState(string jobDir, long generation) =>
+        new(Path.Combine(jobDir, "claims", generation.ToString(System.Globalization.CultureInfo.InvariantCulture)));
+
     public static async Task RunAsync(Uri server, string token, string workspace, string workerId,
         CancellationToken ct)
     {
@@ -487,16 +494,18 @@ public static class RemoteWorker
                 throw new InvalidOperationException("Remote worker received a job for another execution mode");
            var jobDir = Path.Combine(workspace, claim.Job.Id.ToString("N"));
            Directory.CreateDirectory(jobDir);
-           var localState = new StateStore(Path.Combine(jobDir, "state"));
+           var admissions = new StateStore(Path.Combine(jobDir, "state"));
            var report = new WorkerStatus { WorkerId = workerId, JobId = claim.Job.Id,
                 TokensIn = claim.Job.TokensIn, TokensOut = claim.Job.TokensOut,
                 ExecutionGeneration = claim.Job.ExecutionGeneration,
                 LeaseToken = claim.Job.LeaseToken, ProviderLeaseId = claim.ProviderLeaseId };
-           if (!localState.ConsumeWorkerClaim(report.JobId, report.ExecutionGeneration)) continue;
+           if (!admissions.ConsumeWorkerClaim(report.JobId, report.ExecutionGeneration)) continue;
            using (var admitted = await http.PostAsJsonAsync("api/worker/start",
                new WorkerStartRequest(workerId, claim.Project.Id, report.JobId, report.ExecutionGeneration,
                    report.LeaseToken, report.ProviderLeaseId), ct))
                if (!admitted.IsSuccessStatusCode) continue;
+           // The controller owns the lifetime budget. Keep one local cycle and its evidence per admitted claim.
+           var localState = ClaimState(jobDir, report.ExecutionGeneration);
            using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
            using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
            var heartbeat = Task.Run(async () =>

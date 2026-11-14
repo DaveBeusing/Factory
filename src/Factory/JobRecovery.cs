@@ -32,8 +32,7 @@ public static class JobRecovery
 
         // Only local process identity can be verified by this controller. An administrator
         // must establish termination out of band for a remote or former-host runner.
-        if (job.Mode == JobExecutionModes.Local &&
-            string.Equals(job.WorkerMachineName, Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(job.WorkerMachineName, Environment.MachineName, StringComparison.OrdinalIgnoreCase))
             EnsurePreviousRunnerStopped(job);
     }
     public static ExecutionFence Assign(FactoryJob job, string owner, int leaseSeconds, bool local,
@@ -129,7 +128,7 @@ public static class JobRecovery
 
     private static void EnsurePreviousRunnerStopped(FactoryJob job)
     {
-        if (job.Mode != JobExecutionModes.Local || job.WorkerProcessId <= 0 ||
+        if (job.WorkerProcessId <= 0 ||
             job.WorkerProcessStartedAt is null ||
             string.IsNullOrWhiteSpace(job.WorkerMachineName) ||
             !job.WorkerMachineName.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase))
@@ -185,7 +184,7 @@ public static class JobRecovery
 
     internal static void VerifyLocalRecoveryEvidence(FactoryJob snapshot)
     {
-        if (snapshot.State != JobStates.Blocked || snapshot.Stage != "reconcile" ||
+        if (snapshot.Mode != JobExecutionModes.Local || snapshot.State != JobStates.Blocked || snapshot.Stage != "reconcile" ||
             !string.IsNullOrEmpty(snapshot.LeaseOwner))
             throw new InvalidOperationException("Job is not waiting for reconciliation");
         EnsurePreviousRunnerStopped(snapshot);

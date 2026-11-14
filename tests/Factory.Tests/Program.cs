@@ -1496,6 +1496,41 @@ Test("Reviewed release clears a fenced reservation without replay", () =>
     finally { try { home.Delete(true); } catch { } }
 });
 
+Test("Resource release verifies the recorded local runner after a mode change", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-resource-provenance-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo();
+        var job = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["a.cs"] };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "fixture-runner", 120, local: true));
+        store.UpdateJob(job.Id, j => j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        Assert(JobRecovery.QuarantineExpired(store).Contains(job.Id));
+        using var runner = new CancellationTokenSource();
+        LocalJobControl.Register(job.Id, runner);
+        try
+        {
+            store.UpdateJob(job.Id, j => j.Mode = JobExecutionModes.Remote);
+            var snapshot = new StateStore(home.FullName).Job(job.Id);
+            var release = new ResourceReleaseInput(snapshot.ControlRevision, true, true, "Reviewed Git effects and runner");
+            try
+            {
+                JobRecovery.ReleaseResources(store, job.Id, release);
+                throw new Exception("Mode change bypassed the live runner check.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("still alive", StringComparison.Ordinal)) { }
+            Assert(store.Job(job.Id).ControlRevision == snapshot.ControlRevision);
+        }
+        finally { LocalJobControl.Unregister(job.Id); }
+        var stopped = store.Job(job.Id);
+        Assert(JobRecovery.ReleaseResources(store, job.Id,
+            new(stopped.ControlRevision, true, true, "Verified runner termination and Git effects")).State == JobStates.Cancelled);
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Interrupted Git retries keep ownership until reviewed release", () =>
 {
     var home = Directory.CreateTempSubdirectory("factory-interrupted-git-retry-");

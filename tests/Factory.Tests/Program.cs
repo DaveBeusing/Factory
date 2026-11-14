@@ -2272,6 +2272,35 @@ await TestAsync("Remote timeout preserves its disposition and the next same-work
         var second = FinishLocalRound();
         Assert(second.Job.ExecutionGeneration > first.Job.ExecutionGeneration);
         Assert(RemoteWorker.ClaimState(home.FullName, first.Job.ExecutionGeneration).Read().Jobs.Count == 1);
+        var cloneReport = new WorkerStatus { WorkerId = second.WorkerId, JobId = job.Id,
+            ExecutionGeneration = second.Job.ExecutionGeneration, LeaseToken = second.Job.LeaseToken };
+        try
+        {
+            await RemoteWorker.CloneForClaimAsync(second, cloneReport,
+                () => Task.FromException(new TimeoutException("Clone deadline expired")));
+            throw new Exception("Clone timeout was swallowed.");
+        }
+        catch (TimeoutException) { }
+        Assert(await WorkerProtocol.CompleteAsync(reopened, cloneReport, new RefusingWorkerVerifier(), settings: settings));
+        Assert(reopened.Job(job.Id) is { Stage: "transient", Error: "Clone deadline expired" });
+        MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+        new StateStore(store.Home).Change((_, db, tx) =>
+        {
+            using var query = db.CreateCommand();
+            query.Transaction = tx;
+            query.CommandText = "SELECT report FROM review_cycles WHERE job_id=$id ORDER BY cycle;";
+            query.Parameters.AddWithValue("$id", job.Id.ToString());
+            using var rows = query.ExecuteReader();
+            for (var cycle = 1; cycle <= 2; cycle++)
+            {
+                Assert(rows.Read());
+                using var evidence = System.Text.Json.JsonDocument.Parse(rows.GetString(0));
+                Assert(evidence.RootElement.GetProperty("kind").GetString() == "Transient");
+                Assert(evidence.RootElement.GetProperty("stage").GetString() == "transient");
+            }
+            Assert(!rows.Read());
+            return true;
+        });
 
         WorkerClaim FinishLocalRound()
         {

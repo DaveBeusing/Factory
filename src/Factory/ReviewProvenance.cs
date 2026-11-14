@@ -190,7 +190,16 @@ public sealed partial class StateStore
         var result = request.Job;
         var head = result is not null && result.Id == job.Id && result.ProjectId == job.ProjectId &&
             result.Attempt == job.Attempt && IntegrationVerifier.IsCommitSha(result.HeadSha) ? result.HeadSha : null;
-        var report = Json.Stringify(new { assurance = "UNKNOWN", head, outcome = job.State, quality,
+        var failureKind = job.Stage switch
+        {
+            "transient" => ExecutionFailureKind.Transient,
+            "reconcile" => ExecutionFailureKind.Conflict,
+            "scope" => ExecutionFailureKind.Policy,
+            "interrupted_git" => ExecutionFailureKind.UncertainSideEffect,
+            _ => (ExecutionFailureKind?)null
+        };
+        var report = Json.Stringify(new { assurance = "UNKNOWN", head, outcome = job.State,
+            stage = job.Stage, kind = failureKind?.ToString(), quality,
             findings = string.IsNullOrEmpty(job.Error) ? Array.Empty<ReviewFinding>() :
                 new[] { new ReviewFinding("controller", job.Error) },
             workerReport = request.Evidence is { Length: <= 1_000_000 } ? request.Evidence : null });

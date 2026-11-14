@@ -455,6 +455,22 @@ public static class WorkerProtocol
 
 public static class RemoteWorker
 {
+    internal static async Task CloneForClaimAsync(WorkerClaim claim, WorkerStatus report,
+        Func<Task> clone)
+    {
+        try { await clone(); }
+        catch (TimeoutException ex)
+        {
+            report.Job = new FactoryJob
+            {
+                Id = claim.Job.Id, ProjectId = claim.Project.Id, Attempt = claim.Job.Attempt,
+                Mode = JobExecutionModes.Remote, State = JobStates.Failed, Stage = "transient",
+                Error = ex.Message
+            };
+            throw;
+        }
+    }
+
     internal static StateStore ClaimState(string jobDir, long generation) =>
         new(Path.Combine(jobDir, "claims", generation.ToString(System.Globalization.CultureInfo.InvariantCulture)));
 
@@ -546,9 +562,12 @@ public static class RemoteWorker
                var repoPath = Path.Combine(jobDir, "repository");
                if (!Directory.Exists(Path.Combine(repoPath, ".git")))
                 {
-                    var clone = await Commands.RunAsync("git", ["clone", "--branch", claim.Project.BaseBranch,
-                        "--single-branch", claim.Project.Origin, repoPath], jobDir, 300, cancellationToken: executionCancel.Token);
-                   Commands.Require(clone, "git clone");
+                    await CloneForClaimAsync(claim, report, async () =>
+                    {
+                        var clone = await Commands.RunAsync("git", ["clone", "--branch", claim.Project.BaseBranch,
+                            "--single-branch", claim.Project.Origin, repoPath], jobDir, 300, cancellationToken: executionCancel.Token);
+                        Commands.Require(clone, "git clone");
+                    });
                }
                 claim.Project.Path = repoPath;
                claim.Project.Origin = GitOperations.Origin(repoPath) ?? claim.Project.Origin;

@@ -3706,6 +3706,59 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+await TestAsync("Merged remote PR evidence rejects pending CI, incomplete scope and a changed head", async () =>
+{
+    var project = new ProjectInfo { Origin = "https://github.com/example/repo",
+        Checks = [new CheckCommand { Name = "build" }] };
+    var job = new FactoryJob { HeadSha = new string('a', 40), ExpectedPaths = ["src/"],
+        PrUrl = "https://github.com/example/repo/pull/1", Branch = "factory/fixture" };
+    var merge = new string('b', 40);
+    var head = job.HeadSha;
+    var conclusion = "SUCCESS";
+    var paths = """[[{"filename":"src/file.cs","status":"modified"}]]""";
+    var verifier = new GitHubWorkerResultVerifier((args, _, _) =>
+    {
+        var output = args[1] switch
+        {
+            "graphql" => Json.Stringify(new { data = new { repository = new
+            {
+                @ref = new { refUpdateRule = (object?)null, branchProtectionRule = (object?)null },
+                @object = new { oid = job.HeadSha, statusCheckRollup = new { contexts = new
+                {
+                    pageInfo = new { hasNextPage = false },
+                    nodes = new[] { new { name = "build", isRequired = true, conclusion } }
+                } } }
+            } } }),
+            "--paginate" when args[3].Contains("/rules/") => "[[]]",
+            "--paginate" => paths,
+            _ => $$$"""
+                {"merged":true,"merge_commit_sha":"{{{merge}}}","changed_files":1,
+                "base":{"ref":"master","repo":{"full_name":"example/repo"},"sha":"{{{new string('c', 40)}}}"},
+                "head":{"ref":"factory/fixture","repo":{"full_name":"example/repo"},"sha":"{{{head}}}"}}
+                """
+        };
+        return Task.FromResult(new CommandResult(0, output, ""));
+    });
+    async Task Reject(string expected)
+    {
+        try
+        {
+            await verifier.VerifyMergedAsync(project, job, merge, CancellationToken.None);
+            throw new Exception("Invalid merged PR evidence was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains(expected)) { }
+    }
+    var receipt = await verifier.VerifyMergedAsync(project, job, merge, CancellationToken.None);
+    Assert(receipt.Contains("src/file.cs") && receipt.Contains(job.HeadSha));
+    conclusion = "PENDING";
+    await Reject("checks");
+    conclusion = "SUCCESS";
+    paths = "[[]]";
+    await Reject("incomplete PR file list");
+    head = new string('d', 40);
+    await Reject("not verified");
+});
+
 await TestAsync("Completed remote builds require a signed decision bound to the target", async () =>
 {
     var home = Directory.CreateTempSubdirectory("factory-signed-remote-");
@@ -3759,6 +3812,13 @@ await TestAsync("Completed remote builds require a signed decision bound to the 
             System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss));
         store.RecordTrustedReview(new(approval, signature));
         Assert(new StateStore(home.FullName).IsReviewApproved(job.Id));
+        try
+        {
+            await new FactoryEngine(store, settings).VerifyIntegrationAsync(job.Id);
+            throw new Exception("A signed remote build integrated without a pull request.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("Supply the merged pull request")) { }
+        Assert(!store.Job(job.Id).Integrated);
         store.Change(s => s.Projects.Single().Origin = "https://github.com/example/other");
         Assert(!store.IsReviewApproved(job.Id));
         store.Change(s =>

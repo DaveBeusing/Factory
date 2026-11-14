@@ -180,12 +180,17 @@ public sealed partial class StateStore
 
     internal bool IsReviewApproved(Guid id)
     {
-        var key = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
-        if (string.IsNullOrWhiteSpace(key)) return false;
         using var db = Open();
         using var tx = db.BeginTransaction(deferred: true);
         var job = ReadJob(db, tx, id);
-        if (job is null || job.State != JobStates.CompletedLocal || job.LeaseOwner.Length != 0 ||
+        var project = job is null ? null : Load(db, tx).Projects.SingleOrDefault(p => p.Id == job.ProjectId);
+        return job is not null && project is not null && IsReviewApproved(db, tx, job, project);
+    }
+
+    internal static bool IsReviewApproved(SqliteConnection db, SqliteTransaction tx, FactoryJob job, ProjectInfo project)
+    {
+        var key = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
+        if (string.IsNullOrWhiteSpace(key) || job.State != JobStates.CompletedLocal || job.LeaseOwner.Length != 0 ||
             !HasCurrentReviewHead(job))
             return false;
         using var query = Command(db, tx, """
@@ -193,7 +198,7 @@ public sealed partial class StateStore
                 ON c.job_id=a.job_id AND c.cycle=a.cycle
             WHERE a.job_id=$job AND c.generation=$generation AND c.head_sha=$head
                 AND c.cycle=(SELECT MAX(cycle) FROM review_cycles WHERE job_id=$job);
-            """, ("$job", id), ("$generation", job.ExecutionGeneration), ("$head", job.HeadSha));
+            """, ("$job", job.Id), ("$generation", job.ExecutionGeneration), ("$head", job.HeadSha));
         using var row = query.ExecuteReader();
         if (!row.Read()) return false;
         var payload = row.GetString(0);
@@ -201,9 +206,9 @@ public sealed partial class StateStore
         row.Close();
         var proof = JsonSerializer.Deserialize<ReviewApproval>(payload, Json.Options);
         if (proof is null || proof.ExpiresAt <= DateTimeOffset.UtcNow || proof.PolicyRevision != ReviewPolicy.Revision ||
-            proof.ProjectId != job.ProjectId || proof.JobId != id || proof.Generation != job.ExecutionGeneration ||
+            proof.ProjectId != job.ProjectId || proof.JobId != job.Id || proof.Generation != job.ExecutionGeneration ||
             proof.Commit != job.HeadSha || proof.BuilderSession != job.SessionId ||
-            ReviewPolicy.ProjectRevision(Load(db, tx).Projects.Single(p => p.Id == job.ProjectId)) != proof.ProjectContractRevision)
+            ReviewPolicy.ProjectRevision(project) != proof.ProjectContractRevision)
             return false;
         using var signer = RSA.Create();
         signer.ImportFromPem(key);

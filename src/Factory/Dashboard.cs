@@ -321,9 +321,10 @@ public static class DashboardHost
         });
         app.MapGet("/api/jobs/{id:guid}/review-approved", (Guid id) =>
             Results.Ok(new { approved = store.IsReviewApproved(id) }));
-        app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, CancellationToken ct) =>
+        app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, string? pullRequestUrl, CancellationToken ct) =>
         {
-            var proof = await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, ct);
+            var proof = await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, pullRequestUrl,
+                new GitHubWorkerResultVerifier(), ct);
             return Results.Ok(proof);
         });
         // Registration through Mission Control is administrator-only.

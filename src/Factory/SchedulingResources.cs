@@ -38,6 +38,25 @@ public sealed record SchedulingDecision(Guid JobId, string Reason, Guid? Conflic
 
 public sealed partial class StateStore
 {
+    internal FactoryJob ReleaseSchedulingResources(Guid id, ResourceReleaseInput input, string reason) =>
+        Change((state, db, tx) =>
+        {
+            var job = state.Jobs.Single(j => j.Id == id);
+            JobRecovery.VerifyResourceRelease(job, input);
+            RequireSettledJobProviderUsage(db, tx, id);
+            if (state.BudgetReservations.Any(r => r.JobId == id &&
+                r.State is GoalBudgetLedger.Active or GoalBudgetLedger.Held))
+                throw new InvalidOperationException("Settle the outstanding goal budget before releasing resources.");
+            RecordLifecycle(db, tx, job.ProjectId, "job", id, "local-operator", job.State, JobStates.Cancelled,
+                LifecycleReason.SchedulingResourcesReleased, reference: reason, generation: job.ExecutionGeneration,
+                state: state);
+            job.State = JobStates.Cancelled;
+            job.Stage = "resources_released";
+            job.RequestedState = "";
+            job.UpdatedAt = DateTimeOffset.UtcNow;
+            return job;
+        });
+
     internal static void RecordIntegratedHead(Microsoft.Data.Sqlite.SqliteConnection db,
         Microsoft.Data.Sqlite.SqliteTransaction tx, FactoryJob job, IntegrationProof proof) =>
         Execute(db, tx, """

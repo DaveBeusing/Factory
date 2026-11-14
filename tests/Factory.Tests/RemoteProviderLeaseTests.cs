@@ -149,7 +149,11 @@ internal static class RemoteProviderLeaseTests
 
             var expiringJob = NewJob();
             store.Change(state => state.Jobs.Add(expiringJob));
-            claim = WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion)!;
+            Check(WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion) is null,
+                "Unreconciled remote ownership did not block a conflicting claim");
+            store.UpdateJob(expiringJob.Id, current => current.ExpectedPaths = ["independent.txt"]);
+            claim = WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion)
+                ?? throw new Exception("Disjoint job could not claim while remote ownership was quarantined");
             var interrupted = Begin(Request("builder", Base));
             store.Change(state => state.Jobs.Single(j => j.Id == expiringJob.Id).LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
             Check(JobRecovery.QuarantineExpired(store, JobExecutionModes.Remote).Contains(expiringJob.Id) &&

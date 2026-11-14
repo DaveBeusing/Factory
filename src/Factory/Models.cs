@@ -32,6 +32,7 @@ internal enum LifecycleReason
     OperatorResumed,
     OperatorRetried,
     Reconciled,
+    SchedulingResourcesReleased,
     IntegrationVerified,
     PlanProposed,
     PlanSuperseded,

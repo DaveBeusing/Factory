@@ -1469,6 +1469,33 @@ Test("Scheduler serializes shared resources and explains the decision", () =>
 });
 
 
+Test("Reviewed release clears a fenced reservation without replay", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-resource-release-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo();
+        var old = new FactoryJob { ProjectId = project.Id, Mode = "remote", State = JobStates.Blocked,
+            Stage = "reconcile", CheckpointStage = "push", ExpectedPaths = ["a.cs"], SharedResources = ["schema:sqlite"] };
+        var next = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["b.cs"], SharedResources = ["schema:sqlite"] };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.AddRange([old, next]); });
+        Assert(JobScheduler.Select(store.Read(), 4).Count == 0);
+        var input = new ResourceReleaseInput(old.ControlRevision, true, true, "Confirmed stopped and reviewed remote Git effects");
+        var released = JobRecovery.ReleaseResources(store, old.Id, input);
+        Assert(released.State == JobStates.Cancelled && released.Stage == "resources_released");
+        var reopened = new StateStore(home.FullName);
+        Assert(JobScheduler.Select(reopened.Read(), 4).Single().Id == next.Id);
+        try
+        {
+            JobRecovery.ReleaseResources(reopened, old.Id, input);
+            throw new Exception("A stale release was accepted.");
+        }
+        catch (InvalidOperationException) { }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {

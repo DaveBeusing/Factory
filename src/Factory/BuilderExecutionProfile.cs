@@ -99,7 +99,12 @@ public sealed partial class StateStore
                 (RemoteProviderRouting.Required(project, job) && route is null) ||
                 (route is not null && !RemoteProviderRouting.CanContinue(state, settings, job, route)))
                 return false;
-            return TryRecordBuilderStart(db, tx, job.Id, job.ExecutionGeneration);
+            var used = ReviewCyclesUsed(db, tx, job.Id);
+            if (used >= Math.Clamp(job.MaxRounds, 1, ReviewPolicy.MaxCycles) ||
+                !TryRecordBuilderStart(db, tx, job.Id, job.ExecutionGeneration))
+                return false;
+            ReserveReviewCycle(db, tx, job.Id, job.ExecutionGeneration, used + 1);
+            return true;
         });
 
     private static bool TryRecordBuilderStart(SqliteConnection db, SqliteTransaction tx, Guid job, long generation)

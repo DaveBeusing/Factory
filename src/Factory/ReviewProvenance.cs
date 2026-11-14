@@ -34,6 +34,16 @@ public sealed partial class StateStore
             PRAGMA user_version=24;
             """);
 
+    internal static int ReviewCyclesUsed(SqliteConnection db, SqliteTransaction tx, Guid id)
+    {
+        using var count = Command(db, tx, "SELECT COUNT(*) FROM review_cycles WHERE job_id=$id;", ("$id", id));
+        return Convert.ToInt32(count.ExecuteScalar());
+    }
+
+    private static void ReserveReviewCycle(SqliteConnection db, SqliteTransaction tx, Guid id, long generation, int cycle) =>
+        Execute(db, tx, "INSERT INTO review_cycles(job_id,cycle,generation) VALUES($id,$cycle,$generation);",
+            ("$id", id), ("$cycle", cycle), ("$generation", generation));
+
     internal int BeginReviewCycle(Guid id, ExecutionFence fence, int maximum)
     {
         using var db = Open();

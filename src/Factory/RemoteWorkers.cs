@@ -95,6 +95,8 @@ public static class WorkerProtocol
                     GoalBudgetLedger.Allocation(s, job, settings.GoalReservationTokens) == 0)
                     continue;
                 var requiresProviderLease = RemoteProviderRouting.Required(project, job);
+                if (StateStore.ReviewCyclesUsed(db, tx, job.Id) >= Math.Clamp(job.MaxRounds, 1, ReviewPolicy.MaxCycles))
+                    continue;
                 var routes = requiresProviderLease ? RemoteProviderRouting.Plan(s, settings, job) : null;
                 if (requiresProviderLease && routes is null) continue;
                 JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
@@ -143,7 +145,7 @@ public static class WorkerProtocol
                     Settings = new FactorySettings
                     {
                     Runtime = routes?.Single(route => route.Role == "builder").Runtime ?? settings.Runtime, Model = settings.Model,
-                        MaxReviewRounds = settings.MaxReviewRounds, AllowPush = true,
+                        MaxReviewRounds = 1, AllowPush = true,
                         LeaseSeconds = settings.LeaseSeconds, MaxParallel = 1,
                         GoalReservationTokens = job.GoalId is null
                             ? settings.GoalReservationTokens
@@ -305,6 +307,12 @@ public static class WorkerProtocol
             }
         }
 
+        // Hosted checks establish quality, not the identity of the worker reviewers.
+        if (verified is not null && verifier is GitHubWorkerResultVerifier)
+        {
+            verified = null;
+            failure = "Controller-trusted independent reviewer provenance is unavailable.";
+        }
         return store.Change((s, db, tx) =>
         {
             var j = s.Jobs.FirstOrDefault(x => x.Id == req.JobId);
@@ -485,6 +493,7 @@ public static class RemoteWorker
                claim.Project.Origin = GitOperations.Origin(repoPath) ?? claim.Project.Origin;
                // The controller already counted the remote claim. The local execution claim
                // must not increment the same attempt a second time.
+               claim.Job.MaxRounds = 1;
                claim.Job.Attempt = Math.Max(0, claim.Job.Attempt - 1);
                claim.Job.State = JobStates.Queued;
                claim.Job.DependsOn = [];

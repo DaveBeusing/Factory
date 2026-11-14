@@ -40,9 +40,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         var repository = GitHubRepository(project.Origin);
         var number = PullNumber(finished.PrUrl, repository);
         WorkPackageScope.ValidateDeclaration(job.ExpectedPaths);
-        // A worker report cannot establish controller-trusted reviewer independence.
         var evidence = ValidateEvidence(project, job, status);
-        RequireTrustedReviewProvenance(evidence);
         using var pr = await PullAsync(repository, number, ct);
         ValidatePull(pr, repository, project.BaseBranch, expectedBranch, finished.HeadSha);
 
@@ -93,13 +91,6 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             // Worker data remains explicitly identified as worker-reported evidence.
             workerEvidence = evidence
         }), tree);
-    }
-
-    private static void RequireTrustedReviewProvenance(JsonElement workerEvidence)
-    {
-        // The current remote protocol does not carry controller-issued reviewer decisions.
-        // A worker-defined assurance label must never authorize PR-ready.
-        throw new InvalidOperationException("Controller-trusted independent reviewer provenance is unavailable.");
     }
 
     public static JsonElement ValidateEvidence(ProjectInfo project, FactoryJob job, WorkerStatus status)

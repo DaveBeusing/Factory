@@ -23,7 +23,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
     internal async Task<object> ExecuteAsync(Guid id, SignedPullRequestDecision signed, CancellationToken ct)
     {
         var d = signed.Decision ?? throw new ArgumentException("Missing project decision.");
-        if (d.Action is not ("draft" or "merge") || !settings.AllowPush ||
+        if (d.Action is not ("draft" or "check" or "merge" or "reverify") || !settings.AllowPush ||
             (d.Action == "merge" && !settings.AutoMerge))
             throw new InvalidOperationException("Publication or guarded merge is disabled.");
         ValidateSignature(signed);
@@ -31,7 +31,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         var project = store.Read().Projects.Single(p => p.Id == job.ProjectId);
         var branch = $"factory/{id:N}";
         ValidateTarget(d, job, project);
-        if (!store.IsReviewApproved(id))
+        if (d.Action == "reverify" ? !store.Read().HistoricalIntegrations.Contains(id) : !store.IsReviewApproved(id))
             throw new InvalidOperationException("A current signed independent review is required.");
 
         var account = await ReadAsync(["api", "user"], ct);
@@ -67,7 +67,16 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             if (!created.GetProperty("draft").GetBoolean() ||
                 created.GetProperty("base").GetProperty("sha").GetString() != d.BaseCommit)
                 throw new InvalidOperationException("The created PR differs from the authorized draft; reconcile it in GitHub.");
-            return new { url = created.GetProperty("html_url").GetString(), d.HeadCommit, draft = true };
+            var createdUrl = created.GetProperty("html_url").GetString() ?? "";
+            _ = GitHubWorkerResultVerifier.PullNumber(createdUrl, d.Repository);
+            store.Change((state, db, tx) =>
+            {
+                StateStore.RecordLifecycle(db, tx, d.ProjectId, "publication-receipt", id, d.Account,
+                    "reserved", "created", LifecycleReason.PullRequestPrepared,
+                    Json.Stringify(new { url = createdUrl, d.HeadCommit, d.BaseCommit, d.ProjectRevision }), job.ExecutionGeneration, state);
+                return true;
+            });
+            return new { url = createdUrl, d.HeadCommit, draft = true };
         }
 
         var url = $"https://github.com/{d.Repository}/pull/{d.PullNumber}";
@@ -75,7 +84,24 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         var pull = await ReadPullAsync(d, ct);
         if (pull.GetProperty("merged").GetBoolean())
         {
+            if (d.Action is not ("merge" or "reverify"))
+                throw new InvalidOperationException("A signed merge verification decision is required for a merged pull request.");
             var mergeCommit = await RequireMergeReceiptAsync(d, pull, ct);
+            var merged = new MergedPullRequest(true,
+                pull.GetProperty("base").GetProperty("repo").GetProperty("full_name").GetString() ?? "",
+                pull.GetProperty("head").GetProperty("repo").GetProperty("full_name").GetString() ?? "",
+                pull.GetProperty("base").GetProperty("ref").GetString() ?? "",
+                pull.GetProperty("head").GetProperty("ref").GetString() ?? "",
+                pull.GetProperty("head").GetProperty("sha").GetString() ?? "", mergeCommit);
+            var expected = new FactoryJob { Branch = branch, HeadSha = d.HeadCommit };
+            IntegrationVerifier.ValidateMergedPullRequest(merged, d.Repository, project, expected);
+            store.Change((state, db, tx) =>
+            {
+                StateStore.RecordLifecycle(db, tx, d.ProjectId, "publication-receipt", id, d.Account,
+                    "created", "merged", LifecycleReason.RemoteResultVerified,
+                    Json.Stringify(new { url, d.HeadCommit, d.BaseCommit, d.ProjectRevision, mergeCommit }), job.ExecutionGeneration, state);
+                return true;
+            });
             var author = pull.GetProperty("user").GetProperty("login").GetString();
             return await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, url, verifier, ct,
                 remote: new GitRemoteBaseReader(synchronize: true), coordinated: true, expectedMergeCommit: mergeCommit,
@@ -88,11 +114,27 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
                 });
         }
 
+        if (d.Action == "reverify")
+            throw new InvalidOperationException("Historical re-verification requires an already merged pull request.");
+
         await RequireCurrentBaseAsync(d, ct);
         if (repository.GetProperty("permissions").GetProperty("admin").GetBoolean())
             throw new InvalidOperationException("Guarded merge requires a non-admin repository credential.");
         await RequireStrictRulesAsync(d, ct);
         await RequireMergeChecksAsync(d, project, job, branch, pull, verifier, ct);
+        if (d.Action == "check")
+        {
+            await RequireCurrentBaseAsync(d, ct);
+            RequireCurrentDecision(signed, id);
+            store.Change((state, db, tx) =>
+            {
+                StateStore.RecordLifecycle(db, tx, d.ProjectId, "publication-receipt", id, d.Account,
+                    "created", "ready", LifecycleReason.RemoteResultVerified,
+                    Json.Stringify(new { url, d.HeadCommit, d.BaseCommit, d.ProjectRevision, d.ExpiresAt }), job.ExecutionGeneration, state);
+                return true;
+            });
+            return new { url, d.HeadCommit, ready = true };
+        }
         throw new InvalidOperationException("GitHub cannot atomically enforce the signed base commit during merge.");
     }
 
@@ -353,7 +395,8 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         ValidateSignature(signed);
         var job = store.Job(id);
         ValidateTarget(d, job, store.Read().Projects.Single(p => p.Id == job.ProjectId));
-        if (!settings.AllowPush || (d.Action == "merge" && !settings.AutoMerge) || !store.IsReviewApproved(id))
+        var eligible = d.Action == "reverify" ? store.Read().HistoricalIntegrations.Contains(id) : store.IsReviewApproved(id);
+        if (!settings.AllowPush || (d.Action == "merge" && !settings.AutoMerge) || !eligible)
             throw new InvalidOperationException("Publication authorization changed during verification.");
     }
 

@@ -353,6 +353,9 @@ public sealed class FactoryEngine
         var state = _store.Read();
         var job = state.Jobs.Single(j => j.Id == id);
         var project = state.Projects.Single(p => p.Id == job.ProjectId);
+        if (state.HistoricalIntegrations.Contains(id))
+            return await ReverifyHistoricalIntegrationAsync(job, project, verifier, remote, pullRequests, ct,
+                coordinated, expectedMergeCommit, verifyWorkflow, pullRequestUrl);
         if (job.State is not (JobStates.CompletedLocal or JobStates.PrReady) || job.Integrated || job.LeaseOwner.Length != 0)
             throw new InvalidOperationException("Job is not eligible for integration verification");
         var remoteIntegration = job.Mode == JobExecutionModes.Remote;
@@ -413,6 +416,7 @@ public sealed class FactoryEngine
             StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", id, "integration-verifier",
                 current.State, JobStates.Integrated, LifecycleReason.IntegrationVerified, reference: proof.IntegratedCommit, state: s);
             StateStore.RecordIntegratedHead(db, tx, current, proof);
+            StateStore.RecordIntegrationTarget(db, tx, current, currentProject, proof, s);
             current.Integrated = true;
             current.State = JobStates.Integrated;
             current.Stage = "done";
@@ -429,4 +433,50 @@ public sealed class FactoryEngine
         return proof;
     }
 
+    private async Task<IntegrationProof> ReverifyHistoricalIntegrationAsync(FactoryJob job, ProjectInfo project,
+        GitHubWorkerResultVerifier verifier, IRemoteBaseReader? remote, IIntegrationPullRequestReader? pullRequests,
+        CancellationToken ct, bool coordinated, string? expectedMergeCommit,
+        Func<IReadOnlyList<RequiredCheckRun>, CancellationToken, Task<string>>? verifyWorkflow, string? pullRequestUrl)
+    {
+        if (job.LeaseOwner.Length != 0)
+            throw new InvalidOperationException("The historical job still has a lease.");
+        var guarded = job.Mode == JobExecutionModes.Remote || _store.HasPublicationReservation(job.Id);
+        if (guarded && !coordinated)
+            throw new InvalidOperationException("Use the signed publication endpoint to verify guarded integration.");
+        if (coordinated && (expectedMergeCommit is null || verifyWorkflow is null || pullRequestUrl != job.PrUrl))
+            throw new InvalidOperationException("Historical guarded integration requires its original PR and fresh workflow evidence.");
+        var hostedEvidence = coordinated
+            ? await verifier.VerifyMergedAsync(project, job, expectedMergeCommit!, ct, verifyWorkflow)
+            : null;
+        var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct, expectedMergeCommit);
+        ct.ThrowIfCancellationRequested();
+        var recorded = _store.Change((state, db, tx) =>
+        {
+            var current = state.Jobs.Single(j => j.Id == job.Id);
+            var target = state.Projects.Single(p => p.Id == job.ProjectId);
+            if (!state.HistoricalIntegrations.Contains(job.Id) || current.ControlRevision != job.ControlRevision ||
+                current.LeaseOwner.Length != 0 || current.HeadSha != job.HeadSha ||
+                current.PrUrl != job.PrUrl || current.Branch != job.Branch || current.Mode != job.Mode ||
+                current.ProjectId != job.ProjectId || !current.ExpectedPaths.SequenceEqual(job.ExpectedPaths) ||
+                (!coordinated && StateStore.HasPublicationReservation(db, tx, job.Id)) ||
+                target.Path != project.Path || ReviewPolicy.ProjectRevision(target) != ReviewPolicy.ProjectRevision(project))
+                return false;
+            using var query = db.CreateCommand();
+            query.Transaction = tx;
+            query.CommandText = "SELECT integrated_sha FROM scheduling_integrations WHERE job_id=$job AND project_id=$project AND head_sha=$head;";
+            query.Parameters.AddWithValue("$job", job.Id.ToString());
+            query.Parameters.AddWithValue("$project", project.Id.ToString());
+            query.Parameters.AddWithValue("$head", job.HeadSha);
+            if (query.ExecuteScalar() as string != proof.IntegratedCommit) return false;
+            StateStore.RecordIntegrationTarget(db, tx, current, target, proof, state);
+            if (hostedEvidence is not null)
+                StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", current.Id, "controller/github-required-checks",
+                    current.State, current.State, LifecycleReason.RemoteResultVerified,
+                    reference: hostedEvidence, generation: current.ExecutionGeneration, state: state);
+            return true;
+        });
+        if (!recorded)
+            throw new InvalidOperationException("Historical integration or target changed, or the verified commit differs from the original proof.");
+        return proof;
+    }
 }

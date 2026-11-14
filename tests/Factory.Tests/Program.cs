@@ -2153,6 +2153,67 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
     }
 });
 
+Test("Decision evidence treats legacy PR links as historical and returns readiness observation", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-decision-evidence-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo { Origin = "https://github.com/example/current" };
+        var job = new FactoryJob { ProjectId = project.Id, PrUrl = "https://github.com/example/old/pull/1",
+            HeadSha = new string('a', 40), State = JobStates.PrReady };
+        store.Change(state => { state.Projects.Add(project); state.Jobs.Add(job); });
+        var basis = new string('b', 40);
+        var currentUrl = "https://github.com/example/current/pull/2";
+        store.Change((state, db, tx) =>
+        {
+            StateStore.RecordLifecycle(db, tx, project.Id, "publication-receipt", job.Id, "fixture", "created", "ready",
+                LifecycleReason.RemoteResultVerified, Json.Stringify(new { url = currentUrl, headCommit = job.HeadSha,
+                    baseCommit = basis, projectRevision = ReviewPolicy.ProjectRevision(project), expiresAt = DateTimeOffset.UtcNow.AddMinutes(-1) }),
+                job.ExecutionGeneration, state);
+            return true;
+        });
+        using var observed = System.Text.Json.JsonDocument.Parse(Json.Stringify(store.ReadDecisionEvidence(project.Id, new())));
+        var entry = observed.RootElement.GetProperty("jobs")[0];
+        Assert(entry.GetProperty("readinessBase").GetString() == basis);
+        Assert(DateTimeOffset.TryParse(entry.GetProperty("readinessObservedAt").GetString(), out _));
+        Assert(entry.GetProperty("status").GetString() == "PR created");
+        store.Change(state => state.Projects.Single().Origin = "https://github.com/example/retargeted");
+        using var changed = System.Text.Json.JsonDocument.Parse(Json.Stringify(store.ReadDecisionEvidence(project.Id, new())));
+        entry = changed.RootElement.GetProperty("jobs")[0];
+        Assert(entry.GetProperty("status").GetString() == "No confirmed PR");
+        Assert(entry.GetProperty("prUrl").ValueKind == System.Text.Json.JsonValueKind.Null);
+        Assert(entry.GetProperty("historicalPrUrl").GetString() == currentUrl);
+        var merged = new string('c', 40);
+        store.Change((state, db, tx) =>
+        {
+            var target = state.Projects.Single();
+            var current = state.Jobs.Single();
+            var proof = new IntegrationProof("remote-merged-pr", basis, merged);
+            StateStore.RecordLifecycle(db, tx, target.Id, "job", current.Id, "fixture", current.State, JobStates.Integrated,
+                LifecycleReason.IntegrationVerified, reference: merged, state: state);
+            StateStore.RecordIntegratedHead(db, tx, current, proof);
+            StateStore.RecordIntegrationTarget(db, tx, current, target, proof, state);
+            current.State = JobStates.Integrated;
+            current.Integrated = true;
+            return true;
+        });
+        using var verified = System.Text.Json.JsonDocument.Parse(Json.Stringify(store.ReadDecisionEvidence(project.Id, new())));
+        Assert(verified.RootElement.GetProperty("jobs")[0].GetProperty("integrated").GetString() == merged);
+        var dependent = new FactoryJob { ProjectId = project.Id, DependsOn = [job.Id] };
+        store.Change(state => state.Jobs.Add(dependent));
+        Assert(JobScheduler.Select(store.Read(), 1, JobExecutionModes.Local).Any(candidate => candidate.Id == dependent.Id));
+        store.Change(state => state.Projects.Single().Origin = "https://github.com/example/another-target");
+        Assert(!JobScheduler.Select(new StateStore(home.FullName).Read(), 1, JobExecutionModes.Local)
+            .Any(candidate => candidate.Id == dependent.Id));
+        using var historical = System.Text.Json.JsonDocument.Parse(Json.Stringify(new StateStore(home.FullName).ReadDecisionEvidence(project.Id, new())));
+        entry = historical.RootElement.GetProperty("jobs").EnumerateArray().Single(item => item.GetProperty("id").GetGuid() == job.Id);
+        Assert(entry.GetProperty("integrated").ValueKind == System.Text.Json.JsonValueKind.Null);
+        Assert(entry.GetProperty("historicalIntegration").GetString() == merged);
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -3104,6 +3165,20 @@ await TestAsync("Remote integration rejects unpushed local history and stale loc
         var proof = await engine.VerifyIntegrationAsync(job.Id);
         Assert(proof.Source == "remote-ancestry" && proof.IntegratedCommit == unpublished);
         Assert(store.Job(job.Id).Integrated);
+        var dependent = store.AddJob(new FactoryJob { ProjectId = project.Id, DependsOn = [job.Id] });
+        store.Change((_, db, tx) =>
+        {
+            using var query = db.CreateCommand();
+            query.Transaction = tx;
+            query.CommandText = "DELETE FROM lifecycle_audit WHERE entity_kind='integration-target' AND entity_id=$id;";
+            query.Parameters.AddWithValue("$id", job.Id.ToString());
+            Assert(query.ExecuteNonQuery() == 1);
+            return true;
+        });
+        Assert(store.Read().HistoricalIntegrations.Contains(job.Id));
+        Assert(!JobScheduler.Select(store.Read(), 1).Any(candidate => candidate.Id == dependent.Id));
+        await engine.VerifyIntegrationAsync(job.Id);
+        Assert(JobScheduler.Select(store.Read(), 1).Any(candidate => candidate.Id == dependent.Id));
 
         var other = Path.Combine(root, "other");
         Commands.Require(Commands.Run("git", ["clone", origin, other], root), "git clone");

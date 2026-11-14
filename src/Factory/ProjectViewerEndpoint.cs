@@ -91,6 +91,9 @@ internal sealed class ProjectViewerEndpoint
         app.MapPost(planRoute + "/adopt", (HttpContext context, Guid projectId, Guid goalId, PlanAdoptInput input) =>
             PlanResponse(() => store.AdoptScopedPlan(context.Request.Headers.Authorization.ToString(), projectId, goalId, input)))
             .WithMetadata(viewer);
+        app.MapGet(planRoute + "/approval", (HttpContext context, Guid projectId, Guid goalId) =>
+            PlanResponse(() => store.ReadPlanApprovalTarget(context.Request.Headers.Authorization.ToString(), projectId, goalId)))
+            .WithMetadata(viewer);
         app.MapPost(planRoute + "/approval", (HttpContext context, Guid projectId, Guid goalId, PlanApprovalInput input) =>
             PlanResponse(() =>
             {

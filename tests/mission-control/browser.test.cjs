@@ -111,6 +111,69 @@ browserTest('connects through the sidebar and opens planning and capacity views'
   await page.getByRole('heading', { name: 'Provider capacity' }).waitFor();
 });
 
+browserTest('loads project decisions and protects evidence at the API boundary', async ({ page, nav, api, connection }) => {
+  const state = await api('state');
+  const project = state.projects[0];
+  await nav.getByRole('button', { name: 'Decisions' }).press('Enter');
+  await page.getByLabel('Project', { exact: true }).selectOption(project.id);
+  await page.getByRole('heading', { name: 'Effective policy' }).waitFor();
+  await page.getByText('No recorded intake decisions.', { exact: true }).waitFor();
+  await page.getByText('No recorded work packages.', { exact: true }).waitFor();
+  const response = await page.request.get(new URL('/api/projects/' + project.id + '/decision-evidence', page.url()).href);
+  assert.equal(response.status(), 401);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Refresh', exact: true }).press('Enter');
+  await page.getByRole('heading', { name: 'Effective policy' }).waitFor();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  let arrived;
+  const started = new Promise(resolve => { arrived = resolve; });
+  const endpoint = '**/api/projects/' + project.id + '/decision-evidence';
+  await page.route(endpoint, async route => {
+    const real = await route.fetch();
+    const data = await real.json();
+    data.intake = [{ number: 1, title: 'Old connection only', decision: 'accepted' }];
+    arrived();
+    await held;
+    try { await route.fulfill({ json: data }); }
+    catch (error) { if (!/aborted|closed|interception/i.test(error.message)) throw error; }
+  });
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await started;
+  let finishHandshake;
+  const handshake = new Promise(resolve => { finishHandshake = resolve; });
+  let handshakeStarted;
+  const pending = new Promise(resolve => { handshakeStarted = resolve; });
+  await page.route('**/api/state', async route => {
+    if (route.request().headers().authorization !== 'Bearer invalid-admin-token') return route.continue();
+    handshakeStarted();
+    await handshake;
+    await route.continue();
+  });
+  try {
+    await page.getByRole('button', { name: 'Connection settings, connected' }).click();
+    await connection.getByLabel('API token').fill('invalid-admin-token');
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await pending;
+    assert.equal(await page.locator('#decision-project').count(), 0);
+    assert.equal(await page.locator('#decision-evidence').count(), 0);
+    release();
+    finishHandshake();
+    await page.getByText('Invalid token or server unreachable', { exact: true }).waitFor();
+    await page.getByText('No registered projects.', { exact: true }).waitFor();
+    assert.equal(await page.getByText('Old connection only', { exact: false }).count(), 0);
+  } finally { release(); finishHandshake(); }
+}, async home => {
+  const repo = path.join(home, 'repo');
+  await mkdir(repo);
+  execFileSync('git', ['init', '-b', 'master', repo]);
+  execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+    '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'Fixture']);
+  execFileSync('dotnet', [path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll'), 'init', repo, '--name', 'Decisions fixture'],
+    { env: { ...process.env, FACTORY_HOME: home } });
+});
+
 browserTest('keeps Mission Control layout, actions and version aligned', async ({ page, nav }) => {
   const dll = path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll');
   const expectedVersion = execFileSync('dotnet', [dll, 'version'], { encoding: 'utf8' }).trim().split('+')[0];
@@ -170,7 +233,7 @@ browserTest('keeps Mission Control layout, actions and version aligned', async (
   assert.equal(await runQueue.evaluate(element => getComputedStyle(element, '::before').display), 'none');
 });
 
-browserTest('creates a goal from project findings and rejects adoption of a stale plan', async ({ page, nav, form, inspector, api, home }) => {
+browserTest('creates a goal from project findings and rejects adoption of a stale plan', async ({ page, nav, form, inspector, api, home, connection }) => {
   const repo = path.join(home, 'repository');
   await mkdir(repo);
   const git = (...args) => execFileSync('git', args, { cwd: repo, encoding: 'utf8', timeout: 10_000 }).trim();
@@ -204,6 +267,30 @@ browserTest('creates a goal from project findings and rejects adoption of a stal
   assert.equal(goal.state, 'draft');
   const review = await api(`projects/${goal.projectId}/analysis`);
   assert.equal(review.commit, git('rev-parse', 'master'));
+
+  let releaseGeneration;
+  const holdGeneration = new Promise(resolve => { releaseGeneration = resolve; });
+  const generationRoute = '**/api/plans/' + goal.id + '/generate?*';
+  await page.route(generationRoute, async route => {
+    await holdGeneration;
+    await route.fulfill({ status: 400, json: { error: 'Generation fixture completed' } });
+  });
+  try {
+    const generate = page.locator('[data-act="plan-generate"]').filter({ hasNotText: 'Generating' });
+    await generate.click();
+    await page.getByRole('button', { name: 'Generating…', exact: true }).waitFor();
+    const currentToken = await page.evaluate(() => sessionStorage.getItem('factory-token'));
+    await page.getByRole('button', { name: 'Connection settings, connected' }).click();
+    await connection.getByLabel('API token').fill(currentToken);
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await connection.waitFor({ state: 'hidden' });
+    await page.getByRole('button', { name: 'Generating…', exact: true }).waitFor();
+    releaseGeneration();
+    await generate.waitFor();
+  } finally {
+    releaseGeneration();
+    await page.unroute(generationRoute);
+  }
 
   await page.getByRole('button', { name: 'Build plan' }).click();
   await inspector.getByRole('button', { name: 'Add package' }).click();
@@ -464,7 +551,8 @@ browserTest('ignores an older admin login after connecting with a project token'
   await page.route('**/api/state', async (route) => {
     if (!isDelayedAdminRequest(route.request())) return route.continue();
     await finishAdmin;
-    await route.fulfill({ status: 401, json: { error: 'Invalid administrator token' } });
+    try { await route.fulfill({ status: 401, json: { error: 'Invalid administrator token' } }); }
+    catch (error) { if (!/aborted|closed|interception/i.test(error.message)) throw error; }
   });
 
   try {
@@ -475,7 +563,6 @@ browserTest('ignores an older admin login after connecting with a project token'
     await connection.waitFor({ state: 'hidden' });
     await page.getByRole('heading', { name: 'Project recovery' }).waitFor();
 
-    const adminResponse = page.waitForResponse((response) => isDelayedAdminRequest(response.request()));
     const wrongStream = page.waitForRequest((request) =>
       request.url().endsWith('/api/events/stream') &&
       request.headers().authorization === 'Bearer ' + fixture.access.reconciler,
@@ -484,7 +571,6 @@ browserTest('ignores an older admin login after connecting with a project token'
       return null;
     });
     finishAdminRequest();
-    assert.equal((await adminResponse).status(), 401);
     assert.ok(!(await wrongStream), 'A stale admin login started the event stream with the project token');
     await page.getByRole('button', { name: 'Connection settings, connected' }).waitFor();
     await page.getByRole('button', { name: 'Settle goal reservation' }).waitFor();

@@ -631,7 +631,17 @@ public sealed partial class StateStore
                 LoadChecks(db, tx, byId);
         }
         using var integration = Command(db, tx, """
-            SELECT DISTINCT j.id FROM scheduling_integrations p JOIN jobs j ON j.id=p.job_id
+            SELECT DISTINCT j.id, EXISTS (
+              SELECT 1 FROM lifecycle_audit t WHERE t.project_id=j.project_id AND t.entity_id=j.id
+                AND t.entity_kind='integration-target' AND t.reason_code='IntegrationVerified'
+                AND t.generation=j.execution_generation
+                AND json_extract(t.reference,'$.headSha')=j.head_sha
+                AND json_extract(t.reference,'$.integratedCommit')=p.integrated_sha
+                AND json_extract(t.reference,'$.origin')=project.origin
+                AND json_extract(t.reference,'$.baseBranch')=project.base_branch
+                AND json_extract(t.reference,'$.path')=project.path
+            ) FROM scheduling_integrations p JOIN jobs j ON j.id=p.job_id
+            JOIN projects project ON project.id=j.project_id
             JOIN lifecycle_audit a ON a.entity_id=j.id AND a.reference=p.integrated_sha
             AND p.project_id=j.project_id AND lower(p.head_sha)=lower(j.head_sha)
             WHERE a.entity_kind='job' AND a.reason_code='IntegrationVerified' AND a.project_id=j.project_id
@@ -640,7 +650,9 @@ public sealed partial class StateStore
                 AND length(j.head_sha) IN (40,64) AND lower(j.head_sha) NOT GLOB '*[^0-9a-f]*';
             """);
         using var verified = integration.ExecuteReader();
-        while (verified.Read()) state.VerifiedIntegrations.Add(Guid.Parse(verified.GetString(0)));
+        while (verified.Read())
+            (verified.GetBoolean(1) ? state.VerifiedIntegrations : state.HistoricalIntegrations)
+                .Add(Guid.Parse(verified.GetString(0)));
         using var starts = Command(db, tx, "SELECT job_id,generation FROM started_builder_claims;");
         using var started = starts.ExecuteReader();
         while (started.Read()) state.StartedBuilders.Add((Guid.Parse(started.GetString(0)), started.GetInt64(1)));

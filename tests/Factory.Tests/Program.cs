@@ -1496,6 +1496,41 @@ Test("Reviewed release clears a fenced reservation without replay", () =>
     finally { try { home.Delete(true); } catch { } }
 });
 
+Test("Interrupted Git retries keep ownership until reviewed release", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-interrupted-git-retry-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo();
+        var old = new FactoryJob { ProjectId = project.Id, Mode = "remote", State = JobStates.Blocked,
+            Stage = "interrupted_git", ExpectedPaths = ["a.cs"], SharedResources = ["config:ci"] };
+        var next = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["b.cs"], SharedResources = ["config:ci"] };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.AddRange([old, next]); });
+
+        foreach (var action in new[] { "retry", "resume" })
+        {
+            try
+            {
+                MissionControlManager.ControlJob(new StateStore(home.FullName), old.Id, new ControlInput
+                {
+                    Action = action, Reviewed = true, ControlRevision = old.ControlRevision
+                });
+                throw new Exception("Interrupted Git work was requeued.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("explicit reconciliation", StringComparison.Ordinal)) { }
+            Assert(store.Job(old.Id).ControlRevision == old.ControlRevision);
+            Assert(JobScheduler.Select(store.Read(), 4).Count == 0);
+        }
+
+        JobRecovery.ReleaseResources(store, old.Id,
+            new ResourceReleaseInput(old.ControlRevision, true, true, "Confirmed stopped and reviewed remote Git effects"));
+        Assert(store.Job(old.Id).State == JobStates.Cancelled);
+        Assert(JobScheduler.Select(store.Read(), 4).Single().Id == next.Id);
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {

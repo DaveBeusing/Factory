@@ -412,8 +412,8 @@ public static class MissionControlManager
                 "Job is not eligible for retry or resumption");
             Require(j.Stage != "scope",
                 "Scope violation must be resolved through a reviewed contract amendment before retry");
-            Require(j.Stage != "reconcile",
-                "Expired lease must pass explicit process and worktree reconciliation before retry");
+            Require(j.Stage is not ("reconcile" or "interrupted_git"),
+                "Interrupted execution requires explicit reconciliation before retry or resumption");
             Require(!j.StartedAt.HasValue || input.Reviewed, "Inspect the existing worktree and acknowledge review before restarting");
             Require(!j.StartedAt.HasValue || j.Stage is not ("commit" or "push" or "pr") || input.Reviewed,
                 "Git side effects must be reviewed before restarting");

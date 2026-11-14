@@ -602,8 +602,9 @@ function openScopedGoalForm(context,goal,details){
 }
 function showScopedPlan(context,goal,details){
  const plan=details.plan;
- const adoptable=details.state==='draft'&&!details.isLegacy&&plan?.revision&&plan.preflight&&plan.goalRevision===details.goalRevision;
- const controls=details.state==='draft'?
+ const editable=details.state==='draft'||details.state==='active';
+ const adoptable=editable&&!details.isLegacy&&plan?.revision&&plan.preflight&&plan.goalRevision===details.goalRevision;
+ const controls=editable?
   `<div class="head-actions"><button class="button button-muted" data-act="scoped-plan-edit" data-id="${esc(goal.id)}">Edit plan</button>
    <button class="button button-muted" data-act="scoped-plan-generate" data-id="${esc(goal.id)}">${plan?'Regenerate plan':'Generate plan'}</button>
    ${adoptable?`<button class="button button-primary" data-act="scoped-plan-adopt" data-id="${esc(goal.id)}" data-revision="${esc(plan.revision)}">Adopt reviewed plan</button>`:''}</div>`:'';
@@ -639,7 +640,7 @@ async function handleScopedPlanning(action,id,revision){
  if(!scopedPlanningIsCurrent(context)||request!==scopedPlanRequest)return;
  if(action==='scoped-goal-edit'){openScopedGoalForm(context,goal,details);return;}
  if(action==='scoped-plan-edit'){
-  if(details.state!=='draft')throw Error('Only draft goals can be planned');
+  if(!['draft','active'].includes(details.state))throw Error('This goal cannot be replanned');
   scopedPlanEditor={context,goal,details,path};
   planDraftGoal=details;
   planDraft={packages:structuredClone(details.plan?.packages||[])};
@@ -666,7 +667,7 @@ async function saveScopedPlan(){
  editor.saving=true;
  try{
   const {context,goal,details,path}=editor;
-  const plan=await api(path,'PUT',{packages:planDraft.packages,goalRevision:details.goalRevision,revision:details.plan?.revision});
+  const plan=await api(path,'PUT',{contractVersion:1,packages:planDraft.packages,goalRevision:details.goalRevision,revision:details.plan?.revision});
   if(scopedPlanningIsCurrent(context)&&scopedPlanEditor===editor){
    scopedPlanEditor=null;
    showScopedPlan(context,goal,{...details,plan,isLegacy:false});
@@ -1017,7 +1018,7 @@ function planGoalContext(goal){
 async function planEditor(goalId){
  await loadPlans();
  const goal=planGoals.get(goalId);
- if(!goal||goal.state!=='draft')throw Error('Reload the goal planner before editing this draft');
+ if(!goal||!['draft','active'].includes(goal.state))throw Error('Reload the goal planner before editing this plan');
  const existing=plansCache.get(goalId);
  planGoal=goalId;
  planDraftGoal=goal;
@@ -1033,11 +1034,17 @@ function packageForm(i){
  const html=field('title','Package title',p.title)+field('description','Description / acceptance criteria',p.description,'textarea')+
   `<div class="field-row">${field('risk','Risk',p.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}${field('priority','Priority',p.priority,'number')}</div>`+
   field('files','Expected file paths, one per line',p.files.join('\n'),'textarea')+
+  field('evidence','Acceptance checks (criterion | check name)',(p.acceptanceEvidence||[]).map(e=>e.criterion+' | '+e.check).join('\n'),'textarea')+
   (options?`<fieldset><legend>Depends on</legend>${options}</fieldset>`:'');
  openForm(i===packages.length?'Add work package':'Edit work package','A dependency must integrate before this package can start.',html,async f=>{
   const x=values(f);
   const item={title:x.title.trim(),description:x.description.trim(),risk:x.risk,priority:Number(x.priority),
-   files:lines(x.files),dependsOn:new FormData(f).getAll('dependency').map(Number)};
+   files:lines(x.files),dependsOn:new FormData(f).getAll('dependency').map(Number),
+   integratedPrerequisites:p.integratedPrerequisites||[],
+   acceptanceEvidence:lines(x.evidence).map(line=>{const split=line.lastIndexOf('|');return split<0?
+    {criterion:line,check:''}:{criterion:line.slice(0,split).trim(),check:line.slice(split+1).trim()}})};
+  if(!item.acceptanceEvidence.length||item.acceptanceEvidence.some(e=>!e.criterion||!e.check))
+   throw Error('Map each acceptance criterion to a configured check name.');
   if(!item.title||!item.description||!item.files.length)throw Error('Title, description and expected paths are required');
   if(!Number.isInteger(item.priority)||item.priority<0||item.priority>100)throw Error('Priority must be an integer from 0 to 100');
   packages[i]=item;
@@ -1350,7 +1357,7 @@ async function act(action,id,index,revision){switch(action){case'open-connection
  case'plan-save':{
  if(!planDraft?.packages.length){notify('Add at least one work package',true);return}
  const goalId=planGoal;
- const saved=await mutate('plans/'+goalId,'PUT',planDraft);
+ const saved=await mutate('plans/'+goalId,'PUT',{...planDraft,contractVersion:1});
  plansCache.set(goalId,saved);
  render();
  await act('plan-view',goalId);

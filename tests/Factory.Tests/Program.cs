@@ -732,7 +732,7 @@ Test("Master-first preflight finds existing code and preserves adoption review",
         Assert(GitOperations.Head(repo) != master);
 
         var store = new StateStore(Path.Combine(root, "state"));
-        var project = new ProjectInfo { Name = "preflight", Path = repo, BaseBranch = "master" };
+        var project = new ProjectInfo { Name = "preflight", Path = repo, BaseBranch = "master" , Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
         var goal = new FactoryGoal
         {
             ProjectId = project.Id, Objective = "Finalize GoalPlanner implementation",
@@ -756,10 +756,10 @@ Test("Master-first preflight finds existing code and preserves adoption review",
 
         var plan = MissionControlManager.SavePlan(store, new FactoryPlan
         {
-            GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
+            ContractVersion = 1, GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
             Packages = [new PlannedPackage
             {
-                Title = "Complete existing GoalPlanner", Description = "Finish and test existing code",
+                Title = "Complete existing GoalPlanner", Description = "Finish and test existing code", AcceptanceEvidence = [new("Behavior verified", "fixture")],
                 Files = ["src/GoalPlanner.cs"]
             }]
         });
@@ -831,13 +831,13 @@ Test("Master-first preflight rejects stale master and non-master projects", () =
         Git("add", ".");
         Git("commit", "-m", "Initial");
         var store = new StateStore(Path.Combine(root, "state"));
-        var project = new ProjectInfo { Name = "stale", Path = repo };
+        var project = new ProjectInfo { Name = "stale", Path = repo , Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
         var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Improve diagnostics" };
         store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
         var plan = MissionControlManager.SavePlan(store, new FactoryPlan
         {
-            GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
-            Packages = [new PlannedPackage { Title = "Diagnostics", Description = "Improve output",
+            ContractVersion = 1, GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
+            Packages = [new PlannedPackage { Title = "Diagnostics", Description = "Improve output", AcceptanceEvidence = [new("Behavior verified", "fixture")],
                 Files = ["README.md"] }]
         });
         try
@@ -904,13 +904,13 @@ Test("Preflight binds the live remote master and matching PR head to the registe
         GitOperations.Git(repo, "config", $"url.{bareUrl}.insteadOf", registered);
 
         var store = new StateStore(Path.Combine(root, "state"));
-        var project = new ProjectInfo { Name = "Bound fixture", Path = repo, Origin = registered };
+        var project = new ProjectInfo { Name = "Bound fixture", Path = repo, Origin = registered , Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
         var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Improve diagnostics" };
         store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
         var plan = MissionControlManager.SavePlan(store, new FactoryPlan
         {
-            GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
-            Packages = [new() { Title = "Diagnostics", Description = "Improve diagnostics", Files = ["README.md"] }]
+            ContractVersion = 1, GoalId = goal.Id, ProjectId = project.Id, GoalRevision = Planning.GoalRevision(goal),
+            Packages = [new() { Title = "Diagnostics", Description = "Improve diagnostics", AcceptanceEvidence = [new("Behavior verified", "fixture")], Files = ["README.md"] }]
         });
         var original = GitOperations.Head(repo);
         Assert(plan.Preflight?.RemoteMasterStatus == "matched" && plan.Preflight.RemoteMasterCommit == original,
@@ -981,15 +981,15 @@ await TestAsync("Plan adoption requires the reviewed plan and current goal revis
         Git("-c", "user.name=Factory Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Initial");
 
         var store = new StateStore(Path.Combine(root, "state"));
-        var project = new ProjectInfo { Name = "Plan revisions", Path = repo };
+        var project = new ProjectInfo { Name = "Plan revisions", Path = repo , Checks = [new() { Name = "fixture", Executable = "git", Arguments = ["--version"] }] };
         var goal = new FactoryGoal { ProjectId = project.Id, Objective = "Original diagnostics", AcceptanceCriteria = ["Old criterion"] };
         store.Change(s => { s.Projects.Add(project); s.Goals.Add(goal); });
 
         FactoryPlan Draft(FactoryGoal snapshot, string title, Guid? revision = null) => new()
         {
-            GoalId = snapshot.Id, ProjectId = snapshot.ProjectId, Revision = revision,
+            ContractVersion = 1, GoalId = snapshot.Id, ProjectId = snapshot.ProjectId, Revision = revision,
             GoalRevision = Planning.GoalRevision(snapshot),
-            Packages = [new() { Title = title, Description = "Reviewed fixture package", Files = ["README.md"] }]
+            Packages = [new() { Title = title, Description = "Reviewed fixture package", AcceptanceEvidence = [new("Behavior verified", "fixture")], Files = ["README.md"] }]
         };
         void Reject(Action action, string message)
         {
@@ -1066,6 +1066,53 @@ await TestAsync("Plan adoption requires the reviewed plan and current goal revis
         Assert(edit.Result ? adoption.Result == 0 && state.Jobs.Count == 0 :
             adoption.Result == 1 && state.Jobs.Single().Title == "Saved during generation" &&
             state.Goals.Single().Objective == revisedGoal.Objective);
+        if (edit.Result)
+        {
+            var currentGoal = state.Goals.Single();
+            latest = MissionControlManager.SavePlan(store, Draft(currentGoal, "Rebased fixture", latest.Revision));
+            Planning.Adopt(store, goal.Id, "local", true, latest.Revision!.Value);
+        }
+        var attempted = store.Read().Jobs.Single();
+        store.UpdateJob(attempted.Id, job =>
+        {
+            job.State = JobStates.Blocked;
+            job.Stage = "scope";
+            job.Attempt = 1;
+        });
+        var amended = MissionControlManager.SavePlan(store,
+            Draft(store.Read().Goals.Single(), "Reviewed amendment", latest.Revision));
+        store.Change(s => s.Projects.Single().Checks.Single().Arguments = ["version"]);
+        Reject(() => Planning.Adopt(store, goal.Id, "local", true, amended.Revision!.Value), "configuration changed");
+        amended = MissionControlManager.SavePlan(store,
+            Draft(store.Read().Goals.Single(), "Review current configuration", amended.Revision));
+        var replacement = Planning.Adopt(store, goal.Id, "local", true, amended.Revision!.Value).Single();
+        Assert(replacement.Id != attempted.Id && store.Job(attempted.Id).State == JobStates.Cancelled);
+        Assert(store.Job(attempted.Id).Attempt == 1);
+
+        FactoryPlan Sequence(string title, Guid? revision)
+        {
+            var sequence = Draft(store.Read().Goals.Single(), "Predecessor", revision);
+            sequence.Packages.Add(new PlannedPackage { Title = title, Description = "Follow up",
+                Files = ["later.txt"], DependsOn = [0], AcceptanceEvidence = [new("Verified", "fixture")] });
+            return MissionControlManager.SavePlan(store, sequence);
+        }
+        var two = Sequence("Dependent", amended.Revision);
+        var pair = Planning.Adopt(store, goal.Id, "local", true, two.Revision!.Value);
+        store.Change((s, db, tx) =>
+        {
+            var predecessor = s.Jobs.Single(job => job.Id == pair[0].Id);
+            StateStore.RecordLifecycle(db, tx, predecessor.ProjectId, "job", predecessor.Id, "fixture-verifier",
+                JobStates.PrReady, JobStates.Integrated, LifecycleReason.IntegrationVerified,
+                reference: new string('a', 40), state: s);
+            predecessor.Integrated = true;
+            predecessor.State = JobStates.Integrated;
+            return 0;
+        });
+        store.UpdateJob(pair[1].Id, job => { job.State = JobStates.Blocked; job.Stage = "scope"; job.Attempt = 1; });
+        var updated = Sequence("Amended dependent", two.Revision);
+        var dependent = Planning.Adopt(store, goal.Id, "local", true, updated.Revision!.Value).Single();
+        Assert(dependent.DependsOn.SequenceEqual([pair[0].Id]));
+        Assert(store.Job(pair[0].Id).Integrated && store.Job(pair[1].Id).State == JobStates.Cancelled);
     }
     finally { try { Directory.Delete(root, true); } catch { } }
 });
@@ -1357,6 +1404,42 @@ Test("Issue intake deduplicates concurrent scans and re-evaluates policy and edi
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+
+Test("Versioned specifications require evidence and ordered ownership", () =>
+{
+    var plan = new FactoryPlan
+    {
+        ContractVersion = 1,
+        Packages = [new() { Title = "Implementation", Description = "Implement", Files = ["src"] },
+            new() { Title = "Follow-up", Description = "Follow up", Files = ["src/File.cs"],
+                AcceptanceEvidence = [new("Behavior is checked", "console")] }]
+    };
+    Reject("acceptance");
+    plan.Packages[0].AcceptanceEvidence.Add(new("Behavior is checked", "console"));
+    Reject("ownership");
+    plan.Packages[1].DependsOn.Add(0);
+    Planning.Validate(plan);
+    var project = new ProjectInfo();
+    try
+    {
+        SpecificationContracts.Verify(plan, project, []);
+        throw new Exception("An unconfigured check was accepted.");
+    }
+    catch (InvalidOperationException) { }
+    project.Checks.Add(new CheckCommand { Name = "console" });
+    SpecificationContracts.Verify(plan, project, []);
+    Assert(SpecificationContracts.Diff(null, plan).Count == 2);
+
+    void Reject(string expected)
+    {
+        try
+        {
+            Planning.Validate(plan);
+            throw new Exception("Invalid specification was accepted.");
+        }
+        catch (ArgumentException ex) when (ex.Message.Contains(expected, StringComparison.OrdinalIgnoreCase)) { }
+    }
+});
 
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
@@ -4078,7 +4161,7 @@ internal sealed class PausedPlanAgent : IAgentRuntime
         return new AgentRunResult
         {
             Success = true,
-            FinalText = """{"packages":[{"title":"Generated","description":"Fixture proposal","files":["README.md"]}]}"""
+            FinalText = """{"contractVersion":1,"packages":[{"title":"Generated","description":"Fixture proposal","files":["README.md"],"acceptanceEvidence":[{"criterion":"Verified","check":"fixture"}]}]}"""
         };
     }
 }

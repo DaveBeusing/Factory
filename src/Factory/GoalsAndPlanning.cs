@@ -12,6 +12,8 @@ public sealed class PlannedPackage
     public int Priority { get; set; } = 50;
     public List<string> Files { get; set; } = [];
     public List<int> DependsOn { get; set; } = [];
+    public List<AcceptanceEvidence> AcceptanceEvidence { get; set; } = [];
+    public List<IntegratedPrerequisite> IntegratedPrerequisites { get; set; } = [];
 }
 
 public sealed class FactoryPlan
@@ -21,6 +23,10 @@ public sealed class FactoryPlan
     public string BaseCommit { get; set; } = "";
     public string GoalRevision { get; set; } = "";
     public Guid? Revision { get; set; }
+    public int ContractVersion { get; set; }
+    public Guid? PreviousRevision { get; set; }
+    public List<SpecificationChange> Changes { get; set; } = [];
+    public string ProjectContractRevision { get; set; } = "";
     public List<PlannedPackage> Packages { get; set; } = [];
     // Source/PR evidence used when drafting the work packages. Never interpreted as completeness proof.
     public WorkPackagePreflightReport? Preflight { get; set; }
@@ -94,6 +100,9 @@ public static class Planning
             "Work packages must be independently reviewable and based on master, never stacked on other PR branches. " +
             "Return ONLY valid JSON with a packages array, each item with title, description, risk (low|medium|high), " +
             "priority (0..100), files string array and dependsOn integer array (zero-based indices). " +
+            "Set contractVersion to 1 and include acceptanceEvidence " +
+            "(objects with criterion and check) using these configured check names: " +
+            Json.Stringify(p.Checks.Select(c => c.Name).ToArray()) + ". " +
             "Describe existing code evidence, completion gaps and relevant PRs in each description. " +
             "Any assumption must be stated in description. Goal: " + goal.Objective +
             "\nAcceptance criteria:\n" + string.Join("\n", goal.AcceptanceCriteria) +
@@ -105,7 +114,7 @@ public static class Planning
         plan.ProjectId = p.Id; plan.GoalId = goal.Id;
         plan.BaseCommit = preflight.BaseCommit;
         plan.Preflight = preflight;
-        Validate(plan);
+        SpecificationContracts.ValidateNew(plan);
         plan.GoalRevision = goalRevision;
         plan.Revision = existingRevision;
         return plan;
@@ -116,7 +125,8 @@ public static class Planning
         return store.Change((state, db, tx) =>
         {
             var goal = state.Goals.Single(g => g.Id == plan.GoalId);
-            if (goal.State != "draft" || goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
+            if (!SpecificationContracts.CanRevise(goal, state.Jobs) || goal.ProjectId != plan.ProjectId ||
+                GoalRevision(goal) != plan.GoalRevision)
                 throw new InvalidOperationException("Goal changed; reopen the current goal before saving its plan");
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             if (project.Path != source.Path || project.Origin != source.Origin ||
@@ -124,6 +134,9 @@ public static class Planning
                 throw new InvalidOperationException("Project checkout or master changed; refresh the plan");
             if (store.ReadPlanRevision(db, tx, goal.Id)?.Revision != plan.Revision)
                 throw new InvalidOperationException("Plan changed; reopen the latest revision before saving");
+            SpecificationContracts.ValidateNew(plan);
+            plan.ProjectContractRevision = SpecificationContracts.ProjectRevision(project);
+            StateStore.VerifySpecification(db, tx, plan, state);
             return StateStore.InsertPlanRevision(db, tx, plan);
         });
     }
@@ -163,6 +176,7 @@ public static class Planning
             visits[i] = 2; return false;
         }
         if (Enumerable.Range(0, visits.Length).Any(Walk)) throw new ArgumentException("Dependency cycle");
+        SpecificationContracts.Validate(plan);
     }
     public static IReadOnlyList<FactoryJob> Adopt(StateStore store, Guid goalId, string mode,
         bool reviewedExistingWork = false, Guid planRevision = default)
@@ -186,9 +200,13 @@ public static class Planning
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             VerifyAdoptionTarget(plan, StateStore.ReadStoredPlanRevision(db, tx, goalId),
                 requestedProject, project, goal);
+            var retained = StateStore.VerifySpecificationAdoption(db, tx, goal, plan, state.Jobs);
+            StateStore.VerifySpecification(db, tx, plan, state);
             if (StateStore.DecidePlanAdoption(db, tx, plan, "local-operator") != PolicyOutcome.Allow)
                 return null;
-            var jobs = BuildAdoptedJobs(plan, goal, mode);
+            if (goal.State == "active")
+                StateStore.RetireSpecificationJobs(db, tx, state.Jobs, goal, plan, "local-operator");
+            var jobs = BuildAdoptedJobs(plan, goal, mode, retained);
             state.Jobs.AddRange(jobs);
             goal.State = "active";
             StateStore.RecordPlanAdoption(db, tx, plan, "local-operator");
@@ -242,7 +260,7 @@ public static class Planning
     internal static void VerifyAdoptionTarget(FactoryPlan plan, FactoryPlan? current,
         ProjectInfo requestedProject, ProjectInfo project, FactoryGoal goal)
     {
-        if (goal.State != "draft") throw new InvalidOperationException("Goal already adopted");
+        if (goal.State is not ("draft" or "active")) throw new InvalidOperationException("Goal cannot adopt a plan");
         if (goal.ProjectId != plan.ProjectId || GoalRevision(goal) != plan.GoalRevision)
             throw new InvalidOperationException("Goal changed; review and save or regenerate its plan before adoption");
         if (current?.Revision != plan.Revision)
@@ -253,16 +271,27 @@ public static class Planning
             throw new InvalidOperationException("master advanced; regenerate the plan");
     }
 
-    internal static List<FactoryJob> BuildAdoptedJobs(FactoryPlan plan, FactoryGoal goal, string mode)
+    internal static List<FactoryJob> BuildAdoptedJobs(FactoryPlan plan, FactoryGoal goal, string mode,
+        IReadOnlyDictionary<int, FactoryJob> retained)
     {
-        var jobs = plan.Packages.Select(pkg => new FactoryJob
+        var jobs = plan.Packages.Select((pkg, index) => retained.TryGetValue(index, out var existing) ? existing : new FactoryJob
         {
             ProjectId = goal.ProjectId, GoalId = goal.Id, Title = pkg.Title, Description = pkg.Description,
-            Risk = pkg.Risk, Priority = pkg.Priority, ExpectedPaths = pkg.Files, Mode = mode
+            Risk = pkg.Risk, Priority = pkg.Priority, ExpectedPaths = pkg.Files.ToList(), Mode = mode
         }).ToList();
         for (var i = 0; i < jobs.Count; i++)
-            jobs[i].DependsOn = plan.Packages[i].DependsOn.Select(index => jobs[index].Id).ToList();
-        if (DependencyGraph.WouldCycle(jobs)) throw new InvalidOperationException("Cyclic plan");
-        return jobs;
+        {
+            var dependencies = plan.Packages[i].DependsOn.Select(index => jobs[index].Id)
+                .Concat(plan.ContractVersion == 1 ? plan.Packages[i].IntegratedPrerequisites.Select(p => p.JobId) : [])
+                .ToList();
+            if (retained.ContainsKey(i))
+            {
+                if (!jobs[i].DependsOn.SequenceEqual(dependencies) || jobs[i].Mode != mode)
+                    throw new InvalidOperationException("Integrated package dependencies and execution mode must remain unchanged.");
+            }
+            else jobs[i].DependsOn = dependencies;
+        }
+        // Internal cycles were checked on the package indices; external edges only target verified integrations.
+        return jobs.Where((_, index) => !retained.ContainsKey(index)).ToList();
     }
 }

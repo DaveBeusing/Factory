@@ -121,11 +121,19 @@ public static class MissionControlManager
         GitOperations.Git(path, "rev-parse", "--verify", "refs/heads/master");
         ValidateChecks(input.Checks);
         ValidateExecutionCapabilities(input.RequiredExecutionCapabilities);
-        return store.Change(s =>
+        return store.Change((s, db, tx) =>
         {
             var p = s.Projects.Single(x => x.Id == id);
             Require(p.Status != "archived", "Archived project is read-only");
             Require(!s.Jobs.Any(j => j.ProjectId == id && IsActive(j)), "Cannot change project configuration while jobs are active");
+            var changesContract = Json.Stringify(p.Checks) != Json.Stringify(input.Checks) ||
+                !p.RequiredExecutionCapabilities.SequenceEqual(input.RequiredExecutionCapabilities) ||
+                (input.ProtectedPaths is not null && !p.ProtectedPaths.SequenceEqual(NormalizePaths(input.ProtectedPaths))) ||
+                !GitOperations.SamePath(p.Path, path) || p.Origin != (GitOperations.Origin(path) ?? "");
+            if (changesContract)
+                Require(!s.Jobs.Where(j => j.ProjectId == id && !j.Integrated && j.State != JobStates.Cancelled)
+                    .Select(j => j.GoalId).Distinct().Any(goal => StateStore.HasAdoptedSpecification(db, tx, goal)),
+                    "Project verification and security settings are locked by unfinished adopted specifications.");
             Require(!s.Projects.Any(x => x.Id != id && (x.Name.Equals(input.Name, StringComparison.OrdinalIgnoreCase) || GitOperations.SamePath(x.Path, path))), "Project name or path already registered");
             p.Name = input.Name.Trim(); p.Path = path; p.BaseBranch = input.BaseBranch;
             p.Origin = GitOperations.Origin(path) ?? "";
@@ -262,10 +270,19 @@ public static class MissionControlManager
             var j = s.Jobs.Single(x => x.Id == id);
             Require(j.State is JobStates.Queued or JobStates.Paused or JobStates.Failed or JobStates.Blocked or JobStates.Stopped, "Only inactive jobs can be edited");
             Require(j.ProjectId == input.ProjectId, "Cannot move job between projects");
+            if (StateStore.HasAdoptedSpecification(db, tx, j.GoalId))
+                Require(j.GoalId == input.GoalId && j.Title == input.Title.Trim() &&
+                    j.Description == input.Description.Trim() && j.Risk == input.Risk && j.Mode == input.Mode &&
+                    j.ExpectedPaths.SequenceEqual(input.ExpectedPaths) && j.DependsOn.SequenceEqual(input.DependsOn) &&
+                    j.RequiredExecutionCapabilities.SequenceEqual(input.RequiredExecutionCapabilities),
+                    "Adopted specifications require a separately reviewed replacement plan to change their contract.");
             if (input.GoalId.HasValue) Require(s.Goals.Any(g => g.Id == input.GoalId && g.ProjectId == j.ProjectId), "Goal not in project");
             if (input.GoalId is { } targetGoal)
                 Require(!StateStore.RequiresIntakePlanAdoption(db, tx, targetGoal),
                     "Adopt a reviewed plan before assigning jobs to an intake goal.");
+            if (input.GoalId != j.GoalId)
+                Require(!StateStore.HasAdoptedSpecification(db, tx, input.GoalId),
+                    "Add jobs through a reviewed plan revision for this goal.");
             Require(input.DependsOn.All(x => x != id && s.Jobs.Any(a => a.Id == x && a.ProjectId == j.ProjectId)), "Unknown or cross-project dependency");
             Require(j.Attempt == 0 || j.ExpectedPaths.SequenceEqual(input.ExpectedPaths),
                 "Executed work-package scope can only change through an explicit reviewed scope amendment");
@@ -299,9 +316,11 @@ public static class MissionControlManager
         Require(!string.IsNullOrWhiteSpace(input.Reason) && input.Reason.Trim().Length >= 10 &&
             input.Reason.Length <= 1000, "Scope amendment requires a 10-1000 character justification");
         WorkPackageScope.ValidateDeclaration(input.ExpectedPaths);
-        return store.Change(state =>
+        return store.Change((state, db, tx) =>
         {
             var job = state.Jobs.Single(j => j.Id == id);
+            Require(!StateStore.HasAdoptedSpecification(db, tx, job.GoalId),
+                "Adopted specifications require a separately reviewed replacement plan to change their contract.");
             Require(job.State == JobStates.Blocked && job.Stage == "scope" &&
                 string.IsNullOrEmpty(job.LeaseOwner),
                 "Only a blocked, unclaimed scope violation can be amended");
@@ -477,7 +496,8 @@ public static class MissionControlManager
         Planning.Validate(plan);
         var s = store.Read();
         var goal = s.Goals.Single(g => g.Id == plan.GoalId);
-        Require(goal.State == "draft" && goal.ProjectId == plan.ProjectId, "Only draft goal plans are editable");
+        Require(SpecificationContracts.CanRevise(goal, s.Jobs) && goal.ProjectId == plan.ProjectId,
+            "Existing jobs prevent specification replacement.");
         Require(plan.GoalRevision == Planning.GoalRevision(goal), "Goal changed; reopen the current goal before saving its plan");
         var p = s.Projects.Single(p => p.Id == goal.ProjectId);
         plan.Preflight = WorkPackagePreflight.Inspect(s, p, goal);

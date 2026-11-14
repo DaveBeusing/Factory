@@ -52,10 +52,83 @@ public sealed partial class StateStore
             : null;
     }
 
+    internal static bool HasAdoptedSpecification(SqliteConnection db, SqliteTransaction tx, Guid? goalId)
+    {
+        if (goalId is null) return false;
+        using var query = Command(db, tx, """
+            SELECT r.content FROM goal_plan_revisions r JOIN lifecycle_audit a ON a.reference=r.revision
+            WHERE r.goal_id=$goal AND a.entity_id=r.goal_id AND a.entity_kind='plan'
+                AND a.reason_code='PlanAdopted' ORDER BY r.id DESC LIMIT 1;
+            """, ("$goal", goalId));
+        return query.ExecuteScalar() is string content &&
+            JsonSerializer.Deserialize<FactoryPlan>(content, Json.Options)?.ContractVersion == 1;
+    }
+
+    internal static Dictionary<int, FactoryJob> VerifySpecificationAdoption(SqliteConnection db, SqliteTransaction tx, FactoryGoal goal,
+        FactoryPlan plan, IReadOnlyList<FactoryJob> jobs)
+    {
+        if (goal.State == "draft" && !jobs.Any(j => j.GoalId == goal.Id)) return [];
+        if (goal.State != "active" || plan.ContractVersion != 1 || !SpecificationContracts.CanRevise(goal, jobs))
+            throw new InvalidOperationException("Existing jobs prevent specification replacement.");
+        using var adopted = Command(db, tx, """
+            SELECT reference FROM lifecycle_audit WHERE entity_kind='plan' AND project_id=$project
+                AND entity_id=$goal AND reason_code='PlanAdopted' ORDER BY rowid DESC LIMIT 1;
+            """, ("$project", goal.ProjectId), ("$goal", goal.Id));
+        if (adopted.ExecuteScalar() is not string previous || previous == plan.Revision.ToString())
+            throw new InvalidOperationException("A new specification revision must be reviewed before replacing jobs.");
+        using var revision = Command(db, tx, """
+            SELECT content FROM goal_plan_revisions WHERE goal_id=$goal AND revision=$revision;
+            """, ("$goal", goal.Id), ("$revision", previous));
+        var prior = JsonSerializer.Deserialize<FactoryPlan>((string)revision.ExecuteScalar()!, Json.Options)!;
+        var retained = new Dictionary<int, FactoryJob>();
+        foreach (var job in jobs.Where(j => j.GoalId == goal.Id && SpecificationContracts.IsIntegrated(j)))
+        {
+            using var proof = Command(db, tx, """
+                SELECT 1 FROM lifecycle_audit WHERE project_id=$project AND entity_id=$job
+                    AND entity_kind='job' AND reason_code='IntegrationVerified' LIMIT 1;
+                """, ("$project", goal.ProjectId), ("$job", job.Id));
+            if (proof.ExecuteScalar() is null)
+                throw new InvalidOperationException("An integrated predecessor has no durable integration proof.");
+            var old = prior.Packages.SingleOrDefault(p => p.Title == job.Title);
+            var index = plan.Packages.FindIndex(p => p.Title == job.Title);
+            if (old is null || index < 0 || Json.Stringify(old) != Json.Stringify(plan.Packages[index]))
+                throw new InvalidOperationException("Retain each integrated package contract unchanged in a replacement revision.");
+            if (!retained.TryAdd(index, job))
+                throw new InvalidOperationException("Multiple integrations match the same package.");
+        }
+        return retained;
+    }
+
+    internal static IReadOnlyList<FactoryJob> RetireSpecificationJobs(SqliteConnection db, SqliteTransaction tx,
+        IReadOnlyList<FactoryJob> jobs, FactoryGoal goal, FactoryPlan plan, string actor)
+    {
+        var current = jobs.Where(job => job.GoalId == goal.Id && !SpecificationContracts.IsSuperseded(job) &&
+            !SpecificationContracts.IsIntegrated(job)).ToArray();
+        foreach (var job in current)
+        {
+            RequireSettledJobProviderUsage(db, tx, job.Id);
+            using var reservation = Command(db, tx, """
+                SELECT 1 FROM goal_budget_reservations WHERE job_id=$job AND state IN ('active','held') LIMIT 1;
+                """, ("$job", job.Id));
+            if (reservation.ExecuteScalar() is not null)
+                throw new InvalidOperationException("Settle the previous job's goal budget before replacement.");
+            RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, actor, job.State, JobStates.Cancelled,
+                LifecycleReason.SpecificationSuperseded, reference: plan.Revision.ToString());
+            job.State = JobStates.Cancelled;
+            job.Stage = "specification_superseded";
+            job.UpdatedAt = DateTimeOffset.UtcNow;
+        }
+        return current;
+    }
+
     internal static FactoryPlan InsertPlanRevision(SqliteConnection db, SqliteTransaction tx, FactoryPlan plan,
         string actor = "local-operator")
     {
         var previous = ReadStoredPlanRevision(db, tx, plan.GoalId);
+        if (previous?.ContractVersion == 1 && plan.ContractVersion != 1)
+            throw new ArgumentException("An existing specification cannot be downgraded to a legacy plan.");
+        plan.PreviousRevision = previous?.Revision;
+        plan.Changes = SpecificationContracts.Diff(previous, plan);
         plan.Revision = Guid.NewGuid();
         BindIntakePlan(db, tx, plan);
         Execute(db, tx, """

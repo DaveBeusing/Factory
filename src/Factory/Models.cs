@@ -35,6 +35,7 @@ internal enum LifecycleReason
     IntegrationVerified,
     PlanProposed,
     PlanSuperseded,
+    SpecificationSuperseded,
     PlanAdopted,
     ApprovalRequested,
     ApprovalSuperseded,

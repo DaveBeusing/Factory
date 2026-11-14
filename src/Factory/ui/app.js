@@ -371,14 +371,15 @@ async function loadDecisionEvidence(){
   if(request!==decisionRequest||target!==$('decision-evidence'))return;
   target.innerHTML=`<h3>Effective policy</h3><dl><dt>Issue intake</dt><dd>${esc(data.intakePolicy.rule)} · ${esc(data.intakePolicy.revision)}</dd>
   <dt>Plan adoption</dt><dd>${esc(data.planPolicy.rule)} · ${esc(data.planPolicy.revision)}</dd></dl>
-  <h3>Issue intake decisions</h3>${data.intake.length?`<ul>${data.intake.map(i=>`<li><strong>#${esc(i.number)} ${esc(i.title)}</strong> · ${esc(i.decision)}<p>${esc(i.reason)}</p></li>`).join('')}</ul>`:'<p>No recorded intake decisions.</p>'}
+  <h3>Issue intake decisions</h3>${data.intake.length?`<ul>${data.intake.map(i=>`<li><strong>#${esc(i.number)} ${esc(i.title)}</strong> · ${esc(i.decision)}<p>${esc(i.reason)}</p><small>Policy ${esc(i.policyRevision)} · ${esc(dateTime(i.at))}</small></li>`).join('')}</ul>`:'<p>No recorded intake decisions.</p>'}
+  <h3>Plan approval queue</h3>${data.approvalQueue.length?`<ul>${data.approvalQueue.map(plan=>`<li>${esc(plan.objective)} · Revision <code>${esc(plan.revision)}</code></li>`).join('')}</ul>`:'<p>No draft plan revisions.</p>'}
   <h3>Review and integration</h3>${data.jobs.length?data.jobs.map(j=>`<details><summary>${esc(j.title)} · ${esc(j.status)}</summary>
    <p>Head <code>${esc(j.headSha||'Unknown')}</code> · Remaining review cycles ${esc(j.remaining)}</p>
    <p>Independent reviewer ${esc(j.reviewer||'Unknown')}${j.reviewerSession?` · ${esc(j.reviewerSession)}`:''}</p>
    ${safeUrl(j.prUrl)?`<p><a href="${esc(safeUrl(j.prUrl))}">View pull request</a></p>`:''}
    ${j.integrated?`<p>Verified integration commit <code>${esc(j.integrated)}</code></p>`:j.mergedCommit?`<p>GitHub merge commit <code>${esc(j.mergedCommit)}</code>. Integration verification pending.</p>`:''}
    ${j.blockers.length?`<ul>${j.blockers.map(reason=>`<li>${esc(reason)}</li>`).join('')}</ul>`:''}
-   ${j.cycles.map(c=>`<p>Cycle ${esc(c.cycle)} · ${c.complete?'Recorded':'Pending'} · ${esc(c.head||'Unknown head')}${c.reviews.map(r=>` · ${esc(r.role)} ${esc(r.verdict)} (${esc(r.assurance)})`).join('')}</p>`).join('')}
+   ${j.cycles.map(c=>`<p>Cycle ${esc(c.cycle)} · ${c.complete?'Recorded':'Pending'} · ${esc(c.head||'Unknown head')}${c.reviews.length?c.reviews.map(r=>` · ${esc(r.role)} ${esc(r.verdict)} (${esc(r.assurance)})`).join(''):' · Reviewer provenance unknown'}</p>`).join('')}
    ${['completed_local','pr_ready'].includes(j.state)?`<button class="button button-muted" data-act="decision-review" data-id="${esc(j.id)}">Submit signed review</button>
    <button class="button button-muted" data-act="decision-publication" data-id="${esc(j.id)}">Submit publication decision</button>`:''}</details>`).join(''):'<p>No recorded work packages.</p>'}`;
  }catch(error){

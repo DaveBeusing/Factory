@@ -23,7 +23,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
     internal async Task<object> ExecuteAsync(Guid id, SignedPullRequestDecision signed, CancellationToken ct)
     {
         var d = signed.Decision ?? throw new ArgumentException("Missing project decision.");
-        if (d.Action is not ("draft" or "merge") || !settings.AllowPush ||
+        if (d.Action is not ("draft" or "check" or "merge") || !settings.AllowPush ||
             (d.Action == "merge" && !settings.AutoMerge))
             throw new InvalidOperationException("Publication or guarded merge is disabled.");
         ValidateSignature(signed);
@@ -71,10 +71,9 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             _ = GitHubWorkerResultVerifier.PullNumber(createdUrl, d.Repository);
             store.Change((state, db, tx) =>
             {
-                var current = state.Jobs.Single(candidate => candidate.Id == id);
                 StateStore.RecordLifecycle(db, tx, d.ProjectId, "publication-receipt", id, d.Account,
                     "reserved", "created", LifecycleReason.PullRequestPrepared,
-                    Json.Stringify(new { url = createdUrl, d.HeadCommit, d.BaseCommit }), job.ExecutionGeneration, state);
+                    Json.Stringify(new { url = createdUrl, d.HeadCommit, d.BaseCommit, d.ProjectRevision }), job.ExecutionGeneration, state);
                 return true;
             });
             return new { url = createdUrl, d.HeadCommit, draft = true };
@@ -98,7 +97,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             {
                 StateStore.RecordLifecycle(db, tx, d.ProjectId, "publication-receipt", id, d.Account,
                     "created", "merged", LifecycleReason.RemoteResultVerified,
-                    Json.Stringify(new { url, d.HeadCommit, d.BaseCommit, mergeCommit }), job.ExecutionGeneration, state);
+                    Json.Stringify(new { url, d.HeadCommit, d.BaseCommit, d.ProjectRevision, mergeCommit }), job.ExecutionGeneration, state);
                 return true;
             });
             var author = pull.GetProperty("user").GetProperty("login").GetString();
@@ -118,6 +117,19 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             throw new InvalidOperationException("Guarded merge requires a non-admin repository credential.");
         await RequireStrictRulesAsync(d, ct);
         await RequireMergeChecksAsync(d, project, job, branch, pull, verifier, ct);
+        if (d.Action == "check")
+        {
+            await RequireCurrentBaseAsync(d, ct);
+            RequireCurrentDecision(signed, id);
+            store.Change((state, db, tx) =>
+            {
+                StateStore.RecordLifecycle(db, tx, d.ProjectId, "publication-receipt", id, d.Account,
+                    "created", "ready", LifecycleReason.RemoteResultVerified,
+                    Json.Stringify(new { url, d.HeadCommit, d.BaseCommit, d.ProjectRevision }), job.ExecutionGeneration, state);
+                return true;
+            });
+            return new { url, d.HeadCommit, ready = true };
+        }
         throw new InvalidOperationException("GitHub cannot atomically enforce the signed base commit during merge.");
     }
 

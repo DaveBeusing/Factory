@@ -128,6 +128,8 @@ browserTest('loads project decisions and protects evidence at the API boundary',
   const repo = path.join(home, 'repo');
   await mkdir(repo);
   execFileSync('git', ['init', '-b', 'master', repo]);
+  execFileSync('git', ['-C', repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+    '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'Fixture']);
   execFileSync('dotnet', [path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll'), 'init', repo, '--name', 'Decisions fixture'],
     { env: { ...process.env, FACTORY_HOME: home } });
 });

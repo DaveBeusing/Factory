@@ -37,12 +37,20 @@ public sealed partial class StateStore
                 while (rows.Read())
                 {
                     using var report = rows.IsDBNull(3) ? null : JsonDocument.Parse(rows.GetString(3));
-                    var reviews = report is not null && report.RootElement.TryGetProperty("reviewRecords", out var records)
+                    var root = report?.RootElement ?? default;
+                    if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("quality", out var quality))
+                        root = quality;
+                    var reviews = root.ValueKind == JsonValueKind.Object && root.TryGetProperty("reviewRecords", out var records)
                         ? records.Deserialize<ReviewRecord[]>(Json.Options) ?? [] : [];
                     cycles.Add(new { cycle = rows.GetInt32(0), generation = rows.GetInt64(1),
                         head = rows.IsDBNull(2) ? null : rows.GetString(2), complete = report is not null, reviews });
                 }
-            var approved = IsReviewApproved(db, tx, job, project);
+            var approved = false;
+            try { approved = IsReviewApproved(db, tx, job, project); }
+            catch (Exception ex) when (ex is InvalidOperationException or System.IO.IOException)
+            {
+                // The worktree may have been removed since evidence was recorded.
+            }
             ReviewApproval? approval = null;
             if (approved)
             {
@@ -62,31 +70,41 @@ public sealed partial class StateStore
             if (integrated is null && !approved) blockers.Add("No current signed independent review.");
             if (integrated is null && remaining == 0 && !approved) blockers.Add("Review cycle limit reached.");
             using var published = Command(db, tx, """
-                SELECT reference FROM lifecycle_audit WHERE entity_id=$job AND project_id=$project
+                SELECT reference,resulting_state FROM lifecycle_audit WHERE entity_id=$job AND project_id=$project
                     AND entity_kind='publication-receipt' AND generation=$generation ORDER BY rowid DESC LIMIT 1;
                 """, ("$job", job.Id), ("$project", projectId), ("$generation", job.ExecutionGeneration));
             var url = job.PrUrl;
             string? mergedCommit = null;
-            if (published.ExecuteScalar() is string receipt)
+            var ready = false;
+            using (var row = published.ExecuteReader())
+            if (row.Read())
             {
-                using var doc = JsonDocument.Parse(receipt);
-                if (doc.RootElement.GetProperty("headCommit").GetString() == job.HeadSha)
+                using var doc = JsonDocument.Parse(row.GetString(0));
+                if (doc.RootElement.GetProperty("headCommit").GetString() == job.HeadSha &&
+                    doc.RootElement.TryGetProperty("projectRevision", out var revision) &&
+                    revision.GetString() == ReviewPolicy.ProjectRevision(project))
                 {
                     url = doc.RootElement.GetProperty("url").GetString() ?? url;
+                    ready = row.GetString(1) == "ready";
                     if (doc.RootElement.TryGetProperty("mergeCommit", out var merged))
                         mergedCommit = merged.GetString();
                 }
+                else blockers.Add("The publication receipt is stale for this head or project policy.");
             }
             if (integrated is null && !settings.AllowPush) blockers.Add("Publication is disabled in controller settings.");
             var status = integrated is not null ? "verified integrated" :
                 mergedCommit is not null ? "merged" :
-                job.State == JobStates.PrReady && job.PrUrl.Length > 0 ? "PR ready" :
+                ready || job.State == JobStates.PrReady && job.PrUrl.Length > 0 ? "PR ready" :
                 url.Length > 0 ? "PR created" : "No confirmed PR";
             jobs.Add(new { job.Id, job.Title, job.State, job.HeadSha, prUrl = url,
                 reviewApproved = approved, reviewer = approval?.Reviewer, reviewerSession = approval?.ReviewerSession,
                 remaining, cycles, integrated, mergedCommit, status, blockers });
         }
+        var approvalQueue = state.Goals.Where(goal => goal.ProjectId == projectId && goal.State == "draft")
+            .Select(goal => (goal, plan: ReadPlanRevision(db, tx, goal.Id)))
+            .Where(item => item.plan?.Revision is not null)
+            .Select(item => new { item.goal.Id, item.goal.Objective, item.plan!.Revision }).ToArray();
         return new { project.Id, intakePolicy = new { intakePolicy.Revision, intakePolicy.Rule },
-            planPolicy = new { policy.Revision, rule = policy.Rule.ToString() }, intake, jobs };
+            planPolicy = new { policy.Revision, rule = policy.Rule.ToString() }, intake, jobs, approvalQueue };
     }
 }

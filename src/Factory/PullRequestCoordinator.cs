@@ -51,11 +51,13 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
                 await RequireBranchChecksAsync(d, project, ct);
             else
                 await RequirePullRequestOnlyAsync(d, project, ct);
+            await RequireImmutableHeadAsync(d, branch, ct);
             Reserve(signed, job, project);
             await RequireCurrentBaseAsync(d, ct);
             var remoteHead = await ReadAsync(["api", $"repos/{d.Repository}/git/ref/heads/{branch}"], ct);
             if (remoteHead.GetProperty("object").GetProperty("sha").GetString() != d.HeadCommit)
                 throw new InvalidOperationException("The pre-published branch does not contain the approved head.");
+            await RequireImmutableHeadAsync(d, branch, ct);
             RequireCurrentDecision(signed, id);
             var created = await MutateAsync(["api", "--method", "POST", $"repos/{d.Repository}/pulls",
                 "-f", "head=" + branch, "-f", "base=" + d.BaseBranch, "-f", "title=" + job.Title,
@@ -73,7 +75,6 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         var pull = await ReadPullAsync(d, ct);
         if (pull.GetProperty("merged").GetBoolean())
         {
-            RequireReservation(d);
             await RequireMergeReceiptAsync(d, pull, ct);
             return await VerifyAfterMergeAsync(id, url, verifier, ct);
         }
@@ -83,31 +84,65 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             throw new InvalidOperationException("Guarded merge requires a non-admin repository credential.");
         await RequireStrictRulesAsync(d, ct);
         await RequireMergeChecksAsync(d, project, job, branch, pull, verifier, ct);
-        Reserve(signed, job, project);
-        await RequireCurrentBaseAsync(d, ct);
-        await RequireMergeChecksAsync(d, project, job, branch, await ReadPullAsync(d, ct), verifier, ct);
-        await RequireStrictRulesAsync(d, ct);
-        await RequireCurrentBaseAsync(d, ct);
-        RequireCurrentDecision(signed, id);
-        await MutateAsync(["api", "--method", "PUT", $"repos/{d.Repository}/pulls/{d.PullNumber}/merge",
-            "-f", "sha=" + d.HeadCommit, "-f", "merge_method=" + d.Method], ct);
-        await RequireMergeReceiptAsync(d, await ReadPullAsync(d, ct), ct);
-        return await VerifyAfterMergeAsync(id, url, verifier, ct);
+        throw new InvalidOperationException("GitHub cannot atomically enforce the signed base commit during merge.");
     }
 
-    private async Task RequireMergeReceiptAsync(PullRequestDecision d, JsonElement pull, CancellationToken ct)
+    private async Task RequireImmutableHeadAsync(PullRequestDecision d, string branch, CancellationToken ct)
     {
-        // A regular merge commit can prove the exact base and head as parents.
-        if (d.Method != "merge" || !pull.GetProperty("merged").GetBoolean())
+        var rules = await ReadAsync(["api", $"repos/{d.Repository}/rules/branches/{Uri.EscapeDataString(branch)}"], ct);
+        foreach (var group in rules.EnumerateArray().Where(rule =>
+            rule.GetProperty("ruleset_source_type").GetString() == "Repository")
+            .GroupBy(rule => rule.GetProperty("ruleset_id").GetInt64()))
+        {
+            var types = group.Select(rule => rule.GetProperty("type").GetString()).ToHashSet();
+            if (!types.Contains("update") || !types.Contains("deletion")) continue;
+            if (group.Any(rule => rule.GetProperty("type").GetString() == "update" &&
+                rule.GetProperty("parameters").GetProperty("update_allows_fetch_and_merge").GetBoolean())) continue;
+            var detail = await ReadAsync(["api", $"repos/{d.Repository}/rulesets/{group.Key}"], ct);
+            if (detail.GetProperty("enforcement").GetString() == "active" &&
+                detail.TryGetProperty("bypass_actors", out var bypass) && bypass.GetArrayLength() == 0) return;
+        }
+        throw new InvalidOperationException("Draft publication requires a server-locked head branch without bypass actors.");
+    }
+
+    internal async Task RequireMergeReceiptAsync(PullRequestDecision d, JsonElement pull, CancellationToken ct)
+    {
+        if (!pull.GetProperty("merged").GetBoolean())
             throw new InvalidOperationException("The signed base and head cannot be confirmed for this merge method.");
         var sha = pull.GetProperty("merge_commit_sha").GetString();
         if (sha is null || !IntegrationVerifier.IsCommitSha(sha))
             throw new InvalidOperationException("Missing merge commit.");
         var commit = await ReadAsync(["api", $"repos/{d.Repository}/git/commits/{sha}"], ct);
-        if (commit.GetProperty("sha").GetString() != sha ||
-            !commit.GetProperty("parents").EnumerateArray().Select(p => p.GetProperty("sha").GetString())
-                .SequenceEqual(new[] { d.BaseCommit, d.HeadCommit }))
-            throw new InvalidOperationException("The resulting merge did not use the signed base and head.");
+        if (commit.GetProperty("sha").GetString() != sha)
+            throw new InvalidOperationException("GitHub returned a different merge commit.");
+        var parents = commit.GetProperty("parents").EnumerateArray().Select(p => p.GetProperty("sha").GetString()).ToArray();
+        if (d.Method == "merge" && parents.SequenceEqual(new[] { d.BaseCommit, d.HeadCommit })) return;
+        if (d.Method is "squash" or "rebase" && parents.Length == 1)
+        {
+            // The supported linear forms require the reviewed head to include the signed base.
+            var comparison = await ReadAsync(["api", $"repos/{d.Repository}/compare/{d.BaseCommit}...{d.HeadCommit}?per_page=1"], ct);
+            var original = await ReadAsync(["api", $"repos/{d.Repository}/git/commits/{d.HeadCommit}"], ct);
+            if (comparison.GetProperty("merge_base_commit").GetProperty("sha").GetString() == d.BaseCommit &&
+                original.GetProperty("sha").GetString() == d.HeadCommit &&
+                original.GetProperty("tree").GetProperty("sha").GetString() == commit.GetProperty("tree").GetProperty("sha").GetString())
+            {
+                var count = d.Method == "squash" ? 1 : comparison.GetProperty("total_commits").GetInt32();
+                if (count is > 0 and <= 100)
+                {
+                    var parent = parents[0];
+                    for (var i = 1; i < count && parent is not null && IntegrationVerifier.IsCommitSha(parent); i++)
+                    {
+                        var item = await ReadAsync(["api", $"repos/{d.Repository}/git/commits/{parent}"], ct);
+                        var lineage = item.GetProperty("parents");
+                        if (item.GetProperty("sha").GetString() != parent || lineage.GetArrayLength() != 1)
+                            throw new InvalidOperationException("GitHub returned invalid rebase lineage.");
+                        parent = lineage[0].GetProperty("sha").GetString();
+                    }
+                    if (parent == d.BaseCommit) return;
+                }
+            }
+        }
+        throw new InvalidOperationException("The resulting merge did not use the signed base and head.");
     }
 
     private async Task RequireStrictRulesAsync(PullRequestDecision d, CancellationToken ct)
@@ -137,6 +172,12 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (project.Checks.Count != 1 || string.IsNullOrWhiteSpace(d.WorkflowFile) ||
             !System.Text.RegularExpressions.Regex.IsMatch(d.WorkflowFile, @"^[A-Za-z0-9_.-]+\.ya?ml$"))
             throw new InvalidOperationException("A verifiable PR-only workflow is required.");
+        var rules = await ReadAsync(["api", $"repos/{d.Repository}/rules/branches/{Uri.EscapeDataString(d.BaseBranch)}"], ct);
+        var required = rules.EnumerateArray().Where(rule => rule.GetProperty("type").GetString() == "required_status_checks")
+            .SelectMany(rule => rule.GetProperty("parameters").GetProperty("required_status_checks").EnumerateArray()).ToArray();
+        if (required.Length != 1 || required[0].GetProperty("context").GetString() != project.Checks[0].Name ||
+            required[0].GetProperty("integration_id").GetInt64() != 15368)
+            throw new InvalidOperationException("The PR-only check must be explicitly required from GitHub Actions.");
         var path = $".github/workflows/{d.WorkflowFile}";
         foreach (var sha in new[] { d.BaseCommit, d.HeadCommit })
         {
@@ -148,7 +189,8 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
                 !System.Text.RegularExpressions.Regex.IsMatch(trigger.Groups[1].Value,
                     @"\A  pull_request:[ \t]*\r?\n(?:    [^\r\n]+\r?\n)*\z") ||
                 !System.Text.RegularExpressions.Regex.IsMatch(yaml,
-                    "(?m)^  " + System.Text.RegularExpressions.Regex.Escape(project.Checks[0].Name) + ":[ \\t]*$"))
+                    "(?m)^jobs:[ \\t]*\\r?\\n(?:[ \\t]+[^\\r\\n]+\\r?\\n)*?  " +
+                    System.Text.RegularExpressions.Regex.Escape(project.Checks[0].Name) + ":[ \\t]*\\r?$"))
                 throw new InvalidOperationException("The hosted workflow does not prove the required check is PR-only.");
         }
     }
@@ -248,7 +290,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             d.ScopeRevision != ScopeRevision(job) || d.HeadCommit != job.HeadSha || !IntegrationVerifier.IsCommitSha(d.HeadCommit) ||
             !IntegrationVerifier.IsCommitSha(d.BaseCommit) || d.ExpiresAt <= now || d.ExpiresAt > now.AddHours(24) ||
             (d.Action == "draft" ? d.PullNumber != 0 || d.Method != "pr-ci" :
-                d.PullNumber <= 0 || d.Method != "merge"))
+                d.PullNumber <= 0 || d.Method is not ("merge" or "squash" or "rebase")))
             throw new InvalidOperationException("The signed policy decision does not match the current job and target.");
     }
 

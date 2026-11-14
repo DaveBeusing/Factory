@@ -1807,6 +1807,45 @@ await TestAsync("Publication defaults to disabled and requires a signed project 
     }
 });
 
+await TestAsync("Hosted merge receipts require signed base lineage and reviewed content", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-merge-receipt-");
+    try
+    {
+        string Sha(char c) => new(c, 40);
+        var decision = new PullRequestDecision(Guid.NewGuid(), Guid.NewGuid(), "", "example/repo", "master",
+            Sha('a'), Sha('b'), "publisher", "merge", "squash", 1, DateTimeOffset.UtcNow.AddMinutes(5), "");
+        var parents = new[] { Sha('a') };
+        var tree = Sha('e');
+        var coordinator = new PullRequestCoordinator(new StateStore(home.FullName), new FactorySettings(), (args, _, _) =>
+        {
+            var endpoint = args[1];
+            var result = endpoint.Contains("/compare/") ? Json.Stringify(new
+            {
+                merge_base_commit = new { sha = decision.BaseCommit }, total_commits = 2
+            }) : Json.Stringify(new
+            {
+                sha = endpoint.Split('/').Last(),
+                tree = new { sha = endpoint.EndsWith(Sha('c')) ? tree : Sha('e') },
+                parents = (endpoint.EndsWith(Sha('c')) ? parents : new[] { Sha('a') }).Select(sha => new { sha })
+            });
+            return Task.FromResult(new CommandResult(0, result, ""));
+        });
+        using var pull = System.Text.Json.JsonDocument.Parse(Json.Stringify(new { merged = true, merge_commit_sha = Sha('c') }));
+        await coordinator.RequireMergeReceiptAsync(decision, pull.RootElement, CancellationToken.None);
+        parents = [Sha('d')];
+        await coordinator.RequireMergeReceiptAsync(decision with { Method = "rebase" }, pull.RootElement, CancellationToken.None);
+        tree = Sha('f');
+        try
+        {
+            await coordinator.RequireMergeReceiptAsync(decision with { Method = "rebase" }, pull.RootElement, CancellationToken.None);
+            throw new Exception("A different integrated tree was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed base and head")) { }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {

@@ -7,7 +7,7 @@ namespace Factory;
 
 public sealed record PullRequestDecision(Guid ProjectId, Guid JobId, string ProjectRevision, string Repository,
     string BaseBranch, string BaseCommit, string HeadCommit, string Account, string Action, string Method,
-    int PullNumber, DateTimeOffset ExpiresAt, string ScopeRevision);
+    int PullNumber, DateTimeOffset ExpiresAt, string ScopeRevision, bool BranchChecksAvailable = true);
 public sealed record SignedPullRequestDecision(PullRequestDecision Decision, string Signature);
 
 internal sealed class PullRequestCoordinator(StateStore store, FactorySettings settings,
@@ -42,15 +42,18 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             var existing = await ReadAsync(["api", $"repos/{d.Repository}/pulls?state=all&head={Uri.EscapeDataString(d.Repository.Split('/')[0] + ":" + branch)}"], ct);
             if (existing.GetArrayLength() != 0)
                 throw new InvalidOperationException("An existing pull request requires reconciliation.");
-            if (job.Mode != JobExecutionModes.Local || GitOperations.Git(job.Worktree, "status", "--porcelain").Length != 0)
-                throw new InvalidOperationException("Draft publication requires a clean controller worktree.");
-            WorkPackageScope.ValidateWorktree(project, job);
+            var verifierForDraft = new GitHubWorkerResultVerifier(github);
+            var changes = await verifierForDraft.CompareFilePathsAsync(d.Repository, d.BaseCommit, d.HeadCommit, ct);
+            WorkPackageScope.Enforce(job.ExpectedPaths, changes);
+            GitOperations.EnforcePaths(changes, project.ProtectedPaths);
+            if (d.BranchChecksAvailable)
+                await RequireBranchChecksAsync(d, project, ct);
             Reserve(signed, job, project);
             await RequireCurrentBaseAsync(d, ct);
-            var push = await Commands.RunAsync("git", ["-C", job.Worktree, "push", project.Origin,
-                $"--force-with-lease=refs/heads/{branch}:", $"{d.HeadCommit}:refs/heads/{branch}"],
-                Environment.CurrentDirectory, 120, cancellationToken: ct);
-            Commands.Require(push, "publish approved commit");
+            var remoteHead = await ReadAsync(["api", $"repos/{d.Repository}/git/ref/heads/{branch}"], ct);
+            if (remoteHead.GetProperty("object").GetProperty("sha").GetString() != d.HeadCommit)
+                throw new InvalidOperationException("The pre-published branch does not contain the approved head.");
+            RequireCurrentDecision(signed, id);
             var created = await MutateAsync(["api", "--method", "POST", $"repos/{d.Repository}/pulls",
                 "-f", "head=" + branch, "-f", "base=" + d.BaseBranch, "-f", "title=" + job.Title,
                 "-F", "draft=true", "-f", "body=Required PR CI evaluation for Factory job " + id], ct);
@@ -63,18 +66,78 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (pull.GetProperty("merged").GetBoolean())
         {
             RequireReservation(d);
-            return await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, url, verifier, ct, coordinated: true);
+            return await VerifyAfterMergeAsync(id, url, verifier, ct);
         }
 
         await RequireCurrentBaseAsync(d, ct);
+        if (repository.GetProperty("permissions").GetProperty("admin").GetBoolean())
+            throw new InvalidOperationException("Guarded merge requires a non-admin repository credential.");
+        await RequireStrictRulesAsync(d, ct);
         await RequireMergeChecksAsync(d, project, job, branch, pull, verifier, ct);
         Reserve(signed, job, project);
         await RequireCurrentBaseAsync(d, ct);
         await RequireMergeChecksAsync(d, project, job, branch, await ReadPullAsync(d, ct), verifier, ct);
+        await RequireStrictRulesAsync(d, ct);
         await RequireCurrentBaseAsync(d, ct);
+        RequireCurrentDecision(signed, id);
         await MutateAsync(["api", "--method", "PUT", $"repos/{d.Repository}/pulls/{d.PullNumber}/merge",
             "-f", "sha=" + d.HeadCommit, "-f", "merge_method=" + d.Method], ct);
-        return await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, url, verifier, ct, coordinated: true);
+        return await VerifyAfterMergeAsync(id, url, verifier, ct);
+    }
+
+    private async Task RequireStrictRulesAsync(PullRequestDecision d, CancellationToken ct)
+    {
+        var active = await ReadAsync(["api", $"repos/{d.Repository}/rules/branches/{Uri.EscapeDataString(d.BaseBranch)}"], ct);
+        var strict = active.EnumerateArray().Where(rule =>
+            rule.GetProperty("type").GetString() == "required_status_checks" &&
+            rule.GetProperty("parameters").GetProperty("strict_required_status_checks_policy").GetBoolean()).ToArray();
+        foreach (var rule in strict)
+        {
+            if (rule.GetProperty("ruleset_source_type").GetString() != "Repository") continue;
+            var detail = await ReadAsync(["api",
+                $"repos/{d.Repository}/rulesets/{rule.GetProperty("ruleset_id").GetInt64()}"], ct);
+            if (detail.GetProperty("enforcement").GetString() == "active" &&
+                detail.TryGetProperty("bypass_actors", out var bypass) && bypass.GetArrayLength() == 0) return;
+        }
+        throw new InvalidOperationException("A strict required-check ruleset with no bypass actors is required.");
+    }
+
+    private void RequireCurrentDecision(SignedPullRequestDecision signed, Guid id)
+    {
+        var d = signed.Decision;
+        ValidateSignature(signed);
+        var job = store.Job(id);
+        ValidateTarget(d, job, store.Read().Projects.Single(p => p.Id == job.ProjectId));
+        if (!settings.AllowPush || (d.Action == "merge" && !settings.AutoMerge) || !store.IsReviewApproved(id))
+            throw new InvalidOperationException("Publication authorization changed during verification.");
+    }
+
+    private async Task RequireBranchChecksAsync(PullRequestDecision d, ProjectInfo project, CancellationToken ct)
+    {
+        var pages = await ReadAsync(["api", "--paginate", "--slurp",
+            $"repos/{d.Repository}/commits/{d.HeadCommit}/check-runs?per_page=100"], ct);
+        var runs = pages.EnumerateArray().SelectMany(page => page.GetProperty("check_runs").EnumerateArray()).ToArray();
+        var rules = await ReadAsync(["api", $"repos/{d.Repository}/rules/branches/{Uri.EscapeDataString(d.BaseBranch)}"], ct);
+        var required = rules.EnumerateArray().Where(rule => rule.GetProperty("type").GetString() == "required_status_checks")
+            .SelectMany(rule => rule.GetProperty("parameters").GetProperty("required_status_checks").EnumerateArray()).ToArray();
+        if (required.Length == 0 || project.Checks.Any(check => !required.Any(rule => rule.GetProperty("context").GetString() == check.Name)))
+            throw new InvalidOperationException("Branch CI policy cannot be verified.");
+        foreach (var rule in required)
+        {
+            var name = rule.GetProperty("context").GetString();
+            if (!rule.TryGetProperty("integration_id", out var app) || app.ValueKind != JsonValueKind.Number ||
+                !runs.Any(run => run.GetProperty("name").GetString() == name &&
+                    run.GetProperty("head_sha").GetString() == d.HeadCommit &&
+                    run.GetProperty("app").GetProperty("id").GetInt64() == app.GetInt64() &&
+                    run.GetProperty("conclusion").GetString() == "success"))
+                throw new InvalidOperationException("Trusted branch CI is missing or unsuccessful: " + name);
+        }
+    }
+
+    private async Task<IntegrationProof> VerifyAfterMergeAsync(Guid id, string url, GitHubWorkerResultVerifier verifier, CancellationToken ct)
+    {
+        return await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, url, verifier, ct,
+            remote: new GitRemoteBaseReader(synchronize: true), coordinated: true);
     }
 
     private async Task RequireMergeChecksAsync(PullRequestDecision d, ProjectInfo project, FactoryJob job, string branch,

@@ -44,6 +44,11 @@ public interface IRemoteBaseReader
 
 public sealed class GitRemoteBaseReader : IRemoteBaseReader
 {
+    private readonly bool _synchronize;
+
+    public GitRemoteBaseReader() { }
+    internal GitRemoteBaseReader(bool synchronize) => _synchronize = synchronize;
+
     public async Task<string> ReadBaseCommitAsync(ProjectInfo project, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(project.Origin) || string.IsNullOrWhiteSpace(project.BaseBranch))
@@ -64,6 +69,15 @@ public sealed class GitRemoteBaseReader : IRemoteBaseReader
             var sha = GitOperations.Git(project.Path, "rev-parse", "--verify", temporaryRef + "^{commit}").Trim();
             if (!IntegrationVerifier.IsCommitSha(sha))
                 throw new InvalidOperationException("Invalid remote base commit");
+            if (_synchronize && !IntegrationVerifier.IsAncestor(project.Path, sha, project.BaseBranch))
+            {
+                if (GitOperations.Git(project.Path, "branch", "--show-current") != project.BaseBranch ||
+                    GitOperations.Git(project.Path, "status", "--porcelain").Length != 0)
+                    throw new InvalidOperationException("Check out the clean local base before verifying integration.");
+                var sync = await Commands.RunAsync("git", ["-C", project.Path, "merge", "--ff-only", sha],
+                    Environment.CurrentDirectory, 120, cancellationToken: ct);
+                Commands.Require(sync, "fast-forward local base");
+            }
             return sha;
         }
         finally

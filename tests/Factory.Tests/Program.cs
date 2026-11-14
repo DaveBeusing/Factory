@@ -2004,7 +2004,30 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
         }
         decision = decision with { EventProof = new(workflowEvent, "invalid") };
         await Reject("signature is invalid");
-        decision = decision with { EventProof = Sign(workflowEvent) };
+        var webhookRepo = new { id = 100, full_name = "example/repo" };
+        var payload = System.Text.Encoding.UTF8.GetBytes(Json.Stringify(new
+        {
+            action = "completed", repository = webhookRepo,
+            workflow_run = new
+            {
+                id = 8, workflow_id = 7, run_attempt = 2, check_suite_id = 12, head_sha = head,
+                @event = "pull_request", conclusion = "success", pull_requests = new[]
+                {
+                    new { number = 42, head = new { sha = head, repo = webhookRepo },
+                        @base = new { @ref = "master", sha = basis, repo = webhookRepo } }
+                }
+            }
+        }));
+        const string webhookSecret = "test-webhook-secret";
+        var webhookSignature = "sha256=" + Convert.ToHexString(System.Security.Cryptography.HMACSHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(webhookSecret), payload));
+        try
+        {
+            WorkflowEventIssuer.Issue(payload, webhookSignature, "another-secret", eventKey);
+            throw new Exception("An unauthenticated event was signed.");
+        }
+        catch (ArgumentException ex) when (ex.Message.Contains("webhook authentication")) { }
+        decision = decision with { EventProof = WorkflowEventIssuer.Issue(payload, webhookSignature, webhookSecret, eventKey) };
         receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
         Assert(receipt.Contains("\"association\": \"signed-workflow-event\"") && receipt.Contains("132435614163"));
         required = [new("build", 15368, "CR_other_pull")];

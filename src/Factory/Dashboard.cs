@@ -323,6 +323,20 @@ public static class DashboardHost
             Results.Ok(new { approved = store.IsReviewApproved(id) }));
         app.MapPost("/api/jobs/{id:guid}/publication", async (Guid id, SignedPullRequestDecision decision, CancellationToken ct) =>
             Results.Ok(await new PullRequestCoordinator(store, settings).ExecuteAsync(id, decision, ct)));
+        app.MapPost("/api/workflow-event-proof", async (HttpRequest request, CancellationToken ct) =>
+        {
+            var secret = Environment.GetEnvironmentVariable("FACTORY_GITHUB_WEBHOOK_SECRET");
+            var privateKey = Environment.GetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PRIVATE_KEY");
+            if (string.IsNullOrWhiteSpace(secret) || string.IsNullOrWhiteSpace(privateKey))
+                return Results.NotFound();
+            var payload = new byte[1_000_001];
+            var length = await request.Body.ReadAtLeastAsync(payload, payload.Length, throwIfEndOfStream: false, cancellationToken: ct);
+            if (length == payload.Length) return Results.BadRequest("GitHub event exceeds the size limit.");
+            using var signer = System.Security.Cryptography.RSA.Create();
+            signer.ImportFromPem(privateKey);
+            return Results.Ok(WorkflowEventIssuer.Issue(payload[..length],
+                request.Headers["X-Hub-Signature-256"].ToString(), secret, signer));
+        });
         app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, string? pullRequestUrl, CancellationToken ct) =>
         {
             var proof = await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, pullRequestUrl,

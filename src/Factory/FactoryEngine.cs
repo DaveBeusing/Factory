@@ -376,10 +376,10 @@ public sealed class FactoryEngine
         // Never accept a local-only ancestry result for a project with a configured remote.
         if (coordinated && (expectedMergeCommit is null || verifyWorkflow is null))
             throw new InvalidOperationException("Coordinated integration requires verified merge and workflow evidence.");
-        var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct, expectedMergeCommit);
-        var pullEvidence = remoteIntegration || coordinated
-            ? await verifier.VerifyMergedAsync(project, job, proof.IntegratedCommit, ct, verifyWorkflow)
+        var pullEvidence = coordinated
+            ? await verifier.VerifyMergedAsync(project, job, expectedMergeCommit!, ct, verifyWorkflow)
             : null;
+        var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct, expectedMergeCommit);
         ct.ThrowIfCancellationRequested();
         var recorded = _store.Change((s, db, tx) =>
         {

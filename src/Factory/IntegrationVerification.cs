@@ -48,6 +48,7 @@ public sealed class GitRemoteBaseReader : IRemoteBaseReader
 
     public GitRemoteBaseReader() { }
     internal GitRemoteBaseReader(bool synchronize) => _synchronize = synchronize;
+    internal bool Synchronize => _synchronize;
 
     public async Task<string> ReadBaseCommitAsync(ProjectInfo project, CancellationToken ct)
     {
@@ -69,15 +70,6 @@ public sealed class GitRemoteBaseReader : IRemoteBaseReader
             var sha = GitOperations.Git(project.Path, "rev-parse", "--verify", temporaryRef + "^{commit}").Trim();
             if (!IntegrationVerifier.IsCommitSha(sha))
                 throw new InvalidOperationException("Invalid remote base commit");
-            if (_synchronize && !IntegrationVerifier.IsAncestor(project.Path, sha, project.BaseBranch))
-            {
-                if (GitOperations.Git(project.Path, "branch", "--show-current") != project.BaseBranch ||
-                    GitOperations.Git(project.Path, "status", "--porcelain").Length != 0)
-                    throw new InvalidOperationException("Check out the clean local base before verifying integration.");
-                var sync = await Commands.RunAsync("git", ["-C", project.Path, "merge", "--ff-only", sha],
-                    Environment.CurrentDirectory, 120, cancellationToken: ct);
-                Commands.Require(sync, "fast-forward local base");
-            }
             return sha;
         }
         finally
@@ -160,6 +152,15 @@ public static class IntegrationVerifier
             throw new InvalidOperationException("Remote provider returned an invalid base commit");
         if (!IsAncestor(project.Path, incorporatedSha, baseSha))
             throw new InvalidOperationException("The integration commit is not reachable from the remote base branch");
+        if (remote is GitRemoteBaseReader { Synchronize: true } && !IsAncestor(project.Path, baseSha, project.BaseBranch))
+        {
+            if (GitOperations.Git(project.Path, "branch", "--show-current") != project.BaseBranch ||
+                GitOperations.Git(project.Path, "status", "--porcelain").Length != 0)
+                throw new InvalidOperationException("Check out the clean local base before verifying integration.");
+            var sync = await Commands.RunAsync("git", ["-C", project.Path, "merge", "--ff-only", baseSha],
+                Environment.CurrentDirectory, 120, cancellationToken: ct);
+            Commands.Require(sync, "fast-forward local base");
+        }
 
         // Downstream worktrees currently start from the local base branch. Do not release
         // dependencies until that checkout contains the verified remote base revision.

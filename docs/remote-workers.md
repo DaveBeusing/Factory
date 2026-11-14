@@ -85,3 +85,7 @@ For mixed remote provider routes, use a compatible **v2 worker** and matching co
 5. Reconcile held reservations and failed claims using [Recovery](recovery.md).
 
 For project human roles and subject rotation, see [Operator authorization](operator-authorization.md). For deployment credentials, see [Configuration](configuration.md#credential-boundaries).
+
+## Execution profiles and provenance
+
+Project and job capability lists can require isolation:filesystem, isolation:network, isolation:process, or isolation:secrets. Existing adapters cannot attest these controls, so claims requesting any of them are denied. Existing admitted work is recorded as unverified isolation. Capability observations and lease generation are persisted separately from secrets and do not convey isolation assurance. Remote runners persist consumed generations and require a current controller heartbeat before cloning or invoking providers. A lost admission response is recovered through lease reconciliation rather than replay.

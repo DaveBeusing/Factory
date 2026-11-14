@@ -1566,6 +1566,38 @@ Test("Interrupted Git retries keep ownership until reviewed release", () =>
     finally { try { home.Delete(true); } catch { } }
 });
 
+Test("Builder restrictions cannot be satisfied by worker claims", () =>
+{
+    var project = new ProjectInfo();
+    var job = new FactoryJob { ProjectId = project.Id };
+    foreach (var restriction in new[] { BuilderExecutionProfile.Filesystem, BuilderExecutionProfile.Network,
+        BuilderExecutionProfile.Process, BuilderExecutionProfile.Secrets, "isolation:unknown" })
+    {
+        job.RequiredExecutionCapabilities = [restriction];
+        Assert(!BuilderExecutionProfile.Allows(project, job));
+        Assert(WorkerAuthorization.RequiredCapabilities(project, job, new FactorySettings()) is null);
+    }
+    job.RequiredExecutionCapabilities = [];
+    Assert(BuilderExecutionProfile.Allows(project, job));
+});
+
+Test("Worker claim consumption rejects replay after reopen", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-worker-consumption-");
+    try
+    {
+        var job = Guid.NewGuid();
+        var claims = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+            new StateStore(home.FullName).ConsumeWorkerClaim(job, 1))).ToArray();
+        Task.WaitAll(claims);
+        Assert(claims.Count(claim => claim.Result) == 1);
+        var reopened = new StateStore(home.FullName);
+        Assert(reopened.ConsumeWorkerClaim(job, 2));
+        Assert(!reopened.ConsumeWorkerClaim(job, 1) && !reopened.ConsumeWorkerClaim(job, 2));
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -2557,7 +2589,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 22, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 23, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -3175,7 +3207,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 22);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 23);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3675,7 +3707,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 22);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 23);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

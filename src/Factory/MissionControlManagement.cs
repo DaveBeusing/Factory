@@ -147,7 +147,8 @@ public static class MissionControlManager
     private static void ValidateExecutionCapabilities(List<string>? capabilities)
     {
         Require(capabilities is { Count: <= 16 } &&
-            capabilities.All(WorkerAuthorization.IsKnownCapability) &&
+            capabilities.All(capability => WorkerAuthorization.IsKnownCapability(capability) ||
+                BuilderExecutionProfile.IsRestriction(capability)) &&
             capabilities.Distinct(StringComparer.Ordinal).Count() == capabilities.Count,
             "Execution capabilities must be distinct supported capability names");
     }

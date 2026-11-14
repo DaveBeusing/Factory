@@ -18,7 +18,7 @@ public static class WorkerAuthorization
     public static HashSet<string>? RequiredCapabilities(
         ProjectInfo project, FactoryJob job, FactorySettings settings)
     {
-        if (settings.Runtime is not ("exec" or "app-server"))
+        if (!BuilderExecutionProfile.Allows(project, job) || settings.Runtime is not ("exec" or "app-server"))
             return null;
 
         var required = new HashSet<string>(StringComparer.Ordinal)

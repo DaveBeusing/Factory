@@ -39,10 +39,12 @@ public sealed class FactoryEngine
            if (!JobExecutionModes.Matches(j, _executionMode) || j.State != JobStates.Queued ||
                 !DependencyGraph.DependenciesSatisfied(j, s.Jobs) || s.Paused) return false;
            var selected = JobScheduler.Select(s, _settings.MaxParallel, _executionMode,
+                candidate => BuilderExecutionProfile.Allows(s.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
                 reservationTokens: _settings.GoalReservationTokens);
            if (!selected.Any(x => x.Id == id)) return false;
            JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true,
                 state: s, reservationTokens: _settings.GoalReservationTokens);
+           StateStore.RecordExecutionProvenance(db, tx, s.Projects.Single(p => p.Id == j.ProjectId), j, _settings);
            StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, _workerId, JobStates.Queued,
                j.State, LifecycleReason.LeaseClaimed, generation: j.ExecutionGeneration, state: s);
            s.Events.Add(new FactoryEvent { JobId = id, Type = "claimed", Message = _workerId });
@@ -86,7 +88,9 @@ public sealed class FactoryEngine
                 try { await running[id]; } catch (Exception ex) { _store.Event(id, "worker_error", ex.Message); }
                 running.Remove(id);
            }
-            var selected = JobScheduler.Select(_store.Read(), _settings.MaxParallel, _executionMode,
+            var snapshot = _store.Read();
+            var selected = JobScheduler.Select(snapshot, _settings.MaxParallel, _executionMode,
+                candidate => BuilderExecutionProfile.Allows(snapshot.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
                 reservationTokens: _settings.GoalReservationTokens);
            foreach (var j in selected)
             {
@@ -125,6 +129,8 @@ public sealed class FactoryEngine
         if (!JobExecutionModes.Matches(claimed, _executionMode))
             throw new InvalidOperationException("Job is not claimed by this runner for its execution mode");
         JobRecovery.Require(claimed, fence);
+        if (!BuilderExecutionProfile.Allows(_store.Read().Projects.Single(p => p.Id == claimed.ProjectId), claimed))
+            throw new InvalidOperationException("The runner cannot enforce the requested execution profile.");
 
         using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);

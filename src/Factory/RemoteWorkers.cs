@@ -97,6 +97,10 @@ public static class WorkerProtocol
                 if (requiresProviderLease && routes is null) continue;
                 JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
                     state: s, reservationTokens: settings.GoalReservationTokens);
+                StateStore.RecordExecutionProvenance(db, tx, project, job, settings,
+                    s.WorkerCapabilityProofs.Where(proof => proof.WorkerId == workerId &&
+                        proof.VerifiedAt <= DateTimeOffset.UtcNow && proof.VerifiedAt > DateTimeOffset.UtcNow.AddDays(-30) &&
+                        WorkerAuthorization.IsKnownCapability(proof.Capability) && !string.IsNullOrWhiteSpace(proof.Evidence)));
                 StateStore.RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, job.LeaseOwner, JobStates.Queued,
                     job.State, LifecycleReason.LeaseClaimed, generation: job.ExecutionGeneration, state: s);
                 RemoteProviderLease? providerLease = null;
@@ -407,7 +411,9 @@ public static class RemoteWorker
            }
             var claim = await claimResponse.Content.ReadFromJsonAsync<WorkerClaim>(Json.Options, ct)
                 ?? throw new IOException("Empty worker claim");
-            if (!JobExecutionModes.Matches(claim.Job, JobExecutionModes.Remote))
+            if (claim.WorkerId != workerId || claim.Job.ProjectId != claim.Project.Id ||
+                !BuilderExecutionProfile.Allows(claim.Project, claim.Job) ||
+                !JobExecutionModes.Matches(claim.Job, JobExecutionModes.Remote))
                 throw new InvalidOperationException("Remote worker received a job for another execution mode");
            var jobDir = Path.Combine(workspace, claim.Job.Id.ToString("N"));
            Directory.CreateDirectory(jobDir);
@@ -416,6 +422,9 @@ public static class RemoteWorker
                 TokensIn = claim.Job.TokensIn, TokensOut = claim.Job.TokensOut,
                 ExecutionGeneration = claim.Job.ExecutionGeneration,
                 LeaseToken = claim.Job.LeaseToken, ProviderLeaseId = claim.ProviderLeaseId };
+           if (!localState.ConsumeWorkerClaim(report.JobId, report.ExecutionGeneration)) continue;
+           using (var admitted = await http.PostAsJsonAsync("api/worker/heartbeat", report, ct))
+               if (!admitted.IsSuccessStatusCode) continue;
            using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
            using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
            var heartbeat = Task.Run(async () =>

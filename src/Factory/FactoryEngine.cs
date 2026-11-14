@@ -347,7 +347,7 @@ public sealed class FactoryEngine
     internal async Task<IntegrationProof> VerifyIntegrationAsync(Guid id, string? pullRequestUrl,
         GitHubWorkerResultVerifier verifier, CancellationToken ct = default,
         IRemoteBaseReader? remote = null, IIntegrationPullRequestReader? pullRequests = null,
-        bool coordinated = false)
+        bool coordinated = false, string? expectedMergeCommit = null)
     {
         var state = _store.Read();
         var job = state.Jobs.Single(j => j.Id == id);
@@ -371,7 +371,7 @@ public sealed class FactoryEngine
             throw new InvalidOperationException("Remote integration requires a verified pull request.");
 
         // Never accept a local-only ancestry result for a project with a configured remote.
-        var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct);
+        var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct, expectedMergeCommit);
         var pullEvidence = remoteIntegration || coordinated
             ? await verifier.VerifyMergedAsync(project, job, proof.IntegratedCommit, ct)
             : null;

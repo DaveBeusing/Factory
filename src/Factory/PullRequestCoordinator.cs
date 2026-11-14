@@ -75,8 +75,9 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         var pull = await ReadPullAsync(d, ct);
         if (pull.GetProperty("merged").GetBoolean())
         {
-            await RequireMergeReceiptAsync(d, pull, ct);
-            return await VerifyAfterMergeAsync(id, url, verifier, ct);
+            var mergeCommit = await RequireMergeReceiptAsync(d, pull, ct);
+            return await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, url, verifier, ct,
+                remote: new GitRemoteBaseReader(synchronize: true), coordinated: true, expectedMergeCommit: mergeCommit);
         }
 
         await RequireCurrentBaseAsync(d, ct);
@@ -105,7 +106,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         throw new InvalidOperationException("Draft publication requires a server-locked head branch without bypass actors.");
     }
 
-    internal async Task RequireMergeReceiptAsync(PullRequestDecision d, JsonElement pull, CancellationToken ct)
+    internal async Task<string> RequireMergeReceiptAsync(PullRequestDecision d, JsonElement pull, CancellationToken ct)
     {
         if (!pull.GetProperty("merged").GetBoolean())
             throw new InvalidOperationException("The signed base and head cannot be confirmed for this merge method.");
@@ -116,7 +117,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (commit.GetProperty("sha").GetString() != sha)
             throw new InvalidOperationException("GitHub returned a different merge commit.");
         var parents = commit.GetProperty("parents").EnumerateArray().Select(p => p.GetProperty("sha").GetString()).ToArray();
-        if (d.Method == "merge" && parents.SequenceEqual(new[] { d.BaseCommit, d.HeadCommit })) return;
+        if (d.Method == "merge" && parents.SequenceEqual(new[] { d.BaseCommit, d.HeadCommit })) return sha;
         if (d.Method is "squash" or "rebase" && parents.Length == 1)
         {
             // The supported linear forms require the reviewed head to include the signed base.
@@ -130,19 +131,36 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
                 if (count is > 0 and <= 100)
                 {
                     var parent = parents[0];
+                    var sourceParent = original.GetProperty("parents")[0].GetProperty("sha").GetString();
                     for (var i = 1; i < count && parent is not null && IntegrationVerifier.IsCommitSha(parent); i++)
                     {
-                        var item = await ReadAsync(["api", $"repos/{d.Repository}/git/commits/{parent}"], ct);
-                        var lineage = item.GetProperty("parents");
-                        if (item.GetProperty("sha").GetString() != parent || lineage.GetArrayLength() != 1)
-                            throw new InvalidOperationException("GitHub returned invalid rebase lineage.");
-                        parent = lineage[0].GetProperty("sha").GetString();
+                        if (sourceParent is null || sourceParent == d.BaseCommit || !IntegrationVerifier.IsCommitSha(sourceParent))
+                            throw new InvalidOperationException("The reviewed rebase lineage is incomplete.");
+                        var rewritten = await ReadLinearCommitAsync(d.Repository, parent, ct);
+                        var reviewed = await ReadLinearCommitAsync(d.Repository, sourceParent, ct);
+                        if (rewritten.Tree != reviewed.Tree)
+                            throw new InvalidOperationException("A rebased commit tree differs from its reviewed counterpart.");
+                        parent = rewritten.Parent;
+                        sourceParent = reviewed.Parent;
                     }
-                    if (parent == d.BaseCommit) return;
+                    if (parent == d.BaseCommit &&
+                        (d.Method == "squash" || (original.GetProperty("parents").GetArrayLength() == 1 && sourceParent == d.BaseCommit)))
+                        return sha;
                 }
             }
         }
         throw new InvalidOperationException("The resulting merge did not use the signed base and head.");
+    }
+
+    private async Task<(string? Parent, string? Tree)> ReadLinearCommitAsync(string repository, string sha, CancellationToken ct)
+    {
+        var commit = await ReadAsync(["api", $"repos/{repository}/git/commits/{sha}"], ct);
+        var parents = commit.GetProperty("parents");
+        var tree = commit.GetProperty("tree").GetProperty("sha").GetString();
+        if (commit.GetProperty("sha").GetString() != sha || parents.GetArrayLength() != 1 ||
+            tree is null || !IntegrationVerifier.IsCommitSha(tree))
+            throw new InvalidOperationException("GitHub returned invalid rebase lineage.");
+        return (parents[0].GetProperty("sha").GetString(), tree);
     }
 
     private async Task RequireStrictRulesAsync(PullRequestDecision d, CancellationToken ct)
@@ -179,9 +197,33 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             required[0].GetProperty("integration_id").GetInt64() != 15368)
             throw new InvalidOperationException("The PR-only check must be explicitly required from GitHub Actions.");
         var path = $".github/workflows/{d.WorkflowFile}";
+        var workflow = await ReadAsync(["api", $"repos/{d.Repository}/actions/workflows/{d.WorkflowFile}"], ct);
+        if (workflow.GetProperty("path").GetString() != path || workflow.GetProperty("state").GetString() != "active")
+            throw new InvalidOperationException("The required workflow is not active at the authorized path.");
+        var workflowId = workflow.GetProperty("id").GetInt64();
+        var history = await ReadAsync(["api", $"repos/{d.Repository}/actions/workflows/{workflowId}/runs?event=pull_request&status=success&per_page=1"], ct);
+        var runs = history.GetProperty("workflow_runs");
+        if (runs.GetArrayLength() != 1 || runs[0].GetProperty("workflow_id").GetInt64() != workflowId ||
+            runs[0].GetProperty("event").GetString() != "pull_request")
+            throw new InvalidOperationException("The required workflow has no verifiable PR run.");
+        var runId = runs[0].GetProperty("id").GetInt64();
+        var suiteId = runs[0].GetProperty("check_suite_id").GetInt64();
+        var suite = await ReadAsync(["api", $"repos/{d.Repository}/check-suites/{suiteId}/check-runs?per_page=100"], ct);
+        if (!suite.GetProperty("check_runs").EnumerateArray().Any(run =>
+            run.GetProperty("app").GetProperty("id").GetInt64() == 15368 &&
+            run.GetProperty("name").GetString() == project.Checks[0].Name &&
+            run.GetProperty("conclusion").GetString() == "success"))
+            throw new InvalidOperationException($"Workflow run {runId} did not emit the required check from GitHub Actions.");
+        var historySha = runs[0].GetProperty("head_sha").GetString();
+        if (historySha is null || !IntegrationVerifier.IsCommitSha(historySha))
+            throw new InvalidOperationException("Workflow history has an invalid source commit.");
+        var historicalFile = await ReadAsync(["api", $"repos/{d.Repository}/contents/{path}?ref={historySha}"], ct);
+        var hostedBlob = historicalFile.GetProperty("sha").GetString();
         foreach (var sha in new[] { d.BaseCommit, d.HeadCommit })
         {
             var file = await ReadAsync(["api", $"repos/{d.Repository}/contents/{path}?ref={sha}"], ct);
+            if (hostedBlob is null || !IntegrationVerifier.IsCommitSha(hostedBlob) || file.GetProperty("sha").GetString() != hostedBlob)
+                throw new InvalidOperationException("The required workflow differs from the verified PR run.");
             var yaml = Encoding.UTF8.GetString(Convert.FromBase64String(file.GetProperty("content").GetString()!));
             // Accept only the supported explicit trigger form. Other YAML forms require branch CI.
             var trigger = System.Text.RegularExpressions.Regex.Match(yaml, @"(?m)^on:[ \t]*\r?\n((?:[ \t]+[^\r\n]+\r?\n)+)");
@@ -227,12 +269,6 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
                 latest.GetProperty("conclusion").GetString() != "success")
                 throw new InvalidOperationException("Trusted branch CI is missing or unsuccessful: " + name);
         }
-    }
-
-    private async Task<IntegrationProof> VerifyAfterMergeAsync(Guid id, string url, GitHubWorkerResultVerifier verifier, CancellationToken ct)
-    {
-        return await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, url, verifier, ct,
-            remote: new GitRemoteBaseReader(synchronize: true), coordinated: true);
     }
 
     private async Task RequireMergeChecksAsync(PullRequestDecision d, ProjectInfo project, FactoryJob job, string branch,
@@ -296,24 +332,6 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
 
     internal static string ScopeRevision(FactoryJob job) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Stringify(job.ExpectedPaths))));
-
-    private void RequireReservation(PullRequestDecision d) =>
-        store.Change((_, db, tx) =>
-        {
-            using var query = db.CreateCommand();
-            query.Transaction = tx;
-            query.CommandText = """
-                SELECT reference FROM lifecycle_audit WHERE entity_id=$id AND entity_kind='publication-decision';
-                """;
-            query.Parameters.AddWithValue("$id", d.JobId.ToString());
-            using var rows = query.ExecuteReader();
-            while (rows.Read())
-            {
-                var prior = JsonSerializer.Deserialize<SignedPullRequestDecision>(rows.GetString(0), Json.Options)?.Decision;
-                if (prior is not null && (prior with { ExpiresAt = d.ExpiresAt }) == d) return true;
-            }
-            throw new InvalidOperationException("No matching merge reservation exists.");
-        });
 
     private void Reserve(SignedPullRequestDecision signed, FactoryJob before, ProjectInfo project)
     {

@@ -1817,6 +1817,7 @@ await TestAsync("Hosted merge receipts require signed base lineage and reviewed 
             Sha('a'), Sha('b'), "publisher", "merge", "squash", 1, DateTimeOffset.UtcNow.AddMinutes(5), "");
         var parents = new[] { Sha('a') };
         var tree = Sha('e');
+        var intermediateTree = Sha('e');
         var coordinator = new PullRequestCoordinator(new StateStore(home.FullName), new FactorySettings(), (args, _, _) =>
         {
             var endpoint = args[1];
@@ -1826,15 +1827,24 @@ await TestAsync("Hosted merge receipts require signed base lineage and reviewed 
             }) : Json.Stringify(new
             {
                 sha = endpoint.Split('/').Last(),
-                tree = new { sha = endpoint.EndsWith(Sha('c')) ? tree : Sha('e') },
-                parents = (endpoint.EndsWith(Sha('c')) ? parents : new[] { Sha('a') }).Select(sha => new { sha })
+                tree = new { sha = endpoint.EndsWith(Sha('c')) ? tree : endpoint.EndsWith(Sha('d')) ? intermediateTree : Sha('e') },
+                parents = (endpoint.EndsWith(Sha('c')) ? parents :
+                    endpoint.EndsWith(Sha('b')) ? new[] { Sha('9') } : new[] { Sha('a') }).Select(sha => new { sha })
             });
             return Task.FromResult(new CommandResult(0, result, ""));
         });
         using var pull = System.Text.Json.JsonDocument.Parse(Json.Stringify(new { merged = true, merge_commit_sha = Sha('c') }));
-        await coordinator.RequireMergeReceiptAsync(decision, pull.RootElement, CancellationToken.None);
+        Assert(await coordinator.RequireMergeReceiptAsync(decision, pull.RootElement, CancellationToken.None) == Sha('c'));
         parents = [Sha('d')];
-        await coordinator.RequireMergeReceiptAsync(decision with { Method = "rebase" }, pull.RootElement, CancellationToken.None);
+        Assert(await coordinator.RequireMergeReceiptAsync(decision with { Method = "rebase" }, pull.RootElement, CancellationToken.None) == Sha('c'));
+        intermediateTree = Sha('8');
+        try
+        {
+            await coordinator.RequireMergeReceiptAsync(decision with { Method = "rebase" }, pull.RootElement, CancellationToken.None);
+            throw new Exception("A changed intermediate tree was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("reviewed counterpart")) { }
+        intermediateTree = Sha('e');
         tree = Sha('f');
         try
         {
@@ -2856,6 +2866,13 @@ await TestAsync("Merged squash PR requires matching metadata and reachable remot
         var proof = await IntegrationVerifier.VerifyAsync(project, job, remote,
             new FixedIntegrationPullReader(merged));
         Assert(proof.Source == "remote-merged-pr" && proof.IntegratedCommit == mergeSha);
+        try
+        {
+            await IntegrationVerifier.VerifyAsync(project, job, remote, new FixedIntegrationPullReader(merged),
+                expectedMergeCommit: new string('e', 40));
+            throw new Exception("A changed merge receipt was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("verified receipt")) { }
 
         async Task Reject(MergedPullRequest candidate)
         {

@@ -102,7 +102,10 @@ public sealed class JobScheduler
             var project = state.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
            if (project == null || project.Status != "active") { decisions?.Add(new(job.Id, "project_inactive")); continue; }
            if (counts.GetValueOrDefault(job.ProjectId) >= project.MaxParallel) { decisions?.Add(new(job.Id, "project_capacity")); continue; }
-           var blocker = active.Concat(chosen).FirstOrDefault(j => DependencyGraph.Conflict(job, j));
+           var blocker = state.Jobs.Where(j => j.Id != job.Id &&
+                (j.LeaseOwner.Length != 0 || j.State == JobStates.Blocked && j.Stage is "reconcile" or "interrupted_git"))
+                .OrderBy(j => j.Id).Concat(active).Concat(chosen)
+                .FirstOrDefault(j => DependencyGraph.Conflict(job, j));
            if (blocker is not null) { decisions?.Add(new(job.Id, "ownership_conflict", blocker.Id)); continue; }
            chosen.Add(job);
            decisions?.Add(new(job.Id, "eligible"));

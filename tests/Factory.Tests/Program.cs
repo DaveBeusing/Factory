@@ -1460,6 +1460,12 @@ Test("Scheduler serializes shared resources and explains the decision", () =>
     Assert(JobScheduler.Select(state, 4).Single().Id == other.Id);
     first.SharedResources = ["unknown"];
     Assert(JobScheduler.Select(state, 4).Count == 0);
+    first.LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(-1);
+    Assert(JobScheduler.Select(state, 4).Count == 0);
+    first.LeaseOwner = "";
+    first.State = JobStates.Blocked;
+    first.Stage = "reconcile";
+    Assert(JobScheduler.Select(state, 4).Count == 0);
 });
 
 

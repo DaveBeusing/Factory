@@ -314,10 +314,14 @@ public sealed class FactoryEngine
             var pr = await GitOperations.PublishAsync(p, _store.Job(id), ct);
             EnsureOwned(id, fence);
             UpdateOwned(id, fence, x => x.PrUrl = pr);
-            Stage(id, fence, JobStates.PrReady, "pr");
         }
-        else Stage(id, fence,JobStates.CompletedLocal, "await_manual_integration");
-        foreach (var plugin in _plugins) await plugin.AfterJobAsync(p, _store.Job(id), ct);
+        var ready = j.Mode == "remote" && _settings.AllowPush;
+        var outcome = _store.Job(id);
+        outcome.State = ready ? JobStates.PrReady : JobStates.CompletedLocal;
+        outcome.Stage = ready ? "pr" : "await_manual_integration";
+        foreach (var plugin in _plugins) await plugin.AfterJobAsync(p, outcome, ct);
+        EnsureOwned(id, fence);
+        Stage(id, fence, outcome.State, outcome.Stage);
     }
 
     public async Task<IntegrationProof> VerifyIntegrationAsync(Guid id, CancellationToken ct = default,
@@ -326,7 +330,7 @@ public sealed class FactoryEngine
         var state = _store.Read();
         var job = state.Jobs.Single(j => j.Id == id);
         var project = state.Projects.Single(p => p.Id == job.ProjectId);
-        if (job.State is not (JobStates.CompletedLocal or JobStates.PrReady) || job.Integrated)
+        if (job.State is not (JobStates.CompletedLocal or JobStates.PrReady) || job.Integrated || job.LeaseOwner.Length != 0)
             throw new InvalidOperationException("Job is not eligible for integration verification");
 
         // Never accept a local-only ancestry result for a project with a configured remote.
@@ -336,7 +340,7 @@ public sealed class FactoryEngine
         {
             var current = s.Jobs.Single(j => j.Id == id);
             var currentProject = s.Projects.Single(p => p.Id == job.ProjectId);
-            if (current.State != job.State || current.Integrated ||
+            if (current.State != job.State || current.Integrated || current.LeaseOwner.Length != 0 ||
                 current.Mode != job.Mode || current.ProjectId != job.ProjectId ||
                 current.HeadSha != job.HeadSha || current.Branch != job.Branch ||
                 current.PrUrl != job.PrUrl ||

@@ -80,8 +80,7 @@ public static class JobRecovery
             var ids = new List<Guid>();
             foreach (var job in s.Jobs.Where(j => (mode is null || j.Mode == mode) &&
                 !string.IsNullOrEmpty(j.LeaseOwner) &&
-                j.LeaseUntil <= DateTimeOffset.UtcNow &&
-                JobStates.Active.Contains(j.State)))
+                j.LeaseUntil <= DateTimeOffset.UtcNow))
             {
                 RemoteProviderRouting.HoldTurns(s, job, "Remote worker lease expired");
                 GoalBudgetLedger.Hold(s, job, "expired worker lease");

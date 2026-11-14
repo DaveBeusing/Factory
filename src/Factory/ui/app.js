@@ -353,6 +353,38 @@ function renderPlans(){
  ${planProject?`<button class="button button-muted" data-act="open-project-analysis" data-id="${esc(planProject)}">Project review</button>${projectProviderCapacity(planProject)}`:''}</div></section>`+
  `<div class="cards-list">${cards||empty('route','No goals in this view','Create a draft goal to plan its work packages.')}</div>`;
 }
+let decisionProject='', decisionRequest=0;
+function renderDecisions(){
+ return header('Decisions','Inspect issue intake, review and integration evidence.')+
+  (state.projects.length?`<section class="card"><div class="card-body"><label for="decision-project">Project</label>
+  <select id="decision-project"><option value="">Choose a project</option>${state.projects.map(p=>`<option value="${esc(p.id)}" ${p.id===decisionProject?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
+  <button class="button button-muted" data-act="decisions-refresh">Refresh</button>
+  <div id="decision-evidence" aria-live="polite"></div></div></section>`:'<p>No registered projects.</p>');
+}
+async function loadDecisionEvidence(){
+ const target=$('decision-evidence'), id=decisionProject, request=++decisionRequest;
+ if(!target)return;
+ if(!id){target.textContent='Choose a project to view its decisions.';return}
+ target.textContent='Loading decision evidence…';
+ try{
+  const data=await api('projects/'+id+'/decision-evidence');
+  if(request!==decisionRequest||target!==$('decision-evidence'))return;
+  target.innerHTML=`<h3>Effective policy</h3><dl><dt>Issue intake</dt><dd>${esc(data.intakePolicy.rule)} · ${esc(data.intakePolicy.revision)}</dd>
+  <dt>Plan adoption</dt><dd>${esc(data.planPolicy.rule)} · ${esc(data.planPolicy.revision)}</dd></dl>
+  <h3>Issue intake decisions</h3>${data.intake.length?`<ul>${data.intake.map(i=>`<li><strong>#${esc(i.number)} ${esc(i.title)}</strong> · ${esc(i.decision)}<p>${esc(i.reason)}</p></li>`).join('')}</ul>`:'<p>No recorded intake decisions.</p>'}
+  <h3>Review and integration</h3>${data.jobs.length?data.jobs.map(j=>`<details><summary>${esc(j.title)} · ${esc(j.status)}</summary>
+   <p>Head <code>${esc(j.headSha||'Unknown')}</code> · Remaining review cycles ${esc(j.remaining)}</p>
+   <p>Independent reviewer ${esc(j.reviewer||'Unknown')}${j.reviewerSession?` · ${esc(j.reviewerSession)}`:''}</p>
+   ${safeUrl(j.prUrl)?`<p><a href="${esc(safeUrl(j.prUrl))}">View pull request</a></p>`:''}
+   ${j.integrated?`<p>Verified integration commit <code>${esc(j.integrated)}</code></p>`:j.mergedCommit?`<p>GitHub merge commit <code>${esc(j.mergedCommit)}</code>. Integration verification pending.</p>`:''}
+   ${j.blockers.length?`<ul>${j.blockers.map(reason=>`<li>${esc(reason)}</li>`).join('')}</ul>`:''}
+   ${j.cycles.map(c=>`<p>Cycle ${esc(c.cycle)} · ${c.complete?'Recorded':'Pending'} · ${esc(c.head||'Unknown head')}${c.reviews.map(r=>` · ${esc(r.role)} ${esc(r.verdict)} (${esc(r.assurance)})`).join('')}</p>`).join('')}
+   ${['completed_local','pr_ready'].includes(j.state)?`<button class="button button-muted" data-act="decision-review" data-id="${esc(j.id)}">Submit signed review</button>
+   <button class="button button-muted" data-act="decision-publication" data-id="${esc(j.id)}">Submit publication decision</button>`:''}</details>`).join(''):'<p>No recorded work packages.</p>'}`;
+ }catch(error){
+  if(request===decisionRequest&&target===$('decision-evidence'))target.textContent='Decision evidence unavailable: '+error.message;
+ }
+}
 function renderJobs(){const items=filtered(state.jobs,['title','description','state','risk']);return header('Jobs','Inspect execution, manage priority and safely control work packages.','create-job','Create job')+`<section class="card">${toolbar('jobs',['queued','preparing','building','gating','reviewing','reworking','awaiting_approval','pr_ready','completed_local','integrated','paused','stopped','cancelled','failed','blocked'])}${items.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(items.slice().reverse())):empty('layers','No matching jobs','Create a work package or adopt an approved plan.','create-job','Create job')}</section>`}
 function renderWorkers(){const w=state.workers;return header('Workers','Monitor health and control remote-worker admission. Drain/disable never force-kills a running process.','create-worker','Register worker')+`<div class="grid metrics-grid">${metric('Registered',w.length,'Known workers','cpu')}${metric('Online',w.filter(workerActive).length,'Heartbeat < 20 seconds','activity')}${metric('Draining',w.filter(x=>x.draining).length,'No new work assigned','pause')}${metric('Available',w.filter(x=>x.enabled&&!x.draining&&workerActive(x)).length,'Eligible for claims','check')}</div><div class="cards-list">${w.length?w.map(x=>`<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('cpu')}</span><div><div class="entity-name">${esc(x.id)}</div><div class="entity-sub">${esc(x.platform)}</div></div></div><div class="entity-body"><div class="worker-heartbeat"><span class="live-dot ${workerActive(x)?'':'offline'}"></span>${workerActive(x)?'Live heartbeat':'Heartbeat unavailable'} · ${esc(relative(x.heartbeat))}</div><p>Admission: ${x.enabled?(x.draining?'Draining':'Enabled'):'Disabled'}</p></div><div class="entity-foot">${badge(!x.enabled?'disabled':x.draining?'draining':workerActive(x)?'online':'offline')}<div class="tiny-actions"><button class="tiny-button" data-inspect="worker:${encodeURIComponent(x.id)}">Inspect</button><button class="tiny-button" data-act="worker-edit" data-id="${encodeURIComponent(x.id)}">Edit</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${managedWorkers.includes(x.id)?'stop':'start'}">${managedWorkers.includes(x.id)?'Stop local':'Start local'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${x.draining||!x.enabled?'enable':'drain'}">${x.draining||!x.enabled?'Enable':'Drain'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:disable" ${!x.enabled?'disabled':''}>Disable</button></div></div></div>`).join(''):empty('cpu','No registered workers','Register a remote worker, then start it with the same ID to track its heartbeat.','create-worker','Register worker')}</div>`}
 function renderQueue(){const queued=state.jobs.filter(j=>j.state==='queued');const active=state.jobs.filter(j=>['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state));const waiting=queued.filter(j=>j.dependsOn.some(dep=>!state.jobs.some(o=>o.id===dep&&o.integrated)));return header('Queue & scheduling','Control admission, prioritize work and inspect dependency blockers.')+`<div class="overview-hero"><div class="overview-hero-left"><div class="hero-orb">${ico('queue')}</div><div><h2>${state.paused?'Queue paused':'Scheduler ready'}</h2><p>${queued.length} queued · ${active.length} active · ${waiting.length} waiting for dependencies</p></div></div><div class="queue-controls"><button class="button button-primary" data-act="queue-run">${ico('play')} Run</button><button class="button button-muted" data-act="queue-pause">${ico('pause')} Pause</button><button class="button button-muted" data-act="queue-resume">${ico('refresh')} Resume</button><button class="button button-danger" data-act="queue-stop">${ico('stop')} Stop</button></div></div><div class="grid metrics-grid">${metric('Ready or queued',queued.length,'Eligible after constraints','layers')}${metric('Active',active.length,'Working or validating','activity')}${metric('Waiting dependencies',waiting.length,'Must integrate predecessors','route')}${metric('Global concurrency',settings.maxParallel??'—','Configured worker slots','cpu')}</div>${card('Work schedule','Prioritized by eligibility and conflict',queued.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(queued.slice().sort((a,b)=>b.priority-a.priority))):empty('check','Queue is empty','No pending jobs. Add a job or adopt a plan.','create-job','Add job'))}${card('In flight','Active jobs continue during queue pause',active.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(active)):empty('activity','Nothing running','Start the queue when jobs are ready.'),null,'','stacked-card')}`}
@@ -851,12 +883,14 @@ function render(){
   document.querySelectorAll('[data-count]').forEach(el=>el.textContent='');
   return;
  }
-const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals,analysis:renderAnalysis,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings};const next=(renders[view]||renderOverview)();
+const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals,analysis:renderAnalysis,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings,decisions:renderDecisions};const next=(renders[view]||renderOverview)();
  const mainChanged=next!==renderedMain;
  if(mainChanged){$('main').innerHTML=next;renderedMain=next;}
  for(const name of ['projects','goals','jobs','workers'])document.querySelectorAll(`[data-count="${name}"]`).forEach(el=>el.textContent=(state[name]||[]).length||'');
   document.querySelectorAll('[data-count="recovery"]').forEach(el=>el.textContent=recoveryCandidates().length||'');
  if(!mainChanged)return;
+ const decisions=$('decision-project');
+ if(decisions){decisions.addEventListener('change',event=>{decisionProject=event.target.value;loadDecisionEvidence()});loadDecisionEvidence()}
  const projectFilter=$('plan-project');
  if(projectFilter)projectFilter.addEventListener('change',e=>{planProject=e.target.value;render();$('plan-project').focus()});
  const selector=$('analysis-project');
@@ -1306,6 +1340,22 @@ function preflightDetails(preflight){
  ${section('Open issues',links(preflight.openIssues),preflight.issuesChecked?'Inventory checked':preflight.issueCheckNote||'Inventory unchecked')}`;
 }
 async function act(action,id,index,revision){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'project-providers':formProjectProviders(id);break;
+ case'decisions-refresh':await loadDecisionEvidence();break;
+ case'decision-review':
+ case'decision-publication':{
+  const review=action==='decision-review';
+  const job=state.jobs.find(j=>j.id===id);
+  if(!job)throw Error('Work package is no longer available. Refresh evidence.');
+  openForm(review?'Submit signed review':'Submit publication decision',job.title,
+    field('decision','Signed JSON','','code'),async form=>{
+    const parsed=JSON.parse(values(form).decision);
+     if((review?parsed.approval:parsed.decision)?.jobId!==id)throw Error('The signed decision is for another work package.');
+     const result=await api(review?'review-approvals':'jobs/'+id+'/publication','POST',parsed);
+     notify(result?.url?'Draft pull request created: '+result.url:'Decision accepted');
+     await loadDecisionEvidence();
+    },'Submit decision');
+  break;
+ }
  case'analysis-run':await startProjectReview();break;case'analysis-goal':createReviewGoal(id);break;case'provider-reconcile':formProviderReconciliation(id);break;
  case'provider-recover':formProviderHostRecovery(id);break;
  case'linked-provider-usage':closeInspector();nav('usage');await fetchProviders();break;

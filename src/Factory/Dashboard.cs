@@ -316,6 +316,8 @@ public static class DashboardHost
             Results.Ok(JobRecovery.ReconcileLocal(store, id, input.Reviewed, input.Reason)));
         app.MapPost("/api/jobs/{id:guid}/release-resources", (Guid id, ResourceReleaseInput input) =>
             Results.Ok(JobRecovery.ReleaseResources(store, id, input)));
+        app.MapGet("/api/projects/{projectId:guid}/decision-evidence", (Guid projectId) =>
+            Results.Ok(store.ReadDecisionEvidence(projectId, settings)));
         app.MapPost("/api/review-approvals", (SignedReviewApproval approval) =>
         {
             store.RecordTrustedReview(approval);

@@ -111,6 +111,27 @@ browserTest('connects through the sidebar and opens planning and capacity views'
   await page.getByRole('heading', { name: 'Provider capacity' }).waitFor();
 });
 
+browserTest('loads project decisions and protects evidence at the API boundary', async ({ page, nav, api }) => {
+  const state = await api('state');
+  const project = state.projects[0];
+  await nav.getByRole('button', { name: 'Decisions' }).press('Enter');
+  await page.getByLabel('Project', { exact: true }).selectOption(project.id);
+  await page.getByRole('heading', { name: 'Effective policy' }).waitFor();
+  await page.getByText('No recorded intake decisions.', { exact: true }).waitFor();
+  await page.getByText('No recorded work packages.', { exact: true }).waitFor();
+  const response = await page.request.get(new URL('/api/projects/' + project.id + '/decision-evidence', page.url()).href);
+  assert.equal(response.status(), 401);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole('button', { name: 'Refresh', exact: true }).press('Enter');
+  await page.getByRole('heading', { name: 'Effective policy' }).waitFor();
+}, async home => {
+  const repo = path.join(home, 'repo');
+  await mkdir(repo);
+  execFileSync('git', ['init', '-b', 'master', repo]);
+  execFileSync('dotnet', [path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll'), 'init', repo, '--name', 'Decisions fixture'],
+    { env: { ...process.env, FACTORY_HOME: home } });
+});
+
 browserTest('keeps Mission Control layout, actions and version aligned', async ({ page, nav }) => {
   const dll = path.join(root, 'src/Factory/bin/Release/net10.0/Factory.dll');
   const expectedVersion = execFileSync('dotnet', [dll, 'version'], { encoding: 'utf8' }).trim().split('+')[0];

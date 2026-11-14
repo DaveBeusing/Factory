@@ -67,7 +67,17 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             if (!created.GetProperty("draft").GetBoolean() ||
                 created.GetProperty("base").GetProperty("sha").GetString() != d.BaseCommit)
                 throw new InvalidOperationException("The created PR differs from the authorized draft; reconcile it in GitHub.");
-            return new { url = created.GetProperty("html_url").GetString(), d.HeadCommit, draft = true };
+            var createdUrl = created.GetProperty("html_url").GetString() ?? "";
+            _ = GitHubWorkerResultVerifier.PullNumber(createdUrl, d.Repository);
+            store.Change((state, db, tx) =>
+            {
+                var current = state.Jobs.Single(candidate => candidate.Id == id);
+                StateStore.RecordLifecycle(db, tx, d.ProjectId, "publication-receipt", id, d.Account,
+                    "reserved", "created", LifecycleReason.PullRequestPrepared,
+                    Json.Stringify(new { url = createdUrl, d.HeadCommit, d.BaseCommit }), job.ExecutionGeneration, state);
+                return true;
+            });
+            return new { url = createdUrl, d.HeadCommit, draft = true };
         }
 
         var url = $"https://github.com/{d.Repository}/pull/{d.PullNumber}";
@@ -76,6 +86,21 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (pull.GetProperty("merged").GetBoolean())
         {
             var mergeCommit = await RequireMergeReceiptAsync(d, pull, ct);
+            var merged = new MergedPullRequest(true,
+                pull.GetProperty("base").GetProperty("repo").GetProperty("full_name").GetString() ?? "",
+                pull.GetProperty("head").GetProperty("repo").GetProperty("full_name").GetString() ?? "",
+                pull.GetProperty("base").GetProperty("ref").GetString() ?? "",
+                pull.GetProperty("head").GetProperty("ref").GetString() ?? "",
+                pull.GetProperty("head").GetProperty("sha").GetString() ?? "", mergeCommit);
+            var expected = new FactoryJob { Branch = branch, HeadSha = d.HeadCommit };
+            IntegrationVerifier.ValidateMergedPullRequest(merged, d.Repository, project, expected);
+            store.Change((state, db, tx) =>
+            {
+                StateStore.RecordLifecycle(db, tx, d.ProjectId, "publication-receipt", id, d.Account,
+                    "created", "merged", LifecycleReason.RemoteResultVerified,
+                    Json.Stringify(new { url, d.HeadCommit, d.BaseCommit, mergeCommit }), job.ExecutionGeneration, state);
+                return true;
+            });
             var author = pull.GetProperty("user").GetProperty("login").GetString();
             return await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, url, verifier, ct,
                 remote: new GitRemoteBaseReader(synchronize: true), coordinated: true, expectedMergeCommit: mergeCommit,

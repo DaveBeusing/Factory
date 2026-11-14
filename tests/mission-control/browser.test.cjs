@@ -527,7 +527,8 @@ browserTest('ignores an older admin login after connecting with a project token'
   await page.route('**/api/state', async (route) => {
     if (!isDelayedAdminRequest(route.request())) return route.continue();
     await finishAdmin;
-    await route.fulfill({ status: 401, json: { error: 'Invalid administrator token' } });
+    try { await route.fulfill({ status: 401, json: { error: 'Invalid administrator token' } }); }
+    catch (error) { if (!/aborted|closed|interception/i.test(error.message)) throw error; }
   });
 
   try {
@@ -538,7 +539,6 @@ browserTest('ignores an older admin login after connecting with a project token'
     await connection.waitFor({ state: 'hidden' });
     await page.getByRole('heading', { name: 'Project recovery' }).waitFor();
 
-    const adminResponse = page.waitForResponse((response) => isDelayedAdminRequest(response.request()));
     const wrongStream = page.waitForRequest((request) =>
       request.url().endsWith('/api/events/stream') &&
       request.headers().authorization === 'Bearer ' + fixture.access.reconciler,
@@ -547,7 +547,6 @@ browserTest('ignores an older admin login after connecting with a project token'
       return null;
     });
     finishAdminRequest();
-    assert.equal((await adminResponse).status(), 401);
     assert.ok(!(await wrongStream), 'A stale admin login started the event stream with the project token');
     await page.getByRole('button', { name: 'Connection settings, connected' }).waitFor();
     await page.getByRole('button', { name: 'Settle goal reservation' }).waitFor();

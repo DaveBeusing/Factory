@@ -103,6 +103,7 @@ async function connect(nextToken){
    settings={};usage=null;providerData=null;managedWorkers=[];
    projectReview=null;analysisProject='';reviewRequest++;reviewingProjects.clear();
    plansCache.clear();planGoals.clear();planProject='';planDraft=null;planGoal=null;planDraftGoal=null;
+   generatingPlans.clear();
    scopedPlanEditor=null;scopedPlanRequest++;
    condition('#usage-nav',false);
    lastHeartbeat=0;
@@ -409,11 +410,11 @@ async function loadDecisionEvidence(){
    ${safeUrl(j.historicalPrUrl)?`<p><a href="${esc(safeUrl(j.historicalPrUrl))}">Historical pull request</a></p>`:''}
    ${j.readinessBase?`<p>Readiness base <code>${esc(j.readinessBase)}</code> · Verified <time datetime="${esc(j.readinessObservedAt)}">${esc(dateTime(j.readinessObservedAt))}</time></p>`:''}
    ${j.integrated?`<p>Verified integration commit <code>${esc(j.integrated)}</code></p>`:j.mergedCommit?`<p>GitHub merge commit <code>${esc(j.mergedCommit)}</code>. Integration verification pending.</p>`:''}
-   ${j.historicalIntegration?`<p>Historical integration <code>${esc(j.historicalIntegration)}</code> · Target unverified for current project settings.</p>`:''}
+   ${j.historicalIntegration?`<p>Historical integration <code>${esc(j.historicalIntegration)}</code> · Target unverified for current project settings.</p><button class="button button-muted" data-act="decision-reverify" data-id="${esc(j.id)}">Reverify integration</button>`:''}
    ${j.blockers.length?`<ul>${j.blockers.map(reason=>`<li>${esc(reason)}</li>`).join('')}</ul>`:''}
    ${j.cycles.map(c=>`<p>Cycle ${esc(c.cycle)} · ${c.complete?'Recorded':'Pending'} · ${esc(c.head||'Unknown head')}${c.reviews.length?c.reviews.map(r=>` · ${esc(r.role)} ${esc(r.verdict)} (${esc(r.assurance)})`).join(''):' · Reviewer provenance unknown'}</p>`).join('')}
    ${['completed_local','pr_ready'].includes(j.state)?`<button class="button button-muted" data-act="decision-review" data-id="${esc(j.id)}">Submit signed review</button>
-   <button class="button button-muted" data-act="decision-publication" data-id="${esc(j.id)}">Submit publication decision</button>`:''}</details>`).join(''):'<p>No recorded work packages.</p>'}`;
+   <button class="button button-muted" data-act="decision-publication" data-id="${esc(j.id)}">Submit publication decision</button>`:j.historicalIntegration?`<button class="button button-muted" data-act="decision-publication" data-id="${esc(j.id)}">Submit signed re-verification</button>`:''}</details>`).join(''):'<p>No recorded work packages.</p>'}`;
  }catch(error){
   if(current())target.textContent='Decision evidence unavailable: '+error.message;
  }
@@ -1394,6 +1395,7 @@ function preflightDetails(preflight){
 }
 async function act(action,id,index,revision){switch(action){case'open-connection':$('connection-modal').showModal();break;case'create-project':formProject();break;case'project-providers':formProjectProviders(id);break;
  case'decisions-refresh':await loadDecisionEvidence();break;
+ case'decision-reverify':await verify(id);await loadDecisionEvidence();break;
  case'decision-review':
  case'decision-publication':{
   const review=action==='decision-review';
@@ -1422,13 +1424,14 @@ async function act(action,id,index,revision){switch(action){case'open-connection
  if(generatingPlans.has(id))break;
  if(plansCache.has(id)&&!confirm('Replace the saved plan with a new proposal?'))break;
  generatingPlans.add(id);render();
+ const revisionAtStart=connectionRevision;
  try{
   const expected=plansCache.get(id)?.revision||'00000000-0000-0000-0000-000000000000';
   const plan=await api('plans/'+id+'/generate?wait=true&planRevision='+encodeURIComponent(expected),'POST',{});
   plansCache.set(id,plan);
   notify('Plan generated');
   if(view==='plans')await act('plan-view',id);
- }finally{generatingPlans.delete(id);render();await fetchProviders()}
+ }finally{if(revisionAtStart===connectionRevision){generatingPlans.delete(id);render();await fetchProviders()}}
  break;}
  case'plan-edit':await planEditor(id);break;
  case'plan-preflight':{

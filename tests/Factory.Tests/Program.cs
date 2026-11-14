@@ -2207,7 +2207,7 @@ Test("Decision evidence treats legacy PR links as historical and returns readine
         Assert(!JobScheduler.Select(new StateStore(home.FullName).Read(), 1, JobExecutionModes.Local)
             .Any(candidate => candidate.Id == dependent.Id));
         using var historical = System.Text.Json.JsonDocument.Parse(Json.Stringify(new StateStore(home.FullName).ReadDecisionEvidence(project.Id, new())));
-        entry = historical.RootElement.GetProperty("jobs")[0];
+        entry = historical.RootElement.GetProperty("jobs").EnumerateArray().Single(item => item.GetProperty("id").GetGuid() == job.Id);
         Assert(entry.GetProperty("integrated").ValueKind == System.Text.Json.JsonValueKind.Null);
         Assert(entry.GetProperty("historicalIntegration").GetString() == merged);
     }
@@ -3165,6 +3165,20 @@ await TestAsync("Remote integration rejects unpushed local history and stale loc
         var proof = await engine.VerifyIntegrationAsync(job.Id);
         Assert(proof.Source == "remote-ancestry" && proof.IntegratedCommit == unpublished);
         Assert(store.Job(job.Id).Integrated);
+        var dependent = store.AddJob(new FactoryJob { ProjectId = project.Id, DependsOn = [job.Id] });
+        store.Change((_, db, tx) =>
+        {
+            using var query = db.CreateCommand();
+            query.Transaction = tx;
+            query.CommandText = "DELETE FROM lifecycle_audit WHERE entity_kind='integration-target' AND entity_id=$id;";
+            query.Parameters.AddWithValue("$id", job.Id.ToString());
+            Assert(query.ExecuteNonQuery() == 1);
+            return true;
+        });
+        Assert(store.Read().HistoricalIntegrations.Contains(job.Id));
+        Assert(!JobScheduler.Select(store.Read(), 1).Any(candidate => candidate.Id == dependent.Id));
+        await engine.VerifyIntegrationAsync(job.Id);
+        Assert(JobScheduler.Select(store.Read(), 1).Any(candidate => candidate.Id == dependent.Id));
 
         var other = Path.Combine(root, "other");
         Commands.Require(Commands.Run("git", ["clone", origin, other], root), "git clone");

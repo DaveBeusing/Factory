@@ -23,7 +23,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
     internal async Task<object> ExecuteAsync(Guid id, SignedPullRequestDecision signed, CancellationToken ct)
     {
         var d = signed.Decision ?? throw new ArgumentException("Missing project decision.");
-        if (d.Action is not ("draft" or "check" or "merge") || !settings.AllowPush ||
+        if (d.Action is not ("draft" or "check" or "merge" or "reverify") || !settings.AllowPush ||
             (d.Action == "merge" && !settings.AutoMerge))
             throw new InvalidOperationException("Publication or guarded merge is disabled.");
         ValidateSignature(signed);
@@ -31,7 +31,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         var project = store.Read().Projects.Single(p => p.Id == job.ProjectId);
         var branch = $"factory/{id:N}";
         ValidateTarget(d, job, project);
-        if (!store.IsReviewApproved(id))
+        if (d.Action == "reverify" ? !store.Read().HistoricalIntegrations.Contains(id) : !store.IsReviewApproved(id))
             throw new InvalidOperationException("A current signed independent review is required.");
 
         var account = await ReadAsync(["api", "user"], ct);
@@ -84,7 +84,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         var pull = await ReadPullAsync(d, ct);
         if (pull.GetProperty("merged").GetBoolean())
         {
-            if (d.Action != "merge")
+            if (d.Action is not ("merge" or "reverify"))
                 throw new InvalidOperationException("A signed merge verification decision is required for a merged pull request.");
             var mergeCommit = await RequireMergeReceiptAsync(d, pull, ct);
             var merged = new MergedPullRequest(true,
@@ -113,6 +113,9 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
                     return evidence;
                 });
         }
+
+        if (d.Action == "reverify")
+            throw new InvalidOperationException("Historical re-verification requires an already merged pull request.");
 
         await RequireCurrentBaseAsync(d, ct);
         if (repository.GetProperty("permissions").GetProperty("admin").GetBoolean())
@@ -392,7 +395,8 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         ValidateSignature(signed);
         var job = store.Job(id);
         ValidateTarget(d, job, store.Read().Projects.Single(p => p.Id == job.ProjectId));
-        if (!settings.AllowPush || (d.Action == "merge" && !settings.AutoMerge) || !store.IsReviewApproved(id))
+        var eligible = d.Action == "reverify" ? store.Read().HistoricalIntegrations.Contains(id) : store.IsReviewApproved(id);
+        if (!settings.AllowPush || (d.Action == "merge" && !settings.AutoMerge) || !eligible)
             throw new InvalidOperationException("Publication authorization changed during verification.");
     }
 

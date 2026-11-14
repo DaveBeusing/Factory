@@ -361,24 +361,25 @@ public sealed class FactoryEngine
         var project = state.Projects.Single(p => p.Id == job.ProjectId);
         if (job.State is not (JobStates.CompletedLocal or JobStates.PrReady) || job.Integrated || job.LeaseOwner.Length != 0)
             throw new InvalidOperationException("Job is not eligible for integration verification");
-        var signedRemote = job.Stage == "await_signed_remote_review";
-        if (signedRemote && !_store.IsReviewApproved(id))
+        var remoteIntegration = job.Mode == JobExecutionModes.Remote;
+        var signedRemoteHandoff = remoteIntegration && job.Stage == "await_signed_remote_review";
+        if (remoteIntegration && !_store.IsReviewApproved(id))
             throw new InvalidOperationException("An exact-commit signed remote review is required.");
         var originalPullUrl = job.PrUrl;
         var originalBranch = job.Branch;
-        if (signedRemote)
+        if (signedRemoteHandoff)
         {
             if (string.IsNullOrWhiteSpace(pullRequestUrl))
                 throw new InvalidOperationException("Supply the merged pull request for the signed remote commit.");
             job.PrUrl = pullRequestUrl;
             job.Branch = $"factory/{job.Id:N}";
         }
-        if (job.Mode == JobExecutionModes.Remote && string.IsNullOrWhiteSpace(job.PrUrl))
+        if (remoteIntegration && string.IsNullOrWhiteSpace(job.PrUrl))
             throw new InvalidOperationException("Remote integration requires a verified pull request.");
 
         // Never accept a local-only ancestry result for a project with a configured remote.
         var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct);
-        var pullEvidence = job.Mode == JobExecutionModes.Remote
+        var pullEvidence = remoteIntegration
             ? await verifier.VerifyMergedAsync(project, job, proof.IntegratedCommit, ct)
             : null;
         ct.ThrowIfCancellationRequested();
@@ -396,7 +397,7 @@ public sealed class FactoryEngine
                 (pullEvidence is not null &&
                     (!current.ExpectedPaths.SequenceEqual(job.ExpectedPaths) ||
                      ReviewPolicy.ProjectRevision(currentProject) != ReviewPolicy.ProjectRevision(project))) ||
-                (signedRemote &&
+                (remoteIntegration &&
                     (current.Stage != job.Stage || current.ExecutionGeneration != job.ExecutionGeneration ||
                      current.SessionId != job.SessionId ||
                      !StateStore.IsReviewApproved(db, tx, current, currentProject))))

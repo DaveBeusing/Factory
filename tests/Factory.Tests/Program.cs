@@ -3759,6 +3759,34 @@ await TestAsync("Merged remote PR evidence rejects pending CI, incomplete scope 
     await Reject("not verified");
 });
 
+await TestAsync("Legacy remote PR-ready jobs cannot integrate without signed approval", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-legacy-pr-ready-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo { Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob
+        {
+            ProjectId = project.Id, Mode = JobExecutionModes.Remote, State = JobStates.PrReady, Stage = "pr",
+            HeadSha = new string('a', 40), PrUrl = "https://github.com/example/repo/pull/1"
+        };
+        job.Branch = $"factory/{job.Id:N}";
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var reopened = new StateStore(home.FullName);
+        try
+        {
+            var verifier = new GitHubWorkerResultVerifier((_, _, _) =>
+                throw new Exception("GitHub verification ran before the signed approval gate."));
+            await new FactoryEngine(reopened, new FactorySettings()).VerifyIntegrationAsync(job.Id, null, verifier);
+            throw new Exception("Legacy PR-ready job passed without signed approval.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed remote review is required")) { }
+        Assert(!reopened.Job(job.Id).Integrated && !reopened.Read().VerifiedIntegrations.Contains(job.Id));
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 await TestAsync("Completed remote builds require a signed decision bound to the target", async () =>
 {
     var home = Directory.CreateTempSubdirectory("factory-signed-remote-");

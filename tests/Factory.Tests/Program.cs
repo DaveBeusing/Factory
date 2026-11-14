@@ -2153,6 +2153,41 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
     }
 });
 
+Test("Decision evidence treats legacy PR links as historical and returns readiness observation", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-decision-evidence-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo { Origin = "https://github.com/example/current" };
+        var job = new FactoryJob { ProjectId = project.Id, PrUrl = "https://github.com/example/old/pull/1",
+            HeadSha = new string('a', 40), State = JobStates.PrReady };
+        store.Change(state => { state.Projects.Add(project); state.Jobs.Add(job); });
+        var basis = new string('b', 40);
+        var currentUrl = "https://github.com/example/current/pull/2";
+        store.Change((state, db, tx) =>
+        {
+            StateStore.RecordLifecycle(db, tx, project.Id, "publication-receipt", job.Id, "fixture", "created", "ready",
+                LifecycleReason.RemoteResultVerified, Json.Stringify(new { url = currentUrl, headCommit = job.HeadSha,
+                    baseCommit = basis, projectRevision = ReviewPolicy.ProjectRevision(project), expiresAt = DateTimeOffset.UtcNow.AddMinutes(-1) }),
+                job.ExecutionGeneration, state);
+            return true;
+        });
+        using var observed = System.Text.Json.JsonDocument.Parse(Json.Stringify(store.ReadDecisionEvidence(project.Id, new())));
+        var entry = observed.RootElement.GetProperty("jobs")[0];
+        Assert(entry.GetProperty("readinessBase").GetString() == basis);
+        Assert(DateTimeOffset.TryParse(entry.GetProperty("readinessObservedAt").GetString(), out _));
+        Assert(entry.GetProperty("status").GetString() == "PR created");
+        store.Change(state => state.Projects.Single().Origin = "https://github.com/example/retargeted");
+        using var changed = System.Text.Json.JsonDocument.Parse(Json.Stringify(store.ReadDecisionEvidence(project.Id, new())));
+        entry = changed.RootElement.GetProperty("jobs")[0];
+        Assert(entry.GetProperty("status").GetString() == "No confirmed PR");
+        Assert(entry.GetProperty("prUrl").ValueKind == System.Text.Json.JsonValueKind.Null);
+        Assert(entry.GetProperty("historicalPrUrl").GetString() == currentUrl);
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {

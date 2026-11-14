@@ -111,7 +111,7 @@ browserTest('connects through the sidebar and opens planning and capacity views'
   await page.getByRole('heading', { name: 'Provider capacity' }).waitFor();
 });
 
-browserTest('loads project decisions and protects evidence at the API boundary', async ({ page, nav, api }) => {
+browserTest('loads project decisions and protects evidence at the API boundary', async ({ page, nav, api, connection }) => {
   const state = await api('state');
   const project = state.projects[0];
   await nav.getByRole('button', { name: 'Decisions' }).press('Enter');
@@ -124,6 +124,33 @@ browserTest('loads project decisions and protects evidence at the API boundary',
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: 'Refresh', exact: true }).press('Enter');
   await page.getByRole('heading', { name: 'Effective policy' }).waitFor();
+  await page.setViewportSize({ width: 1280, height: 900 });
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  let arrived;
+  const started = new Promise(resolve => { arrived = resolve; });
+  const endpoint = '**/api/projects/' + project.id + '/decision-evidence';
+  await page.route(endpoint, async route => {
+    const real = await route.fetch();
+    const data = await real.json();
+    data.intake = [{ number: 1, title: 'Old connection only', decision: 'accepted' }];
+    arrived();
+    await held;
+    await route.fulfill({ json: data });
+  });
+  await page.getByRole('button', { name: 'Refresh', exact: true }).click();
+  await started;
+  try {
+    await page.getByRole('button', { name: 'Connection settings, connected' }).click();
+    await connection.getByLabel('API token').fill('invalid-admin-token');
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await page.getByText('Invalid token or server unreachable', { exact: true }).waitFor();
+    const response = page.waitForResponse(r => r.url().endsWith('/decision-evidence'));
+    release();
+    await response;
+    await page.getByText('No registered projects.', { exact: true }).waitFor();
+    assert.equal(await page.getByText('Old connection only', { exact: false }).count(), 0);
+  } finally { release(); }
 }, async home => {
   const repo = path.join(home, 'repo');
   await mkdir(repo);

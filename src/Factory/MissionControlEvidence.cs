@@ -70,10 +70,13 @@ public sealed partial class StateStore
             if (integrated is null && !approved) blockers.Add("No current signed independent review.");
             if (integrated is null && remaining == 0 && !approved) blockers.Add("Review cycle limit reached.");
             using var published = Command(db, tx, """
-                SELECT reference,resulting_state FROM lifecycle_audit WHERE entity_id=$job AND project_id=$project
+                SELECT reference,resulting_state,at FROM lifecycle_audit WHERE entity_id=$job AND project_id=$project
                     AND entity_kind='publication-receipt' AND generation=$generation ORDER BY rowid DESC LIMIT 1;
                 """, ("$job", job.Id), ("$project", projectId), ("$generation", job.ExecutionGeneration));
-            var url = job.PrUrl;
+            string? url = null;
+            string? historicalPrUrl = string.IsNullOrWhiteSpace(job.PrUrl) ? null : job.PrUrl;
+            string? readinessBase = null;
+            string? readinessObservedAt = null;
             string? mergedCommit = null;
             var ready = false;
             using (var row = published.ExecuteReader())
@@ -84,21 +87,31 @@ public sealed partial class StateStore
                     doc.RootElement.TryGetProperty("projectRevision", out var revision) &&
                     revision.GetString() == ReviewPolicy.ProjectRevision(project))
                 {
-                    url = doc.RootElement.GetProperty("url").GetString() ?? url;
+                    url = doc.RootElement.GetProperty("url").GetString();
+                    if (url == historicalPrUrl) historicalPrUrl = null;
                     ready = row.GetString(1) == "ready" && approved &&
                         doc.RootElement.TryGetProperty("expiresAt", out var expires) && expires.GetDateTimeOffset() > DateTimeOffset.UtcNow;
-                    if (row.GetString(1) == "ready" && !ready) blockers.Add("PR readiness must be rechecked.");
+                    if (row.GetString(1) == "ready")
+                    {
+                        readinessBase = doc.RootElement.GetProperty("baseCommit").GetString();
+                        readinessObservedAt = row.GetString(2);
+                        if (!ready) blockers.Add("PR readiness must be rechecked.");
+                    }
                     if (doc.RootElement.TryGetProperty("mergeCommit", out var merged))
                         mergedCommit = merged.GetString();
                 }
-                else blockers.Add("The publication receipt is stale for this head or project policy.");
+                else
+                {
+                    historicalPrUrl = doc.RootElement.GetProperty("url").GetString() ?? historicalPrUrl;
+                    blockers.Add("The publication receipt is stale for this head or project policy.");
+                }
             }
             if (integrated is null && !settings.AllowPush) blockers.Add("Publication is disabled in controller settings.");
             var status = integrated is not null ? "verified integrated" :
                 mergedCommit is not null ? "merged" :
                 ready ? "PR ready at last verification" :
-                url.Length > 0 ? "PR created" : "No confirmed PR";
-            jobs.Add(new { job.Id, job.Title, job.State, job.HeadSha, prUrl = url,
+                !string.IsNullOrWhiteSpace(url) ? "PR created" : "No confirmed PR";
+            jobs.Add(new { job.Id, job.Title, job.State, job.HeadSha, prUrl = url, historicalPrUrl, readinessBase, readinessObservedAt,
                 reviewApproved = approved, reviewer = approval?.Reviewer, reviewerSession = approval?.ReviewerSession,
                 remaining, cycles, integrated, mergedCommit, status, blockers });
         }

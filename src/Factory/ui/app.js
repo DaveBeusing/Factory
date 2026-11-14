@@ -87,6 +87,11 @@ async function connect(nextToken){
    lastHeartbeat=0;
    connected=false;
    health=null;
+   lastStateUpdate=0;
+   state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};
+   decisionProject='';
+   decisionRequest++;
+   $('decision-evidence')?.replaceChildren();
    recoveryRequest++;
    projectRecovery={projects:[],selected:'',loading:false};
    scopedPlanning={projects:[],selected:''};
@@ -362,13 +367,14 @@ function renderDecisions(){
   <div id="decision-evidence" aria-live="polite"></div></div></section>`:'<p>No registered projects.</p>');
 }
 async function loadDecisionEvidence(){
- const target=$('decision-evidence'), id=decisionProject, request=++decisionRequest;
+ const target=$('decision-evidence'), id=decisionProject, request=++decisionRequest, revision=connectionRevision;
+ const current=()=>revision===connectionRevision&&request===decisionRequest&&target===$('decision-evidence');
  if(!target)return;
  if(!id){target.textContent='Choose a project to view its decisions.';return}
  target.textContent='Loading decision evidence…';
  try{
   const data=await api('projects/'+id+'/decision-evidence');
-  if(request!==decisionRequest||target!==$('decision-evidence'))return;
+  if(!current())return;
   target.innerHTML=`<h3>Effective policy</h3><dl><dt>Issue intake</dt><dd>${esc(data.intakePolicy.rule)} · ${esc(data.intakePolicy.revision)}</dd>
   <dt>Plan adoption</dt><dd>${esc(data.planPolicy.rule)} · ${esc(data.planPolicy.revision)}</dd></dl>
   <h3>Issue intake decisions</h3>${data.intake.length?`<ul>${data.intake.map(i=>`<li><strong>#${esc(i.number)} ${esc(i.title)}</strong> · ${esc(i.decision)}<p>${esc(i.reason)}</p><small>Policy ${esc(i.policyRevision)} · ${esc(dateTime(i.at))}</small></li>`).join('')}</ul>`:'<p>No recorded intake decisions.</p>'}
@@ -377,13 +383,15 @@ async function loadDecisionEvidence(){
    <p>Head <code>${esc(j.headSha||'Unknown')}</code> · Remaining review cycles ${esc(j.remaining)}</p>
    <p>Independent reviewer ${esc(j.reviewer||'Unknown')}${j.reviewerSession?` · ${esc(j.reviewerSession)}`:''}</p>
    ${safeUrl(j.prUrl)?`<p><a href="${esc(safeUrl(j.prUrl))}">View pull request</a></p>`:''}
+   ${safeUrl(j.historicalPrUrl)?`<p><a href="${esc(safeUrl(j.historicalPrUrl))}">Historical pull request</a></p>`:''}
+   ${j.readinessBase?`<p>Readiness base <code>${esc(j.readinessBase)}</code> · Verified <time datetime="${esc(j.readinessObservedAt)}">${esc(dateTime(j.readinessObservedAt))}</time></p>`:''}
    ${j.integrated?`<p>Verified integration commit <code>${esc(j.integrated)}</code></p>`:j.mergedCommit?`<p>GitHub merge commit <code>${esc(j.mergedCommit)}</code>. Integration verification pending.</p>`:''}
    ${j.blockers.length?`<ul>${j.blockers.map(reason=>`<li>${esc(reason)}</li>`).join('')}</ul>`:''}
    ${j.cycles.map(c=>`<p>Cycle ${esc(c.cycle)} · ${c.complete?'Recorded':'Pending'} · ${esc(c.head||'Unknown head')}${c.reviews.length?c.reviews.map(r=>` · ${esc(r.role)} ${esc(r.verdict)} (${esc(r.assurance)})`).join(''):' · Reviewer provenance unknown'}</p>`).join('')}
    ${['completed_local','pr_ready'].includes(j.state)?`<button class="button button-muted" data-act="decision-review" data-id="${esc(j.id)}">Submit signed review</button>
    <button class="button button-muted" data-act="decision-publication" data-id="${esc(j.id)}">Submit publication decision</button>`:''}</details>`).join(''):'<p>No recorded work packages.</p>'}`;
  }catch(error){
-  if(request===decisionRequest&&target===$('decision-evidence'))target.textContent='Decision evidence unavailable: '+error.message;
+  if(current())target.textContent='Decision evidence unavailable: '+error.message;
  }
 }
 function renderJobs(){const items=filtered(state.jobs,['title','description','state','risk']);return header('Jobs','Inspect execution, manage priority and safely control work packages.','create-job','Create job')+`<section class="card">${toolbar('jobs',['queued','preparing','building','gating','reviewing','reworking','awaiting_approval','pr_ready','completed_local','integrated','paused','stopped','cancelled','failed','blocked'])}${items.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(items.slice().reverse())):empty('layers','No matching jobs','Create a work package or adopt an approved plan.','create-job','Create job')}</section>`}

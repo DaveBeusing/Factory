@@ -7,6 +7,10 @@ namespace Factory;
 public sealed class QualityResult
 {
     public bool Passed { get; set; }
+    public int Cycle { get; set; }
+    public List<ReviewRecord> ReviewRecords { get; set; } = [];
+    public List<ReviewFinding> ReviewFindings { get; set; } = [];
+    public bool HasIndependentApproval => Passed && ReviewPolicy.HasIndependentApproval(this);
     public string HeadSha { get; set; } = "";
     public List<CheckReport> Checks { get; set; } = [];
     public List<string> Findings { get; set; } = [];
@@ -148,22 +152,29 @@ public sealed class QualityEngine
                 "Second line onward provide evidence with file paths. Task: " + job.Description + "\nComplete source patch (review the changed code, not just file names):\n" + diff.Output;
             try
             {
-                var result = await (_reviewRuntime?.Invoke(role) ?? _agent)
+                var runtime = _reviewRuntime?.Invoke(role) ?? _agent;
+                var result = await runtime
                     .RunAsync(job.Worktree, instruction, "", ct, readOnly: true);
                 using var response = new StringReader(result.FinalText);
                 var verdict = result.Success && !result.FinalTextIsFallback && response.ReadLine() == "VERDICT: PASS"
                     ? "PASS" : "CHANGES";
-                return (Role: role, Verdict: verdict, Message: result.FinalText[..Math.Min(3000, result.FinalText.Length)]);
+                return (Role: role, Verdict: verdict, Message: result.FinalText[..Math.Min(3000, result.FinalText.Length)],
+                    Session: result.SessionId, Adapter: runtime.GetType().Name);
             }
             catch (Exception ex) when (ex is not OperationCanceledException and not TokenBudgetExceededException)
             {
-                return (Role: role, Verdict: "CHANGES", Message: "Reviewer exception: " + ex.Message);
+                return (Role: role, Verdict: "CHANGES", Message: "Reviewer exception: " + ex.Message, Session: "", Adapter: "unknown");
             }
         }));
-        foreach (var (role, verdict, message) in completed)
+        foreach (var (role, verdict, message, session, adapter) in completed)
         {
             report.Reviews[role] = verdict + "\n" + message;
-            if (verdict != "PASS") report.Findings.Add("Review requested changes: " + role);
+            report.ReviewRecords.Add(new(role, report.HeadSha, ReviewPolicy.Revision, adapter, session, "read-only", verdict, "UNKNOWN"));
+            if (verdict != "PASS")
+            {
+                report.Findings.Add("Review requested changes: " + role);
+                report.ReviewFindings.Add(new(role, message));
+            }
         }
         if (!await CheckedHeadStillCurrentAsync(job, report.HeadSha, ct))
             report.Findings.Add("Worktree HEAD changed while the review was running");

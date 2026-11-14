@@ -266,9 +266,11 @@ public sealed class FactoryEngine
         });
         foreach (var plugin in _plugins) await plugin.BeforeJobAsync(p, _store.Job(id), ct);
         var report = new QualityResult();
-        for (var round = 1; round <= Math.Max(1, j.MaxRounds); round++)
+        for (var round = 1; round <= ReviewPolicy.MaxCycles; round++)
         {
             ct.ThrowIfCancellationRequested();
+            var cycle = _store.BeginReviewCycle(id, fence, j.MaxRounds);
+            if (cycle == 0) break;
            Stage(id, fence,round == 1 ? JobStates.Building : JobStates.Reworking, "agent");
            var existing = _store.Job(id);
            var description = round == 1 ? existing.Description :
@@ -314,7 +316,10 @@ public sealed class FactoryEngine
             WorkPackageScope.ValidateWorktree(p, _store.Job(id));
            foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id), report, ct);
            EnsureOwned(id, fence);
-            var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
+            report.ReviewFindings.AddRange(report.Findings.Select(message => new ReviewFinding("controller", message)));
+           report.Cycle = cycle;
+           _store.FinishReviewCycle(id, fence, cycle, report);
+           var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
             UpdateOwned(id, fence, x => x.EvidenceFile = evidence);
            if (report.Passed) break;
            _store.Event(id, "rework", string.Join("; ", report.Findings));
@@ -336,6 +341,11 @@ public sealed class FactoryEngine
         // Push is a side effect requiring explicit operator opt-in in settings plus remote mode.
         if (j.Mode == "remote" && _settings.AllowPush)
         {
+            if (!report.HasIndependentApproval)
+            {
+                Stage(id, fence, JobStates.Blocked, "quality", "Independent reviewer provenance is unavailable for this commit.");
+                return;
+            }
             ct.ThrowIfCancellationRequested();
            Stage(id, fence,JobStates.AwaitingApproval, "push");
            EnsureOwned(id, fence);

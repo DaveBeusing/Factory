@@ -346,6 +346,7 @@ public sealed class FactoryEngine
                 return false;
             StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", id, "integration-verifier",
                 current.State, JobStates.Integrated, LifecycleReason.IntegrationVerified, reference: proof.IntegratedCommit, state: s);
+            StateStore.RecordIntegratedHead(db, tx, current, proof);
             current.Integrated = true;
             current.State = JobStates.Integrated;
             current.Stage = "done";

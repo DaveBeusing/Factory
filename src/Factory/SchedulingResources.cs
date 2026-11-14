@@ -35,3 +35,15 @@ public static class SchedulingResources
 }
 
 public sealed record SchedulingDecision(Guid JobId, string Reason, Guid? ConflictingJob = null);
+
+public sealed partial class StateStore
+{
+    internal static void RecordIntegratedHead(Microsoft.Data.Sqlite.SqliteConnection db,
+        Microsoft.Data.Sqlite.SqliteTransaction tx, FactoryJob job, IntegrationProof proof) =>
+        Execute(db, tx, """
+            INSERT INTO scheduling_integrations(job_id,project_id,head_sha,integrated_sha)
+            VALUES($job,$project,$head,$integrated)
+            ON CONFLICT(job_id) DO UPDATE SET head_sha=excluded.head_sha,integrated_sha=excluded.integrated_sha;
+            """, ("$job", job.Id), ("$project", job.ProjectId),
+            ("$head", job.HeadSha), ("$integrated", proof.IntegratedCommit));
+}

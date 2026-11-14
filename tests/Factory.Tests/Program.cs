@@ -1455,6 +1455,9 @@ Test("Scheduler serializes shared resources and explains the decision", () =>
     first.State = JobStates.Preparing;
     first.LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(1);
     Assert(JobScheduler.Select(state, 4).Single().Id == other.Id);
+    first.State = JobStates.CompletedLocal;
+    first.LeaseOwner = "local-runner";
+    Assert(JobScheduler.Select(state, 4).Single().Id == other.Id);
     first.SharedResources = ["unknown"];
     Assert(JobScheduler.Select(state, 4).Count == 0);
 });
@@ -2268,7 +2271,8 @@ await TestAsync("Remote integration rejects unpushed local history and stale loc
         Git(checkout, "pull", "--ff-only", "origin", "master");
         var refreshed = await engine.VerifyIntegrationAsync(stale.Id);
         Assert(refreshed.BaseCommit == remoteCommit && refreshed.IntegratedCommit == remoteCommit);
-        Assert(DependencyGraph.DependenciesSatisfied(new FactoryJob { DependsOn = [stale.Id] },
+        Assert(store.Read().VerifiedIntegrations.Contains(stale.Id));
+        Assert(DependencyGraph.DependenciesSatisfied(new FactoryJob { ProjectId = project.Id, DependsOn = [stale.Id] },
             store.Read().Jobs), "Verified remote integration did not release dependent work");
     }
     finally { try { Directory.Delete(root, true); } catch { } }

@@ -32,6 +32,7 @@ public sealed class JobInput
     public List<Guid> DependsOn { get; set; } = [];
     public List<string> ExpectedPaths { get; set; } = [];
     public List<string> RequiredExecutionCapabilities { get; set; } = [];
+    public List<string>? SharedResources { get; set; }
     public bool ReviewedExistingWork { get; set; }
 }
 public sealed class ScopeAmendmentInput
@@ -251,7 +252,7 @@ public static class MissionControlManager
         var job = store.AddJob(new FactoryJob { ProjectId = input.ProjectId, GoalId = input.GoalId,
             Title = input.Title.Trim(), Description = input.Description.Trim(), Priority = input.Priority, Risk = input.Risk,
             Mode = input.Mode, MaxRounds = settings.MaxReviewRounds, DependsOn = input.DependsOn,
-            ExpectedPaths = input.ExpectedPaths,
+            ExpectedPaths = input.ExpectedPaths, SharedResources = input.SharedResources ?? ["unknown"],
             RequiredExecutionCapabilities = input.RequiredExecutionCapabilities });
         if (preflight is not null)
             store.Event(job.Id, "job_preflight", "master " + preflight.BaseCommit +
@@ -295,6 +296,14 @@ public static class MissionControlManager
             {
                 (j.Title, j.Description, j.Priority, j.Risk, j.Mode, j.GoalId, j.DependsOn, j.ExpectedPaths, j.RequiredExecutionCapabilities) = before;
                 throw new InvalidOperationException("Dependency cycle detected");
+            }
+            if (input.SharedResources is { } resources)
+            {
+                Require(j.Attempt == 0 && j.LeaseOwner.Length == 0 &&
+                    !StateStore.HasAdoptedSpecification(db, tx, j.GoalId),
+                    "Only unclaimed standalone jobs can change shared resource ownership.");
+                SchedulingResources.Validate(resources);
+                j.SharedResources = resources.ToList();
             }
             j.UpdatedAt = DateTimeOffset.UtcNow;
             Log(s, id, "job_updated", j.Title); return j;

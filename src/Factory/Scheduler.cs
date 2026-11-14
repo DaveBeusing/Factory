@@ -71,7 +71,7 @@ public sealed class JobScheduler
         if (reservationTokens < BudgetedAgentRuntime.MinimumTurnAllowance)
             throw new ArgumentOutOfRangeException(nameof(reservationTokens));
         var now = DateTimeOffset.UtcNow;
-        var active = state.Jobs.Where(j => JobStates.Active.Contains(j.State) &&
+        var active = state.Jobs.Where(j => (JobStates.Active.Contains(j.State) || j.LeaseOwner.Length != 0) &&
             j.LeaseUntil > now).OrderBy(j => j.Id).ToList();
         var chosen = new List<FactoryJob>();
         var capacity = Math.Max(0, limit - active.Count);
@@ -86,8 +86,10 @@ public sealed class JobScheduler
         {
             if (state.Paused) { decisions?.Add(new(job.Id, "queue_paused")); continue; }
             if (chosen.Count >= capacity) { decisions?.Add(new(job.Id, "global_capacity")); if (decisions is null) break; continue; }
+            if (job.LeaseOwner.Length != 0) { decisions?.Add(new(job.Id, "lease_owned")); continue; }
             if (eligibility is not null && !eligibility(job)) { decisions?.Add(new(job.Id, "worker_ineligible")); continue; }
-            if (!DependencyGraph.DependenciesSatisfied(job, state.Jobs)) { decisions?.Add(new(job.Id, "dependency_not_integrated")); continue; }
+            if (!DependencyGraph.DependenciesSatisfied(job, state.Jobs) ||
+                !job.DependsOn.All(state.VerifiedIntegrations.Contains)) { decisions?.Add(new(job.Id, "dependency_not_integrated")); continue; }
            long allocation = 0;
            if (job.GoalId is { } goalId)
            {
@@ -114,13 +116,13 @@ public sealed class JobScheduler
     public static IReadOnlyList<IReadOnlyList<Guid>> Group(IReadOnlyList<FactoryJob> jobs)
     {
         if (DependencyGraph.WouldCycle(jobs)) throw new ArgumentException("Dependency cycle");
-        var integrated = jobs.Where(j => j.Integrated).Select(j => j.Id).ToHashSet();
-        var remaining = jobs.Where(j => !j.Integrated).ToList();
+        var integrated = jobs.Where(j => j.Integrated && j.State == JobStates.Integrated).Select(j => j.Id).ToHashSet();
+        var remaining = jobs.Where(j => !integrated.Contains(j.Id)).ToList();
         var groups = new List<IReadOnlyList<Guid>>();
         while (remaining.Count > 0)
         {
             var group = new List<FactoryJob>();
-           foreach (var job in remaining.OrderByDescending(j => j.Priority))
+           foreach (var job in remaining.OrderByDescending(j => j.Priority).ThenBy(j => j.CreatedAt).ThenBy(j => j.Id))
             {
                 if (!job.DependsOn.All(integrated.Contains)) continue;
                if (group.Any(other => DependencyGraph.Conflict(job, other))) continue;

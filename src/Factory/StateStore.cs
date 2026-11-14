@@ -324,6 +324,15 @@ public sealed partial class StateStore
                 INSERT INTO jobs_shared_resources(owner_id,position,value)
                 SELECT id,0,'unknown' FROM jobs
                 WHERE NOT EXISTS(SELECT 1 FROM jobs_shared_resources r WHERE r.owner_id=jobs.id);
+                CREATE TABLE IF NOT EXISTS scheduling_integrations(
+                    job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+                    project_id TEXT NOT NULL, head_sha TEXT NOT NULL, integrated_sha TEXT NOT NULL
+                );
+                INSERT OR IGNORE INTO scheduling_integrations(job_id,project_id,head_sha,integrated_sha)
+                SELECT j.id,j.project_id,j.head_sha,a.reference FROM jobs j JOIN lifecycle_audit a
+                    ON a.entity_id=j.id AND a.project_id=j.project_id
+                WHERE j.integrated=1 AND j.state='integrated' AND a.entity_kind='job'
+                    AND a.reason_code='IntegrationVerified' AND a.reference IS NOT NULL;
                 PRAGMA user_version=22;
                 """);
         }
@@ -619,6 +628,17 @@ public sealed partial class StateStore
             if (map.Type == typeof(ProjectInfo))
                 LoadChecks(db, tx, byId);
         }
+        using var integration = Command(db, tx, """
+            SELECT DISTINCT j.id FROM scheduling_integrations p JOIN jobs j ON j.id=p.job_id
+            JOIN lifecycle_audit a ON a.entity_id=j.id AND a.reference=p.integrated_sha
+            AND p.project_id=j.project_id AND lower(p.head_sha)=lower(j.head_sha)
+            WHERE a.entity_kind='job' AND a.reason_code='IntegrationVerified' AND a.project_id=j.project_id
+                AND j.state='integrated' AND j.integrated=1
+                AND length(a.reference) IN (40,64) AND lower(a.reference) NOT GLOB '*[^0-9a-f]*'
+                AND length(j.head_sha) IN (40,64) AND lower(j.head_sha) NOT GLOB '*[^0-9a-f]*';
+            """);
+        using var verified = integration.ExecuteReader();
+        while (verified.Read()) state.VerifiedIntegrations.Add(Guid.Parse(verified.GetString(0)));
         return state;
     }
 
@@ -1093,6 +1113,7 @@ public sealed partial class StateStore
 
     public FactoryJob AddJob(FactoryJob job) => Change((s, db, tx) =>
     {
+        SchedulingResources.Validate(job.SharedResources);
         if (HasAdoptedSpecification(db, tx, job.GoalId) ||
             (job.GoalId is { } goal && RequiresIntakePlanAdoption(db, tx, goal)))
             throw new InvalidOperationException("Add jobs through a reviewed plan revision for this goal.");

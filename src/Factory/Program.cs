@@ -164,6 +164,7 @@ Environment: FACTORY_HOME overrides the local state directory.
                     ProjectId = p.Id, Title = title, Description = description,
                     Mode = mode, Priority = int.Parse(Option(args, "priority", "50")),
                     Risk = Option(args, "risk", "medium"), MaxRounds = settings.MaxReviewRounds,
+                    SharedResources = Option(args, "resources", "unknown").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList(),
                     ExpectedPaths = Option(args, "paths").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList(),
                     DependsOn = Option(args, "depends").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                         .Select(GuidArg).ToList()

@@ -10,6 +10,34 @@ permissions:
   contents: read
 
 jobs:
+  attest-pr-event:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Capture runner-provided PR attribution
+        shell: pwsh
+        run: |
+          $event = Get-Content -LiteralPath $env:GITHUB_EVENT_PATH -Raw | ConvertFrom-Json
+          $pr = $event.pull_request
+          $receipt = [ordered]@{
+            repository = $env:GITHUB_REPOSITORY
+            runId = [long]$env:GITHUB_RUN_ID
+            attempt = [int]$env:GITHUB_RUN_ATTEMPT
+            pullNumber = [int]$event.number
+            baseBranch = $pr.base.ref
+            baseCommit = $pr.base.sha
+            headCommit = $pr.head.sha
+          }
+          $receipt | ConvertTo-Json -Compress | Set-Content -LiteralPath pr-event.json -Encoding utf8NoBOM -NoNewline
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: pr-event.json
+
   build-and-test:
     runs-on: windows-latest
     timeout-minutes: 30

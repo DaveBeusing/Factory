@@ -4,6 +4,15 @@ namespace Factory;
 
 public sealed partial class StateStore
 {
+    private sealed record IntegrationTarget(string HeadSha, string IntegratedCommit, string Origin, string BaseBranch, string Path);
+
+    internal static void RecordIntegrationTarget(Microsoft.Data.Sqlite.SqliteConnection db,
+        Microsoft.Data.Sqlite.SqliteTransaction tx, FactoryJob job, ProjectInfo project, IntegrationProof proof, FactoryState state) =>
+        RecordLifecycle(db, tx, project.Id, "integration-target", job.Id, "integration-verifier",
+            job.State, JobStates.Integrated, LifecycleReason.IntegrationVerified, reference: Json.Stringify(
+                new IntegrationTarget(job.HeadSha, proof.IntegratedCommit, project.Origin, project.BaseBranch, project.Path)),
+            generation: job.ExecutionGeneration, state: state);
+
     internal object ReadDecisionEvidence(Guid projectId, FactorySettings settings)
     {
         using var db = Open();
@@ -63,7 +72,21 @@ public sealed partial class StateStore
             using var integration = Command(db, tx, """
                 SELECT integrated_sha FROM scheduling_integrations WHERE job_id=$job AND project_id=$project AND head_sha=$head;
                 """, ("$job", job.Id), ("$project", projectId), ("$head", job.HeadSha));
-            var integrated = state.VerifiedIntegrations.Contains(job.Id) ? integration.ExecuteScalar() as string : null;
+            var storedIntegration = state.VerifiedIntegrations.Contains(job.Id) ? integration.ExecuteScalar() as string : null;
+            string? integrated = null;
+            if (storedIntegration is not null)
+            {
+                using var target = Command(db, tx, """
+                    SELECT reference FROM lifecycle_audit WHERE project_id=$project AND entity_id=$job
+                      AND entity_kind='integration-target' AND reason_code='IntegrationVerified' AND generation=$generation
+                    ORDER BY rowid DESC LIMIT 1;
+                    """, ("$project", projectId), ("$job", job.Id), ("$generation", job.ExecutionGeneration));
+                if (target.ExecuteScalar() is string recorded &&
+                    JsonSerializer.Deserialize<IntegrationTarget>(recorded, Json.Options) ==
+                    new IntegrationTarget(job.HeadSha, storedIntegration, project.Origin, project.BaseBranch, project.Path))
+                    integrated = storedIntegration;
+            }
+            var historicalIntegration = integrated is null ? storedIntegration : null;
             var remaining = Math.Max(0, Math.Clamp(job.MaxRounds, 1, ReviewPolicy.MaxCycles) - cycles.Count);
             var blockers = new List<string>();
             if (!string.IsNullOrWhiteSpace(job.Error)) blockers.Add(job.Error);
@@ -113,7 +136,7 @@ public sealed partial class StateStore
                 !string.IsNullOrWhiteSpace(url) ? "PR created" : "No confirmed PR";
             jobs.Add(new { job.Id, job.Title, job.State, job.HeadSha, prUrl = url, historicalPrUrl, readinessBase, readinessObservedAt,
                 reviewApproved = approved, reviewer = approval?.Reviewer, reviewerSession = approval?.ReviewerSession,
-                remaining, cycles, integrated, mergedCommit, status, blockers });
+                remaining, cycles, integrated, historicalIntegration, mergedCommit, status, blockers });
         }
         var approvalQueue = state.Goals.Where(goal => goal.ProjectId == projectId && goal.State == "draft")
             .Select(goal => (goal, plan: ReadPlanRevision(db, tx, goal.Id)))

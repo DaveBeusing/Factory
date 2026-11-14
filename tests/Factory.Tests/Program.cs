@@ -2184,6 +2184,27 @@ Test("Decision evidence treats legacy PR links as historical and returns readine
         Assert(entry.GetProperty("status").GetString() == "No confirmed PR");
         Assert(entry.GetProperty("prUrl").ValueKind == System.Text.Json.JsonValueKind.Null);
         Assert(entry.GetProperty("historicalPrUrl").GetString() == currentUrl);
+        var merged = new string('c', 40);
+        store.Change((state, db, tx) =>
+        {
+            var target = state.Projects.Single();
+            var current = state.Jobs.Single();
+            var proof = new IntegrationProof("remote-merged-pr", basis, merged);
+            StateStore.RecordLifecycle(db, tx, target.Id, "job", current.Id, "fixture", current.State, JobStates.Integrated,
+                LifecycleReason.IntegrationVerified, reference: merged, state: state);
+            StateStore.RecordIntegratedHead(db, tx, current, proof);
+            StateStore.RecordIntegrationTarget(db, tx, current, target, proof, state);
+            current.State = JobStates.Integrated;
+            current.Integrated = true;
+            return true;
+        });
+        using var verified = System.Text.Json.JsonDocument.Parse(Json.Stringify(store.ReadDecisionEvidence(project.Id, new())));
+        Assert(verified.RootElement.GetProperty("jobs")[0].GetProperty("integrated").GetString() == merged);
+        store.Change(state => state.Projects.Single().Origin = "https://github.com/example/another-target");
+        using var historical = System.Text.Json.JsonDocument.Parse(Json.Stringify(new StateStore(home.FullName).ReadDecisionEvidence(project.Id, new())));
+        entry = historical.RootElement.GetProperty("jobs")[0];
+        Assert(entry.GetProperty("integrated").ValueKind == System.Text.Json.JsonValueKind.Null);
+        Assert(entry.GetProperty("historicalIntegration").GetString() == merged);
     }
     finally { try { home.Delete(true); } catch { } }
 });

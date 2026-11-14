@@ -82,6 +82,7 @@ async function refreshState(){
 async function refreshUsage(){if(!token||projectAccess())return;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render();refreshInspectorProviderCapacity()}
 async function connect(nextToken){
  const revision=++connectionRevision;
+ const credentialChanged=nextToken!==undefined&&nextToken!==token;
  if(nextToken!==undefined){
   if(nextToken!==token){
    lastHeartbeat=0;
@@ -110,6 +111,7 @@ async function connect(nextToken){
   token=nextToken;
   try{token?sessionStorage.setItem('factory-token',token):sessionStorage.removeItem('factory-token')}catch{}
  }
+ if(credentialChanged)render();
  if(!token){connected=false;if(streamController)streamController.abort();state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};usage=null;render();statusFromHealth();return}
  if(projectAccess()){
   nav('recovery');
@@ -386,6 +388,7 @@ async function loadDecisionEvidence(){
    ${safeUrl(j.historicalPrUrl)?`<p><a href="${esc(safeUrl(j.historicalPrUrl))}">Historical pull request</a></p>`:''}
    ${j.readinessBase?`<p>Readiness base <code>${esc(j.readinessBase)}</code> · Verified <time datetime="${esc(j.readinessObservedAt)}">${esc(dateTime(j.readinessObservedAt))}</time></p>`:''}
    ${j.integrated?`<p>Verified integration commit <code>${esc(j.integrated)}</code></p>`:j.mergedCommit?`<p>GitHub merge commit <code>${esc(j.mergedCommit)}</code>. Integration verification pending.</p>`:''}
+   ${j.historicalIntegration?`<p>Historical integration <code>${esc(j.historicalIntegration)}</code> · Target unverified for current project settings.</p>`:''}
    ${j.blockers.length?`<ul>${j.blockers.map(reason=>`<li>${esc(reason)}</li>`).join('')}</ul>`:''}
    ${j.cycles.map(c=>`<p>Cycle ${esc(c.cycle)} · ${c.complete?'Recorded':'Pending'} · ${esc(c.head||'Unknown head')}${c.reviews.length?c.reviews.map(r=>` · ${esc(r.role)} ${esc(r.verdict)} (${esc(r.assurance)})`).join(''):' · Reviewer provenance unknown'}</p>`).join('')}
    ${['completed_local','pr_ready'].includes(j.state)?`<button class="button button-muted" data-act="decision-review" data-id="${esc(j.id)}">Submit signed review</button>

@@ -140,17 +140,31 @@ browserTest('loads project decisions and protects evidence at the API boundary',
   });
   await page.getByRole('button', { name: 'Refresh', exact: true }).click();
   await started;
+  let finishHandshake;
+  const handshake = new Promise(resolve => { finishHandshake = resolve; });
+  let handshakeStarted;
+  const pending = new Promise(resolve => { handshakeStarted = resolve; });
+  await page.route('**/api/state', async route => {
+    if (route.request().headers().authorization !== 'Bearer invalid-admin-token') return route.continue();
+    handshakeStarted();
+    await handshake;
+    await route.continue();
+  });
   try {
     await page.getByRole('button', { name: 'Connection settings, connected' }).click();
     await connection.getByLabel('API token').fill('invalid-admin-token');
     await connection.getByRole('button', { name: 'Connect', exact: true }).click();
-    await page.getByText('Invalid token or server unreachable', { exact: true }).waitFor();
+    await pending;
+    assert.equal(await page.locator('#decision-project').count(), 0);
+    assert.equal(await page.locator('#decision-evidence').count(), 0);
     const response = page.waitForResponse(r => r.url().endsWith('/decision-evidence'));
     release();
     await response;
+    finishHandshake();
+    await page.getByText('Invalid token or server unreachable', { exact: true }).waitFor();
     await page.getByText('No registered projects.', { exact: true }).waitFor();
     assert.equal(await page.getByText('Old connection only', { exact: false }).count(), 0);
-  } finally { release(); }
+  } finally { release(); finishHandshake(); }
 }, async home => {
   const repo = path.join(home, 'repo');
   await mkdir(repo);

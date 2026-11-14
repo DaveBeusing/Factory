@@ -264,10 +264,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             .Where(run => run.GetProperty("workflow_id").GetInt64() == d.WorkflowId &&
                 run.GetProperty("head_sha").GetString() == d.HeadCommit &&
                 run.GetProperty("event").GetString() == "pull_request" &&
-                run.GetProperty("pull_requests").EnumerateArray().Any(pr =>
-                    pr.GetProperty("number").GetInt32() == d.PullNumber &&
-                    pr.GetProperty("head").GetProperty("sha").GetString() == d.HeadCommit &&
-                    pr.GetProperty("base").GetProperty("sha").GetString() == d.BaseCommit))
+                MatchesPullRequest(run.GetProperty("pull_requests"), d))
             .OrderByDescending(run => run.GetProperty("run_number").GetInt64())
             .ThenByDescending(run => run.GetProperty("run_attempt").GetInt32()).FirstOrDefault();
         if (latest.ValueKind != JsonValueKind.Object || latest.GetProperty("status").GetString() != "completed" ||
@@ -303,7 +300,19 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
                 throw new InvalidOperationException("The workflow check did not originate from the trusted app on the exact head: " + name);
             checkIds.Add(match[0].GetProperty("id").GetInt64());
         }
-        return Json.Stringify(new { d.WorkflowId, runId, attempt, suite, d.PullNumber, d.HeadCommit, d.BaseCommit, checkIds });
+        return Json.Stringify(new { d.WorkflowId, runId, attempt, suite, d.PullNumber, d.HeadCommit, d.BaseCommit,
+            association = latest.GetProperty("pull_requests").GetArrayLength() == 0 ? "required-check-node" : "workflow-and-required-check-node",
+            checkIds });
+    }
+
+    private static bool MatchesPullRequest(JsonElement links, PullRequestDecision decision)
+    {
+        // GitHub may omit the links. In that case the exact check nodes selected by the
+        // PR-specific required-check query must still match this workflow attempt below.
+        return links.GetArrayLength() == 0 || links.EnumerateArray().Any(pr =>
+            pr.GetProperty("number").GetInt32() == decision.PullNumber &&
+            pr.GetProperty("head").GetProperty("sha").GetString() == decision.HeadCommit &&
+            pr.GetProperty("base").GetProperty("sha").GetString() == decision.BaseCommit);
     }
 
     private void RequireCurrentDecision(SignedPullRequestDecision signed, Guid id)

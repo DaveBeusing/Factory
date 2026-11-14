@@ -1935,6 +1935,7 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
         var workflowId = 7;
         var runHead = head;
         var runBase = basis;
+        var omitPullLinks = false;
         var conclusion = "success";
         var appId = 15368;
         var checkUrl = "https://api.github.com/repos/example/repo/check-runs/9";
@@ -1960,7 +1961,7 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
                 {
                     workflow_id = workflowId, head_sha = runHead, @event = "pull_request", run_number = 3,
                     run_attempt = 2, status = "completed", conclusion, check_suite_id = 12, id = 8,
-                    pull_requests = new[] { new { number = 42, head = new { sha = head }, @base = new { sha = runBase } } }
+                    pull_requests = omitPullLinks ? [] : new[] { new { number = 42, head = new { sha = head }, @base = new { sha = runBase } } }
                 } } } },
                 var route when route.Contains("/runs/8/attempts/2/jobs?") => new[] { new { jobs = new[]
                 {
@@ -1986,6 +1987,13 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
         }
         var receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
         Assert(receipt.Contains(head) && receipt.Contains("\"workflowId\": 7") && receipt.Contains("132435614163"));
+        omitPullLinks = true;
+        receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
+        Assert(receipt.Contains("\"association\": \"required-check-node\"") && receipt.Contains("132435614163"));
+        required = [new("build", 15368, "CR_other_pull")];
+        await Reject("trusted app");
+        required = selected;
+        omitPullLinks = false;
         required = [new("build", 99, nodeId)];
         await Reject("pin the authorized");
         required = [new("build", 15368, "CR_different")];

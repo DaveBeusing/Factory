@@ -21,9 +21,16 @@ public static class WorkerAuthorization
         if (!BuilderExecutionProfile.Allows(project, job) || settings.Runtime is not ("exec" or "app-server"))
             return null;
 
+        return RequiredCapabilitiesForRuntime(project, job, settings.Runtime);
+    }
+
+    private static HashSet<string>? RequiredCapabilitiesForRuntime(ProjectInfo project, FactoryJob job, string runtime)
+    {
+        if (!BuilderExecutionProfile.Allows(project, job) ||
+            !BuilderExecutionProfile.MatchesRuntime(project, job, runtime)) return null;
         var required = new HashSet<string>(StringComparer.Ordinal)
         {
-            "native-agent", "git-cli", "runtime:" + settings.Runtime
+            "native-agent", "git-cli", "runtime:" + runtime
         };
         if (project.Checks.Any(check => string.IsNullOrWhiteSpace(check.ContainerImage)))
             required.Add("native-checks");
@@ -53,7 +60,14 @@ public static class WorkerAuthorization
             !CanAccessProject(state, worker.Id, project.Id))
             return false;
 
-        var required = RequiredCapabilities(project, job, settings);
+        var runtime = settings.Runtime;
+        if (RemoteProviderRouting.Required(project, job))
+        {
+            var routes = RemoteProviderRouting.Plan(state, settings, job);
+            if (routes is null) return false;
+            runtime = routes.Single(route => route.Role == "builder").Runtime;
+        }
+        var required = runtime is "exec" or "app-server" ? RequiredCapabilitiesForRuntime(project, job, runtime) : null;
         if (required is null)
             return false;
 

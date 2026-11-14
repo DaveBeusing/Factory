@@ -14,6 +14,11 @@ internal static class BuilderExecutionProfile
 
     // Existing adapters cannot attest the requested OS-level restrictions. A
     // worktree, a worker's assertion, and credential stripping are insufficient.
+    internal static bool MatchesRuntime(ProjectInfo project, FactoryJob job, string runtime) =>
+        project.RequiredExecutionCapabilities.Concat(job.RequiredExecutionCapabilities)
+            .Where(c => c.StartsWith("runtime:", StringComparison.Ordinal))
+            .All(c => c == "runtime:" + runtime);
+
     internal static bool AllowsLocal(ProjectInfo project, FactoryJob job, string runtime,
         bool customRuntime)
     {
@@ -85,7 +90,7 @@ public sealed partial class StateStore
     }
 
     internal static void RecordExecutionProvenance(SqliteConnection db, SqliteTransaction tx, ProjectInfo project,
-        FactoryJob job, FactorySettings settings, IEnumerable<WorkerCapabilityProof>? evidence = null)
+        FactoryJob job, string runtime, IEnumerable<WorkerCapabilityProof>? evidence = null)
     {
         var requested = project.RequiredExecutionCapabilities.Concat(job.RequiredExecutionCapabilities)
             .Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
@@ -94,7 +99,7 @@ public sealed partial class StateStore
                 isolation_assurance,requested_capabilities,worker_capability_evidence,recorded_at)
             VALUES($job,$project,$generation,$worker,$mode,$runtime,'unverified',$requested,$evidence,$at);
             """, ("$job", job.Id), ("$project", project.Id), ("$generation", job.ExecutionGeneration),
-            ("$worker", job.LeaseOwner), ("$mode", job.Mode), ("$runtime", settings.Runtime),
+            ("$worker", job.LeaseOwner), ("$mode", job.Mode), ("$runtime", runtime),
             ("$requested", Json.Stringify(requested)),
             ("$evidence", Json.Stringify(evidence?.OrderBy(p => p.Capability, StringComparer.Ordinal)
                 .Select(p => new { p.Capability, p.VerifiedAt }).ToArray())),

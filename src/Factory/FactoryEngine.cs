@@ -56,7 +56,11 @@ public sealed class FactoryEngine
            if (!selected.Any(x => x.Id == id)) return false;
            JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true,
                 state: s, reservationTokens: _settings.GoalReservationTokens);
-           StateStore.RecordExecutionProvenance(db, tx, s.Projects.Single(p => p.Id == j.ProjectId), j, _settings);
+           var runtime = _runtimeOverridden ? "custom" :
+                _executionMode == JobExecutionModes.Local
+                    ? ProviderRouter.EffectiveCodexRuntime(_settings, ProviderRouter.Resolve(_settings, s, j.ProjectId, "builder"))
+                    : _settings.Runtime;
+           StateStore.RecordExecutionProvenance(db, tx, s.Projects.Single(p => p.Id == j.ProjectId), j, runtime);
            StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", id, _workerId, JobStates.Queued,
                j.State, LifecycleReason.LeaseClaimed, generation: j.ExecutionGeneration, state: s);
            s.Events.Add(new FactoryEvent { JobId = id, Type = "claimed", Message = _workerId });
@@ -238,6 +242,9 @@ public sealed class FactoryEngine
         IAgentRuntime RuntimeFor(string role)
         {
             var snapshot = _store.Read();
+            if (role == "builder" && !ProfileAllows(snapshot, snapshot.Projects.Single(project => project.Id == p.Id),
+                snapshot.Jobs.Single(job => job.Id == j.Id)))
+                throw new InvalidOperationException("The builder route no longer satisfies the execution profile.");
             var selected = _runtimeOverridden || _remoteProviderRuntime is not null ? (ProviderSelection?)null :
                 ProviderRouter.Select(_settings, snapshot, p.Id, role, j.Risk);
             var meter = selected is { } choice

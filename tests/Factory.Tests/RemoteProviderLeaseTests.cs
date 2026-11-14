@@ -75,6 +75,10 @@ internal static class RemoteProviderLeaseTests
             Check(!WorkerAuthentication.Authorized("POST", "/api/worker/turn", "Bearer " + token, worker, settings),
                 "Executor credential authorized a worker request");
 
+            store.UpdateJob(job.Id, current => current.RequiredExecutionCapabilities.Add("runtime:exec"));
+            Check(WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion) is null,
+                "Mismatched builder runtime was admitted");
+            store.UpdateJob(job.Id, current => current.RequiredExecutionCapabilities.Clear());
             var claim = WorkerProtocol.Claim(store, settings, worker, RemoteProviderRouting.ProtocolVersion)
                 ?? throw new Exception("Versioned worker could not claim the opted-in job");
             Check(claim.ProviderRoutes!.Single(r => r.Role == "review:code").ProviderId == "review-fixture",

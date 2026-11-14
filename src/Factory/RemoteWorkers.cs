@@ -97,7 +97,8 @@ public static class WorkerProtocol
                 if (requiresProviderLease && routes is null) continue;
                 JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
                     state: s, reservationTokens: settings.GoalReservationTokens);
-                StateStore.RecordExecutionProvenance(db, tx, project, job, settings,
+                StateStore.RecordExecutionProvenance(db, tx, project, job,
+                    routes?.Single(route => route.Role == "builder").Runtime ?? settings.Runtime,
                     s.WorkerCapabilityProofs.Where(proof => proof.WorkerId == workerId &&
                         proof.VerifiedAt <= DateTimeOffset.UtcNow && proof.VerifiedAt > DateTimeOffset.UtcNow.AddDays(-30) &&
                         WorkerAuthorization.IsKnownCapability(proof.Capability) && !string.IsNullOrWhiteSpace(proof.Evidence)));

@@ -5,7 +5,9 @@ using System.Text;
 
 namespace Factory;
 
-public sealed class WorkerClaimRequest { public string WorkerId { get; set; } = ""; public int ProtocolVersion { get; set; } }
+public sealed class WorkerClaimRequest { public string WorkerId { get; set; } = ""; public int ProtocolVersion { get; set; } public bool SupportsStartAdmission { get; set; } }
+public sealed record WorkerStartRequest(string WorkerId, Guid ProjectId, Guid JobId, long ExecutionGeneration,
+    string LeaseToken, Guid? ProviderLeaseId);
 public sealed class WorkerClaim
 {
     public string WorkerId { get; set; } = "";
@@ -140,7 +142,7 @@ public static class WorkerProtocol
                     Project = project, Job = job, Goal = goalCopy,
                     Settings = new FactorySettings
                     {
-                        Runtime = settings.Runtime, Model = settings.Model,
+                    Runtime = routes?.Single(route => route.Role == "builder").Runtime ?? settings.Runtime, Model = settings.Model,
                         MaxReviewRounds = settings.MaxReviewRounds, AllowPush = true,
                         LeaseSeconds = settings.LeaseSeconds, MaxParallel = 1,
                         GoalReservationTokens = job.GoalId is null
@@ -402,7 +404,8 @@ public static class RemoteWorker
             register.EnsureSuccessStatusCode();
         while (!ct.IsCancellationRequested)
         {
-            using var claimResponse = await http.PostAsJsonAsync("api/worker/claim", new WorkerClaimRequest { WorkerId = workerId, ProtocolVersion = RemoteProviderRouting.ProtocolVersion }, ct);
+            using var claimResponse = await http.PostAsJsonAsync("api/worker/claim", new WorkerClaimRequest
+            { WorkerId = workerId, ProtocolVersion = RemoteProviderRouting.ProtocolVersion, SupportsStartAdmission = true }, ct);
            claimResponse.EnsureSuccessStatusCode();
            if (claimResponse.StatusCode == System.Net.HttpStatusCode.NoContent)
             {
@@ -414,6 +417,9 @@ public static class RemoteWorker
                 ?? throw new IOException("Empty worker claim");
             if (claim.WorkerId != workerId || claim.Job.ProjectId != claim.Project.Id ||
                 !BuilderExecutionProfile.Allows(claim.Project, claim.Job) ||
+                !BuilderExecutionProfile.MatchesRuntime(claim.Project, claim.Job, claim.Settings.Runtime) ||
+                (claim.ProviderLeaseId is not null &&
+                    claim.ProviderRoutes?.SingleOrDefault(route => route.Role == "builder")?.Runtime != claim.Settings.Runtime) ||
                 !JobExecutionModes.Matches(claim.Job, JobExecutionModes.Remote))
                 throw new InvalidOperationException("Remote worker received a job for another execution mode");
            var jobDir = Path.Combine(workspace, claim.Job.Id.ToString("N"));
@@ -424,7 +430,9 @@ public static class RemoteWorker
                 ExecutionGeneration = claim.Job.ExecutionGeneration,
                 LeaseToken = claim.Job.LeaseToken, ProviderLeaseId = claim.ProviderLeaseId };
            if (!localState.ConsumeWorkerClaim(report.JobId, report.ExecutionGeneration)) continue;
-           using (var admitted = await http.PostAsJsonAsync("api/worker/heartbeat", report, ct))
+           using (var admitted = await http.PostAsJsonAsync("api/worker/start",
+               new WorkerStartRequest(workerId, claim.Project.Id, report.JobId, report.ExecutionGeneration,
+                   report.LeaseToken, report.ProviderLeaseId), ct))
                if (!admitted.IsSuccessStatusCode) continue;
            using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
            using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);

@@ -79,14 +79,37 @@ public sealed partial class StateStore
         using var tx = db.BeginTransaction();
         var current = ReadJob(db, tx, job);
         if (current is null || !JobRecovery.Matches(current, fence)) return false;
+        var accepted = TryRecordBuilderStart(db, tx, job, fence.Generation);
+        tx.Commit();
+        return accepted;
+    }
+
+    internal bool StartRemoteBuilder(WorkerStartRequest request, FactorySettings settings) =>
+        Change((state, db, tx) =>
+        {
+            var job = state.Jobs.SingleOrDefault(j => j.Id == request.JobId && j.ProjectId == request.ProjectId);
+            var worker = state.Workers.SingleOrDefault(w => w.Id == request.WorkerId);
+            var project = state.Projects.SingleOrDefault(p => p.Id == request.ProjectId);
+            if (job is null || worker is null || project is null || job.Mode != JobExecutionModes.Remote ||
+                !JobRecovery.Matches(job, new(request.ExecutionGeneration, request.LeaseToken, "remote:" + worker.Id)) ||
+                !WorkerAuthorization.CanContinue(state, worker, project, job, settings))
+                return false;
+            var route = RemoteProviderRouting.Current(state, job);
+            if (route?.Id != request.ProviderLeaseId ||
+                (RemoteProviderRouting.Required(project, job) && route is null) ||
+                (route is not null && !RemoteProviderRouting.CanContinue(state, settings, job, route)))
+                return false;
+            return TryRecordBuilderStart(db, tx, job.Id, job.ExecutionGeneration);
+        });
+
+    private static bool TryRecordBuilderStart(SqliteConnection db, SqliteTransaction tx, Guid job, long generation)
+    {
         using var command = Command(db, tx, """
             INSERT INTO started_builder_claims(job_id,generation) VALUES($job,$generation)
             ON CONFLICT(job_id) DO UPDATE SET generation=excluded.generation
             WHERE excluded.generation>started_builder_claims.generation;
-            """, ("$job", job), ("$generation", fence.Generation));
-        var accepted = command.ExecuteNonQuery() == 1;
-        tx.Commit();
-        return accepted;
+            """, ("$job", job), ("$generation", generation));
+        return command.ExecuteNonQuery() == 1;
     }
 
     internal static void RecordExecutionProvenance(SqliteConnection db, SqliteTransaction tx, ProjectInfo project,

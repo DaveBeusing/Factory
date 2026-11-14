@@ -86,6 +86,17 @@ internal static class RemoteProviderLeaseTests
             var status = new WorkerStatus { WorkerId = worker, JobId = job.Id,
                 ExecutionGeneration = claim.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,
                 ProviderLeaseId = claim.ProviderLeaseId, TokensIn = 4000, TokensOut = 4000, UsageComplete = true };
+            var start = new WorkerStartRequest(worker, project.Id, job.Id, status.ExecutionGeneration,
+                status.LeaseToken, claim.ProviderLeaseId);
+            Check(!store.StartRemoteBuilder(start with { ProjectId = Guid.NewGuid() }, settings),
+                "Start accepted the wrong project");
+            Check(!store.StartRemoteBuilder(start with { ExecutionGeneration = start.ExecutionGeneration - 1 }, settings),
+                "Start accepted a stale generation");
+            var starters = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+                new StateStore(scratch.FullName).StartRemoteBuilder(start, settings))));
+            Check(starters.Count(accepted => accepted) == 1, "Concurrent starts were not consumed exactly once");
+            Check(!new StateStore(scratch.FullName).StartRemoteBuilder(start, settings),
+                "A restarted controller accepted a duplicate start");
             Check(WorkerProtocol.Heartbeat(store, status, settings) && store.Job(job.Id).TokensIn == 0,
                 "Worker heartbeat replaced trusted usage");
 

@@ -330,7 +330,7 @@ public static class DashboardHost
             if (string.IsNullOrWhiteSpace(secret) || string.IsNullOrWhiteSpace(privateKey))
                 return Results.NotFound();
             var payload = new byte[1_000_001];
-            var length = await request.Body.ReadAtLeastAsync(payload, payload.Length, throwIfEndOfStream: false, cancellationToken: ct);
+            var length = await request.Body.ReadAtLeastAsync(payload, payload.Length, false, ct);
             if (length == payload.Length) return Results.BadRequest("GitHub event exceeds the size limit.");
             using var signer = System.Security.Cryptography.RSA.Create();
             signer.ImportFromPem(privateKey);

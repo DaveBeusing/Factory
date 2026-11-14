@@ -2284,6 +2284,21 @@ await TestAsync("Remote timeout preserves its disposition and the next same-work
         Assert(await WorkerProtocol.CompleteAsync(reopened, cloneReport, new RefusingWorkerVerifier(), settings: settings));
         Assert(reopened.Job(job.Id) is { Stage: "transient", Error: "Clone deadline expired" });
         MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+        var third = FinishLocalRound();
+        third.Job.State = JobStates.Failed;
+        third.Job.Stage = "deterministic";
+        third.Job.Error = "Builder returned an unsuccessful result";
+        var builderReport = new WorkerStatus { WorkerId = third.WorkerId, JobId = job.Id, Job = third.Job,
+            ExecutionGeneration = third.Job.ExecutionGeneration, LeaseToken = third.Job.LeaseToken };
+        Assert(await WorkerProtocol.CompleteAsync(reopened, builderReport, new RefusingWorkerVerifier(), settings: settings));
+        Assert(reopened.Job(job.Id) is { State: JobStates.Blocked, Stage: "deterministic" } stopped &&
+            stopped.Error.Contains("Review cycle limit"));
+        try
+        {
+            MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("A deterministic failure bypassed the review ceiling.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("cycle limit")) { }
         new StateStore(store.Home).Change((_, db, tx) =>
         {
             using var query = db.CreateCommand();
@@ -2291,12 +2306,12 @@ await TestAsync("Remote timeout preserves its disposition and the next same-work
             query.CommandText = "SELECT report FROM review_cycles WHERE job_id=$id ORDER BY cycle;";
             query.Parameters.AddWithValue("$id", job.Id.ToString());
             using var rows = query.ExecuteReader();
-            for (var cycle = 1; cycle <= 2; cycle++)
+            foreach (var kind in new[] { "Transient", "Transient", "Deterministic" })
             {
                 Assert(rows.Read());
                 using var evidence = System.Text.Json.JsonDocument.Parse(rows.GetString(0));
-                Assert(evidence.RootElement.GetProperty("kind").GetString() == "Transient");
-                Assert(evidence.RootElement.GetProperty("stage").GetString() == "transient");
+                Assert(evidence.RootElement.GetProperty("kind").GetString() == kind);
+                Assert(evidence.RootElement.GetProperty("stage").GetString() == kind.ToLowerInvariant());
             }
             Assert(!rows.Read());
             return true;

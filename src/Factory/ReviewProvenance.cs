@@ -193,8 +193,9 @@ public sealed partial class StateStore
         var failureKind = job.Stage switch
         {
             "transient" => ExecutionFailureKind.Transient,
+            "deterministic" => ExecutionFailureKind.Deterministic,
             "reconcile" => ExecutionFailureKind.Conflict,
-            "scope" => ExecutionFailureKind.Policy,
+            "scope" or "budget" => ExecutionFailureKind.Policy,
             "interrupted_git" => ExecutionFailureKind.UncertainSideEffect,
             _ => (ExecutionFailureKind?)null
         };

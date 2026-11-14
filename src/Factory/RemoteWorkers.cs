@@ -420,15 +420,17 @@ public static class WorkerProtocol
                 var requiresReconciliation = req.Job is { State: JobStates.Blocked, Stage: "reconcile" } conflict &&
                     conflict.Id == j.Id && conflict.ProjectId == j.ProjectId &&
                     conflict.Attempt == j.Attempt && conflict.Mode == JobExecutionModes.Remote;
-                var transient = req.Job is { State: JobStates.Failed or JobStates.Blocked, Stage: "transient" } timeout &&
-                    timeout.Id == j.Id && timeout.ProjectId == j.ProjectId &&
-                    timeout.Attempt == j.Attempt && timeout.Mode == JobExecutionModes.Remote;
+                var executionFailure = req.Job is { State: JobStates.Failed or JobStates.Blocked,
+                    Stage: "transient" or "deterministic" or "budget" } reportedFailure &&
+                    reportedFailure.Id == j.Id && reportedFailure.ProjectId == j.ProjectId &&
+                    reportedFailure.Attempt == j.Attempt && reportedFailure.Mode == JobExecutionModes.Remote
+                    ? reportedFailure : null;
                 j.State = JobStates.Blocked;
                 j.Stage = gitUncertain ? "interrupted_git" : requiresReconciliation ? "reconcile" :
-                    scopeBlocked ? "scope" : transient ? "transient" : "remote_verification_failed";
+                    scopeBlocked ? "scope" : executionFailure?.Stage ?? "remote_verification_failed";
                 j.Error = gitUncertain ? "Remote Git effects are uncertain; reconcile before retry." :
                     requiresReconciliation ? "Remote execution reported a conflict; reconcile before retry." :
-                    transient && !string.IsNullOrWhiteSpace(req.Job!.Error) ? req.Job.Error :
+                    executionFailure is not null && !string.IsNullOrWhiteSpace(executionFailure.Error) ? executionFailure.Error :
                     scopeBlocked ? req.Job!.Error : pendingReview is not null
                     ? "Unverified or exhausted final goal usage" : failure;
                 if (StateStore.ReviewCyclesUsed(db, tx, j.Id) >= Math.Clamp(j.MaxRounds, 1, ReviewPolicy.MaxCycles))

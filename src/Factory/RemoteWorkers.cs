@@ -174,7 +174,7 @@ public static class WorkerProtocol
                 request.LeaseToken, "remote:" + request.WorkerId);
             if (worker is null || job is null || project is null ||
                 !WorkerAuthorization.CanContinue(state, worker, project, job, settings) ||
-                !JobRecovery.Matches(job, fence) ||
+                !JobRecovery.Matches(job, fence) || !state.StartedBuilders.Contains((job.Id, fence.Generation)) ||
                 job.Mode != JobExecutionModes.Remote || job.GoalId is null)
                 return null;
             var providerLease = RemoteProviderRouting.Current(state, job);
@@ -204,6 +204,7 @@ public static class WorkerProtocol
             var project = j is null ? null : s.Projects.FirstOrDefault(p => p.Id == j.ProjectId);
             if (j is null || project is null ||
                 !WorkerAuthorization.CanContinue(s, worker, project, j, settings) ||
+                !s.StartedBuilders.Contains((j.Id, req.ExecutionGeneration)) ||
                 !JobRecovery.Matches(j,
                 new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
                 return false;
@@ -258,6 +259,7 @@ public static class WorkerProtocol
         if (claimed is null || worker is null || claimProject is null ||
             !WorkerAuthorization.CanContinue(state, worker, claimProject, claimed, executionSettings) ||
             claimed.Mode != JobExecutionModes.Remote ||
+            !state.StartedBuilders.Contains((claimed.Id, req.ExecutionGeneration)) ||
             !JobRecovery.Matches(claimed,
                 new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)))
             return false;
@@ -311,6 +313,7 @@ public static class WorkerProtocol
             if (j is null || currentWorker is null || currentProject is null ||
                 !WorkerAuthorization.CanContinue(s, currentWorker, currentProject, j, executionSettings) ||
                 j.Mode != JobExecutionModes.Remote ||
+                !s.StartedBuilders.Contains((j.Id, req.ExecutionGeneration)) ||
                 !JobRecovery.Matches(j,
                     new ExecutionFence(req.ExecutionGeneration, req.LeaseToken, "remote:" + req.WorkerId)) ||
                 j.Attempt != claimed.Attempt || j.ProjectId != claimed.ProjectId ||

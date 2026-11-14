@@ -2089,6 +2089,8 @@ await TestAsync("Remote scope block reaches the controller as amendable scope", 
         });
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), new FactorySettings { AllowPush = true }));
         Assert(claim is not null);
         var reported = new FactoryJob
         {
@@ -3127,6 +3129,8 @@ Test("Remote budget grants are controller-authorized, fenced and idempotent", ()
             fences.Add(job.Id, store.Change(s => JobRecovery.Assign(
                 s.Jobs.Single(j => j.Id == job.Id), "remote:" + worker, 120,
                 local: false, state: s, reservationTokens: 4096)));
+            var fence = fences[job.Id];
+            Assert(store.StartRemoteBuilder(new(worker, project.Id, job.Id, fence.Generation, fence.Token, null), settings));
         }
 
         WorkerBudgetExtensionRequest Request(FactoryJob job, Guid id)
@@ -3454,6 +3458,8 @@ await TestAsync("Remote goal claims retain remaining budget and failed usage", a
         });
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), new FactorySettings { AllowPush = true }));
         Assert(claim?.Goal is not null && claim.Goal.TokenBudget == 750);
         Assert(claim!.Job.TokensIn == 20);
         Assert(WorkerProtocol.Heartbeat(store, new WorkerStatus
@@ -3570,6 +3576,8 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
         });
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), new FactorySettings { AllowPush = true }));
         Assert(claim != null);
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
             Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
@@ -3604,6 +3612,8 @@ await TestAsync("Controller-verified remote results are atomically bound to the 
         });
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, new FactorySettings { AllowPush = true }, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), new FactorySettings { AllowPush = true }));
         Assert(claim != null);
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id, Attempt = claim!.Job.Attempt,
             Mode = JobExecutionModes.Remote, State = JobStates.PrReady, HeadSha = new string('a', 40),
@@ -3831,6 +3841,8 @@ await TestAsync("Remote worker generation fences stale heartbeats and completion
         var settings = new FactorySettings { AllowPush = true };
         GrantRemoteWorker(store, "worker-01", project.Id);
         var first = WorkerProtocol.Claim(store, settings, "worker-01");
+        if (first is not null) Assert(store.StartRemoteBuilder(new(first.WorkerId, first.Project.Id, first.Job.Id,
+            first.Job.ExecutionGeneration, first.Job.LeaseToken, first.ProviderLeaseId), settings));
         Assert(first is not null);
         var stale = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,
             ExecutionGeneration = first!.Job.ExecutionGeneration, LeaseToken = first.Job.LeaseToken };
@@ -3841,6 +3853,8 @@ await TestAsync("Remote worker generation fences stale heartbeats and completion
         Assert(!await WorkerProtocol.CompleteAsync(store, stale, new RefusingWorkerVerifier()));
         store.UpdateJob(job.Id, j => { j.State = JobStates.Queued; j.Stage = "operator_reviewed"; });
         var second = WorkerProtocol.Claim(store, settings, "worker-01");
+        if (second is not null) Assert(store.StartRemoteBuilder(new(second.WorkerId, second.Project.Id, second.Job.Id,
+            second.Job.ExecutionGeneration, second.Job.LeaseToken, second.ProviderLeaseId), settings));
         Assert(second is not null && second.Job.ExecutionGeneration > stale.ExecutionGeneration);
         Assert(second!.Job.LeaseToken != stale.LeaseToken);
         Assert(!WorkerProtocol.Heartbeat(store, stale, settings));
@@ -4183,6 +4197,8 @@ await TestAsync("Unverified remote final usage holds budget until reviewed recon
         var settings = new FactorySettings { AllowPush = true };
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, settings, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), settings));
         Assert(claim is not null);
         var claimed = claim!.Job;
         var finished = new FactoryJob { Id = job.Id, ProjectId = project.Id,
@@ -4233,6 +4249,8 @@ await TestAsync("Remote reservation overrun fences worker and preserves actual u
         var settings = new FactorySettings { AllowPush = true };
         GrantRemoteWorker(store, "worker-01", project.Id);
         var claim = WorkerProtocol.Claim(store, settings, "worker-01");
+        if (claim is not null) Assert(store.StartRemoteBuilder(new(claim.WorkerId, claim.Project.Id, claim.Job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), settings));
         Assert(claim is not null);
         var status = new WorkerStatus { WorkerId = "worker-01", JobId = job.Id,
             ExecutionGeneration = claim!.Job.ExecutionGeneration, LeaseToken = claim.Job.LeaseToken,

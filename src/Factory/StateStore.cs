@@ -640,6 +640,9 @@ public sealed partial class StateStore
             """);
         using var verified = integration.ExecuteReader();
         while (verified.Read()) state.VerifiedIntegrations.Add(Guid.Parse(verified.GetString(0)));
+        using var starts = Command(db, tx, "SELECT job_id,generation FROM started_builder_claims;");
+        using var started = starts.ExecuteReader();
+        while (started.Read()) state.StartedBuilders.Add((Guid.Parse(started.GetString(0)), started.GetInt64(1)));
         return state;
     }
 

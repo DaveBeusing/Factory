@@ -1703,10 +1703,11 @@ Test("Uncertain publication closes the round durably and blocks reviewed retry",
     finally { try { home.Delete(true); } catch { } }
 });
 
-Test("Signed review approval survives restart and follows the exact reviewed head", () =>
+await TestAsync("Signed review approval survives restart and guards durable publication reservations", async () =>
 {
     var home = Directory.CreateTempSubdirectory("factory-trusted-review-");
     var oldKey = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
+    var oldIntegrationKey = Environment.GetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY");
     try
     {
         using var key = System.Security.Cryptography.RSA.Create(2048);
@@ -1717,7 +1718,8 @@ Test("Signed review approval survives restart and follows the exact reviewed hea
             "commit", "--allow-empty", "-m", "Reviewed head");
         var head = GitOperations.Head(repo);
         var store = new StateStore(Path.Combine(home.FullName, "state"));
-        var project = new ProjectInfo { Checks = [new CheckCommand { Name = "fixture", Executable = "fixture" }] };
+        var project = new ProjectInfo { Origin = "https://github.com/example/repo",
+            Checks = [new CheckCommand { Name = "fixture", Executable = "fixture" }] };
         var job = new FactoryJob { ProjectId = project.Id, Worktree = repo, HeadSha = head, SessionId = "builder-session" };
         var fence = store.Change((s, db, tx) =>
         {
@@ -1757,6 +1759,69 @@ Test("Signed review approval survives restart and follows the exact reviewed hea
         catch (ArgumentException) { }
         store.RecordTrustedReview(new(approval, signature));
         Assert(new StateStore(store.Home).IsReviewApproved(job.Id));
+        var decision = new PullRequestDecision(project.Id, job.Id, ReviewPolicy.ProjectRevision(project),
+            "example/repo", "master", new string('a', 40), head, "publisher", "draft", "pr-ci", 0,
+            DateTimeOffset.UtcNow.AddMinutes(5), PullRequestCoordinator.ScopeRevision(job));
+        Environment.SetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY", key.ExportSubjectPublicKeyInfoPem());
+        store.UpdateJob(job.Id, current => current.ExpectedPaths = ["src/"]);
+        decision = decision with { ScopeRevision = PullRequestCoordinator.ScopeRevision(store.Job(job.Id)) };
+        var signed = new SignedPullRequestDecision(decision, Convert.ToBase64String(key.SignData(
+            System.Text.Encoding.UTF8.GetBytes(Json.Stringify(decision)),
+            System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss)));
+        var writes = 0;
+        Task<CommandResult> Host(string[] args, int timeout, CancellationToken ct)
+        {
+            if (args.Contains("POST"))
+            {
+                writes++;
+                throw new TimeoutException("GitHub response lost");
+            }
+            var endpoint = args.Last();
+            object result = endpoint switch
+            {
+                "user" => new { login = "publisher" },
+                "repos/example/repo" => new { permissions = new { push = true } },
+                var route when route.Contains("/pulls?") => Array.Empty<object>(),
+                var route when route.Contains("/compare/") => new { base_commit = new { sha = decision.BaseCommit },
+                    files = new[] { new { filename = "src/main.cs", status = "modified" } } },
+                var route when route.Contains("/refs/") || route.Contains("/ref/heads/") =>
+                    new { @object = new { sha = route.EndsWith("master") ? decision.BaseCommit : head } },
+                var route when route.Contains("/check-runs?") => new[] { new { check_runs = new[]
+                { new { name = "fixture", head_sha = head, app = new { id = 15368 }, id = 1, conclusion = "success" } } } },
+                var route when route.EndsWith("/rules/branches/master") => new[] { new { type = "required_status_checks",
+                    parameters = new { required_status_checks = new[] { new { context = "fixture", integration_id = 15368 } } } } },
+                var route when route.Contains("/rules/branches/") => new object[]
+                {
+                    new { type = "update", ruleset_source_type = "Repository", ruleset_id = 10,
+                        parameters = new { update_allows_fetch_and_merge = false } },
+                    new { type = "deletion", ruleset_source_type = "Repository", ruleset_id = 10 }
+                },
+                var route when route.EndsWith("/rulesets/10") => new { enforcement = "active", bypass_actors = Array.Empty<object>() },
+                _ => throw new Exception("Unexpected host request: " + endpoint)
+            };
+            return Task.FromResult(new CommandResult(0, Json.Stringify(result), ""));
+        }
+        var settings = new FactorySettings { AllowPush = true };
+        try
+        {
+            await new PullRequestCoordinator(store, settings, Host).ExecuteAsync(job.Id, signed, CancellationToken.None);
+            throw new Exception("The host timeout was swallowed.");
+        }
+        catch (TimeoutException) { }
+        var restarted = new StateStore(store.Home);
+        try
+        {
+            await new PullRequestCoordinator(restarted, settings, Host).ExecuteAsync(job.Id, signed, CancellationToken.None);
+            throw new Exception("The publication reservation was replayed after restart.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("requires reconciliation")) { }
+        Assert(writes == 1 && !restarted.Job(job.Id).Integrated);
+        try
+        {
+            await new FactoryEngine(restarted, new FactorySettings()).VerifyIntegrationAsync(job.Id);
+            throw new Exception("Direct verification bypassed the publication reservation.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed publication endpoint")) { }
         GitOperations.Git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
             "commit", "--allow-empty", "-m", "Different head");
         Assert(!store.IsReviewApproved(job.Id));
@@ -1764,6 +1829,326 @@ Test("Signed review approval survives restart and follows the exact reviewed hea
     finally
     {
         Environment.SetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY", oldKey);
+        Environment.SetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY", oldIntegrationKey);
+        try { home.Delete(true); } catch { }
+    }
+});
+
+await TestAsync("Publication defaults to disabled and requires a signed project decision before host access", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-publish-policy-");
+    var oldKey = Environment.GetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var job = new FactoryJob();
+        var decision = new PullRequestDecision(Guid.NewGuid(), job.Id, "", "example/repo", "master",
+            new string('a', 40), new string('b', 40), "publisher", "merge", "merge", 1,
+            DateTimeOffset.UtcNow.AddMinutes(5), PullRequestCoordinator.ScopeRevision(job));
+        Task<CommandResult> Host(string[] args, int timeout, CancellationToken ct) =>
+            throw new Exception("GitHub host was called before authorization.");
+        var settings = new FactorySettings { AllowPush = true };
+        var coordinator = new PullRequestCoordinator(store, settings, Host);
+        async Task Reject(string message)
+        {
+            try
+            {
+                await coordinator.ExecuteAsync(job.Id, new(decision, "AAAA"), CancellationToken.None);
+                throw new Exception("Unauthorized publication was accepted.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains(message)) { }
+        }
+        await Reject("disabled");
+        settings.AutoMerge = true;
+        Environment.SetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY", null);
+        await Reject("authority");
+        using var key = System.Security.Cryptography.RSA.Create(2048);
+        Environment.SetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY", key.ExportSubjectPublicKeyInfoPem());
+        await Reject("invalid signature");
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("FACTORY_INTEGRATION_PUBLIC_KEY", oldKey);
+        try { home.Delete(true); } catch { }
+    }
+});
+
+await TestAsync("Hosted merge receipts require signed base lineage and reviewed content", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-merge-receipt-");
+    try
+    {
+        string Sha(char c) => new(c, 40);
+        var decision = new PullRequestDecision(Guid.NewGuid(), Guid.NewGuid(), "", "example/repo", "master",
+            Sha('a'), Sha('b'), "publisher", "merge", "squash", 1, DateTimeOffset.UtcNow.AddMinutes(5), "");
+        var parents = new[] { Sha('a') };
+        var tree = Sha('e');
+        var intermediateTree = Sha('e');
+        var coordinator = new PullRequestCoordinator(new StateStore(home.FullName), new FactorySettings(), (args, _, _) =>
+        {
+            var endpoint = args[1];
+            var result = endpoint.Contains("/compare/") ? Json.Stringify(new
+            {
+                merge_base_commit = new { sha = decision.BaseCommit }, total_commits = 2
+            }) : Json.Stringify(new
+            {
+                sha = endpoint.Split('/').Last(),
+                tree = new { sha = endpoint.EndsWith(Sha('c')) ? tree : endpoint.EndsWith(Sha('d')) ? intermediateTree : Sha('e') },
+                parents = (endpoint.EndsWith(Sha('c')) ? parents :
+                    endpoint.EndsWith(Sha('b')) ? new[] { Sha('9') } : new[] { Sha('a') }).Select(sha => new { sha })
+            });
+            return Task.FromResult(new CommandResult(0, result, ""));
+        });
+        using var pull = System.Text.Json.JsonDocument.Parse(Json.Stringify(new { merged = true, merge_commit_sha = Sha('c') }));
+        Assert(await coordinator.RequireMergeReceiptAsync(decision, pull.RootElement, CancellationToken.None) == Sha('c'));
+        parents = [Sha('d')];
+        Assert(await coordinator.RequireMergeReceiptAsync(decision with { Method = "rebase" }, pull.RootElement, CancellationToken.None) == Sha('c'));
+        intermediateTree = Sha('8');
+        try
+        {
+            await coordinator.RequireMergeReceiptAsync(decision with { Method = "rebase" }, pull.RootElement, CancellationToken.None);
+            throw new Exception("A changed intermediate tree was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("reviewed counterpart")) { }
+        intermediateTree = Sha('e');
+        tree = Sha('f');
+        try
+        {
+            await coordinator.RequireMergeReceiptAsync(decision with { Method = "rebase" }, pull.RootElement, CancellationToken.None);
+            throw new Exception("A different integrated tree was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed base and head")) { }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
+await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed attempts and wrong apps", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-workflow-host-");
+    var oldEventKey = Environment.GetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PUBLIC_KEY");
+    try
+    {
+        var head = new string('a', 40);
+        var basis = new string('b', 40);
+        var decision = new PullRequestDecision(Guid.NewGuid(), Guid.NewGuid(), "", "example/repo", "master",
+            basis, head, "publisher", "merge", "merge", 42, DateTimeOffset.UtcNow.AddMinutes(5), "", WorkflowId: 7);
+        var project = new ProjectInfo { Checks = [new CheckCommand { Name = "build" }] };
+        var workflowId = 7;
+        var runHead = head;
+        var runBase = basis;
+        var omitPullLinks = false;
+        var conclusion = "success";
+        var appId = 15368;
+        var checkUrl = "https://api.github.com/repos/example/repo/check-runs/9";
+        var jobCheckUrl = checkUrl;
+        var reviews = Array.Empty<object>();
+        const long checkId = 132435614163;
+        const string nodeId = "CR_example_opaque";
+        using var context = System.Text.Json.JsonDocument.Parse("\"build\"");
+        using var appPin = System.Text.Json.JsonDocument.Parse("15368");
+        using var rollup = System.Text.Json.JsonDocument.Parse(Json.Stringify(new
+        {
+            id = nodeId, name = "build", checkSuite = new { app = new { databaseId = 15368 } }
+        }));
+        var selected = new List<RequiredCheckRun>();
+        GitHubWorkerResultVerifier.VerifyRequiredRun(context.RootElement, appPin.RootElement, [rollup.RootElement], selected);
+        IReadOnlyList<RequiredCheckRun> required = selected;
+        var coordinator = new PullRequestCoordinator(new StateStore(home.FullName), new FactorySettings(), (args, _, _) =>
+        {
+            var endpoint = args.Last();
+            object response = endpoint switch
+            {
+                var route when route.Contains("/workflows/7/runs?") => new[] { new { workflow_runs = new[] { new
+                {
+                    workflow_id = workflowId, head_sha = runHead, @event = "pull_request", run_number = 3,
+                    run_attempt = 2, status = "completed", conclusion, check_suite_id = 12, id = 8,
+                    pull_requests = omitPullLinks ? [] : new[] { new { number = 42, head = new { sha = head }, @base = new { sha = runBase } } }
+                } } } },
+                var route when route.Contains("/runs/8/attempts/2/jobs?") => new[] { new { jobs = new[]
+                {
+                    new { name = "build", conclusion = "success", check_run_url = jobCheckUrl }
+                } } },
+                var route when route.Contains("/check-suites/12/") => new[] { new { check_runs = new[]
+                {
+                    new { id = checkId, node_id = nodeId, url = checkUrl, app = new { id = appId }, head_sha = head, name = "build", conclusion = "success" }
+                } } },
+                var route when route.Contains("/pulls/42/reviews?") => new[] { reviews },
+                _ => throw new Exception("Unexpected host request: " + endpoint)
+            };
+            return Task.FromResult(new CommandResult(0, Json.Stringify(response), ""));
+        });
+        async Task Reject(string message)
+        {
+            try
+            {
+                await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
+                throw new Exception("Invalid workflow was accepted.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains(message)) { }
+        }
+        var receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
+        Assert(receipt.Contains(head) && receipt.Contains("\"workflowId\": 7") && receipt.Contains("132435614163"));
+        omitPullLinks = true;
+        await Reject("authoritative workflow event proof");
+        using var eventKey = System.Security.Cryptography.RSA.Create(2048);
+        Environment.SetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PUBLIC_KEY", eventKey.ExportSubjectPublicKeyInfoPem());
+        var workflowEvent = new WorkflowEvent("example/repo", 7, 8, 2, 12, 42, "master", basis, head);
+        WorkflowEventProof Sign(WorkflowEvent evidence) => new(evidence, Convert.ToBase64String(eventKey.SignData(
+            System.Text.Encoding.UTF8.GetBytes(Json.Stringify(evidence)),
+            System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss)));
+        foreach (var wrong in new[] { workflowEvent with { PullNumber = 41 }, workflowEvent with { BaseCommit = head },
+            workflowEvent with { Attempt = 1 } })
+        {
+            decision = decision with { EventProof = Sign(wrong) };
+            await Reject("authoritative workflow event proof");
+        }
+        decision = decision with { EventProof = new(workflowEvent, "invalid") };
+        await Reject("signature is invalid");
+        var webhookRepo = new { id = 100, full_name = "example/repo" };
+        var payload = System.Text.Encoding.UTF8.GetBytes(Json.Stringify(new
+        {
+            action = "completed", repository = webhookRepo,
+            workflow_run = new
+            {
+                id = 8, workflow_id = 7, run_attempt = 2, check_suite_id = 12, head_sha = head,
+                @event = "pull_request", conclusion = "success", pull_requests = new[]
+                {
+                    new { number = 42, head = new { sha = head, repo = webhookRepo },
+                        @base = new { @ref = "master", sha = basis, repo = webhookRepo } }
+                }
+            }
+        }));
+        const string webhookSecret = "test-webhook-secret";
+        var webhookSignature = "sha256=" + Convert.ToHexString(System.Security.Cryptography.HMACSHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(webhookSecret), payload));
+        try
+        {
+            WorkflowEventIssuer.Issue(payload, webhookSignature, "another-secret", eventKey);
+            throw new Exception("An unauthenticated event was signed.");
+        }
+        catch (ArgumentException ex) when (ex.Message.Contains("webhook authentication")) { }
+        var delivery = WorkflowEventIssuer.Issue(payload, webhookSignature, webhookSecret, eventKey);
+        var deliveryStore = new StateStore(home.FullName);
+        project.Origin = "https://github.com/example/repo";
+        project.BaseBranch = "master";
+        deliveryStore.Change(s => s.Projects.Add(project));
+        var oldSecret = Environment.GetEnvironmentVariable("FACTORY_GITHUB_WEBHOOK_SECRET");
+        var oldPrivateKey = Environment.GetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PRIVATE_KEY");
+        using var shutdown = new CancellationTokenSource();
+        using var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        Environment.SetEnvironmentVariable("FACTORY_GITHUB_WEBHOOK_SECRET", webhookSecret);
+        Environment.SetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PRIVATE_KEY", eventKey.ExportPkcs8PrivateKeyPem());
+        var host = DashboardHost.RunAsync(deliveryStore, new FactorySettings
+        {
+            ApiToken = Guid.NewGuid().ToString("N"), WorkerTokenKey = new string('a', 64)
+        }, $"http://127.0.0.1:{port}", shutdown.Token);
+        try
+        {
+            using var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{port}") };
+            async Task<System.Net.HttpStatusCode> Send(string signature)
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, "/api/github/workflow-events")
+                {
+                    Content = new ByteArrayContent(payload)
+                };
+                request.Headers.Add("X-GitHub-Event", "workflow_run");
+                request.Headers.Add("X-Hub-Signature-256", signature);
+                using var response = await client.SendAsync(request);
+                return response.StatusCode;
+            }
+            Assert(await Send(webhookSignature) == System.Net.HttpStatusCode.NoContent);
+            Assert(await Send(webhookSignature) == System.Net.HttpStatusCode.NoContent);
+            Assert(await Send("sha256=" + new string('0', 64)) == System.Net.HttpStatusCode.BadRequest);
+            Assert(new StateStore(home.FullName).FindWorkflowDelivery(workflowEvent)?.Event == delivery.Event);
+        }
+        finally
+        {
+            shutdown.Cancel();
+            try { await host; } catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { }
+            Environment.SetEnvironmentVariable("FACTORY_GITHUB_WEBHOOK_SECRET", oldSecret);
+            Environment.SetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PRIVATE_KEY", oldPrivateKey);
+        }
+        decision = decision with { EventProof = null };
+        receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
+        Assert(receipt.Contains("\"association\": \"signed-workflow-event\"") && receipt.Contains("132435614163"));
+        required = [new("build", 15368, "CR_other_pull")];
+        await Reject("trusted app");
+        required = selected;
+        omitPullLinks = false;
+        required = [new("build", 99, nodeId)];
+        await Reject("pin the authorized");
+        required = [new("build", 15368, "CR_different")];
+        await Reject("trusted app");
+        required = selected;
+        try
+        {
+            await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None,
+                [new("build", 15368, nodeId), new("extra-required", 15368, "CR_extra")]);
+            throw new Exception("An additional required check bypassed workflow validation.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("extra-required")) { }
+        async Task RejectReview()
+        {
+            try
+            {
+                await coordinator.RequireIndependentApprovalAsync(decision, "author", CancellationToken.None);
+                throw new Exception("Missing or stale approval was accepted.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("independent GitHub approval")) { }
+        }
+        await RejectReview();
+        reviews = [new { id = 1, user = new { login = "reviewer" }, state = "APPROVED", commit_id = basis }];
+        await RejectReview();
+        workflowId = 8;
+        await Reject("latest authorized");
+        workflowId = 7;
+        runHead = basis;
+        await Reject("latest authorized");
+        runHead = head;
+        runBase = head;
+        await Reject("latest authorized");
+        runBase = basis;
+        conclusion = "failure";
+        await Reject("latest authorized");
+        conclusion = "success";
+        appId = 1;
+        await Reject("trusted app");
+        appId = 15368;
+        jobCheckUrl += "-substituted";
+        await Reject("trusted app");
+        using var account = System.Text.Json.JsonDocument.Parse("""{"login":"publisher"}""");
+        using var revoked = System.Text.Json.JsonDocument.Parse("""{"permissions":{"push":false}}""");
+        try
+        {
+            PullRequestCoordinator.RequireHostPermission(decision, account.RootElement, revoked.RootElement);
+            throw new Exception("Revoked permission was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("write permission")) { }
+        foreach (var interrupted in new[] { false, true })
+        {
+            var writes = 0;
+            var refusal = new PullRequestCoordinator(new StateStore(home.FullName), new FactorySettings(), (_, _, _) =>
+            {
+                writes++;
+                return interrupted ? Task.FromException<CommandResult>(new TimeoutException()) :
+                    Task.FromResult(new CommandResult(1, "", "refused"));
+            });
+            try
+            {
+                await refusal.MutateAsync(["api", "--method", "POST", "repos/example/repo/pulls"], CancellationToken.None);
+                throw new Exception("An unsuccessful mutation was accepted.");
+            }
+            catch (TimeoutException) when (interrupted) { }
+            catch (InvalidOperationException ex) when (!interrupted && ex.Message.Contains("refused")) { }
+            Assert(writes == 1);
+        }
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("FACTORY_WORKFLOW_EVENT_PUBLIC_KEY", oldEventKey);
         try { home.Delete(true); } catch { }
     }
 });
@@ -2778,6 +3163,13 @@ await TestAsync("Merged squash PR requires matching metadata and reachable remot
         var proof = await IntegrationVerifier.VerifyAsync(project, job, remote,
             new FixedIntegrationPullReader(merged));
         Assert(proof.Source == "remote-merged-pr" && proof.IntegratedCommit == mergeSha);
+        try
+        {
+            await IntegrationVerifier.VerifyAsync(project, job, remote, new FixedIntegrationPullReader(merged),
+                expectedMergeCommit: new string('e', 40));
+            throw new Exception("A changed merge receipt was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("verified receipt")) { }
 
         async Task Reject(MergedPullRequest candidate)
         {
@@ -4022,7 +4414,7 @@ await TestAsync("Legacy remote PR-ready jobs cannot integrate without signed app
             await new FactoryEngine(reopened, new FactorySettings()).VerifyIntegrationAsync(job.Id, null, verifier);
             throw new Exception("Legacy PR-ready job passed without signed approval.");
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("signed remote review is required")) { }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed publication endpoint")) { }
         Assert(!reopened.Job(job.Id).Integrated && !reopened.Read().VerifiedIntegrations.Contains(job.Id));
     }
     finally { try { home.Delete(true); } catch { } }
@@ -4086,7 +4478,7 @@ await TestAsync("Completed remote builds require a signed decision bound to the 
             await new FactoryEngine(store, settings).VerifyIntegrationAsync(job.Id);
             throw new Exception("A signed remote build integrated without a pull request.");
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("Supply the merged pull request")) { }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed publication endpoint")) { }
         Assert(!store.Job(job.Id).Integrated);
         store.Change(s => s.Projects.Single().Origin = "https://github.com/example/other");
         Assert(!store.IsReviewApproved(job.Id));

@@ -11,6 +11,7 @@ public interface IWorkerResultVerifier
 }
 
 public sealed record VerifiedWorkerResult(string EvidenceJson, string? TreeSha = null);
+internal sealed record RequiredCheckRun(string Name, long AppId, string NodeId);
 
 public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
 {
@@ -24,7 +25,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         _runGitHub = runGitHub;
 
     internal async Task<string> VerifyMergedAsync(ProjectInfo project, FactoryJob job, string mergeCommit,
-        CancellationToken ct)
+        CancellationToken ct, Func<IReadOnlyList<RequiredCheckRun>, CancellationToken, Task<string>>? verifyWorkflow = null)
     {
         var repository = GitHubRepository(project.Origin);
         var number = PullNumber(job.PrUrl, repository);
@@ -32,7 +33,8 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         using var pr = await PullAsync(repository, number, ct);
         ValidateMergedSnapshot(pr, project, job, repository, mergeCommit);
         var baseSha = ReadBaseSha(pr);
-        var checks = await RequiredChecksAsync(repository, number, project.BaseBranch, job.HeadSha, ct);
+        var requiredRuns = verifyWorkflow is null ? null : new List<RequiredCheckRun>();
+        var checks = await RequiredChecksAsync(repository, number, project.BaseBranch, job.HeadSha, ct, requiredRuns);
         foreach (var check in project.Checks)
             if (!checks.Contains(check.Name))
                 throw new InvalidOperationException("Missing required GitHub check: " + check.Name);
@@ -52,10 +54,11 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         if (ReadBaseSha(latest) != baseSha ||
             latest.RootElement.GetProperty("changed_files").GetInt32() != pr.RootElement.GetProperty("changed_files").GetInt32())
             throw new InvalidOperationException("GitHub PR base changed during verification");
+        var workflowEvidence = verifyWorkflow is null ? null : await verifyWorkflow(requiredRuns!, ct);
         return Json.Stringify(new
         {
             repository, number, project.BaseBranch, baseSha, job.HeadSha, mergeCommit,
-            requiredChecks = checks.Order(StringComparer.Ordinal).ToArray(), changed
+            requiredChecks = checks.Order(StringComparer.Ordinal).ToArray(), changed, workflowEvidence
         });
     }
 
@@ -288,7 +291,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             ? sha : throw new InvalidOperationException("GitHub PR base commit is missing or invalid");
     }
 
-    private async Task<IReadOnlyList<string>> CompareFilePathsAsync(
+    internal async Task<IReadOnlyList<string>> CompareFilePathsAsync(
         string repository, string baseSha, string headSha, CancellationToken ct)
     {
         var response = await _runGitHub(
@@ -309,8 +312,8 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         return ParsePullFilePaths("[" + files.GetRawText() + "]");
     }
 
-    private async Task<HashSet<string>> RequiredChecksAsync(string repository, int number, string baseBranch,
-        string sha, CancellationToken ct)
+    internal async Task<HashSet<string>> RequiredChecksAsync(string repository, int number, string baseBranch,
+        string sha, CancellationToken ct, List<RequiredCheckRun>? requiredRuns = null)
     {
         const string query = """
             query($owner: String!, $name: String!, $base: String!, $sha: GitObjectID!, $pr: Int!) {
@@ -323,7 +326,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
                 }
                 object(oid: $sha) { ... on Commit { oid statusCheckRollup {
                   contexts(first: 100) { pageInfo { hasNextPage } nodes {
-                    ... on CheckRun { name isRequired(pullRequestNumber: $pr) conclusion checkSuite { app { databaseId } } }
+                    ... on CheckRun { id name isRequired(pullRequestNumber: $pr) conclusion checkSuite { app { databaseId } } }
                     ... on StatusContext { context isRequired(pullRequestNumber: $pr) state }
                   } }
                 } } }
@@ -356,7 +359,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             .ToHashSet(StringComparer.Ordinal);
 
         // The rollup only contains checks that exist. Read the branch policy independently.
-        VerifyClassicProtection(repo.GetProperty("ref"), successful, checks);
+        VerifyClassicProtection(repo.GetProperty("ref"), successful, checks, requiredRuns);
 
         var rulesResult = await _runGitHub(
             ["api", "--paginate", "--slurp", $"repos/{repository}/rules/branches/{Uri.EscapeDataString(baseBranch)}?per_page=100"], 45, ct);
@@ -374,14 +377,17 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             {
                 var context = check.GetProperty("context");
                 RequireSuccessfulContext(context, successful);
-                if (check.TryGetProperty("integration_id", out var appId) && appId.ValueKind != JsonValueKind.Null)
-                    RequireSuccessfulApp(context, appId, checks);
+                check.TryGetProperty("integration_id", out var appId);
+                VerifyRequiredRun(context, appId, checks, requiredRuns);
             }
         }
+        if (requiredRuns is not null && !successful.SetEquals(requiredRuns.Select(run => run.Name)))
+            throw new InvalidOperationException("Every required context must have a visible app-pinned rule.");
         return successful;
     }
 
-    private static void VerifyClassicProtection(JsonElement branch, HashSet<string> successful, JsonElement[] checks)
+    private static void VerifyClassicProtection(JsonElement branch, HashSet<string> successful, JsonElement[] checks,
+        List<RequiredCheckRun>? requiredRuns)
     {
         const string unavailable = "Cannot verify classic GitHub required check sources; use a controller credential that can read branch protection";
         var visibleRule = branch.GetProperty("refUpdateRule");
@@ -405,12 +411,36 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             RequireSuccessfulContext(context, successful);
             described.Add(context.GetString());
             var app = check.GetProperty("app");
-            if (app.ValueKind != JsonValueKind.Null)
-                RequireSuccessfulApp(context, app.GetProperty("databaseId"), checks);
+            VerifyRequiredRun(context, app.ValueKind == JsonValueKind.Null ? default : app.GetProperty("databaseId"),
+                checks, requiredRuns);
         }
         if (protection.GetProperty("requiredStatusCheckContexts").EnumerateArray().Any(c => !described.Contains(c.GetString())) ||
             (visibleContexts.ValueKind == JsonValueKind.Array && visibleContexts.EnumerateArray().Any(c => !described.Contains(c.GetString()))))
             throw new InvalidOperationException(unavailable);
+    }
+
+    internal static void VerifyRequiredRun(JsonElement context, JsonElement appId, JsonElement[] checks,
+        List<RequiredCheckRun>? requiredRuns)
+    {
+        if (appId.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            if (requiredRuns is not null)
+                throw new InvalidOperationException("A required context has no pinned app.");
+            return;
+        }
+        RequireSuccessfulApp(context, appId, checks);
+        if (requiredRuns is null) return;
+        var name = context.GetString()!;
+        var expected = appId.GetInt64();
+        var matches = checks.Where(check => check.TryGetProperty("name", out var n) && n.GetString() == name &&
+            check.TryGetProperty("checkSuite", out var suite) && suite.ValueKind == JsonValueKind.Object &&
+            suite.TryGetProperty("app", out var app) && app.ValueKind == JsonValueKind.Object &&
+            app.GetProperty("databaseId").GetInt64() == expected).ToArray();
+        if (matches.Length != 1 || !matches[0].TryGetProperty("id", out var id) ||
+            id.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(id.GetString()))
+            throw new InvalidOperationException("A required context must identify one exact successful check run: " + name);
+        var receipt = new RequiredCheckRun(name, expected, id.GetString()!);
+        if (!requiredRuns.Contains(receipt)) requiredRuns.Add(receipt);
     }
 
     private static void RequireSuccessfulContext(JsonElement context, HashSet<string> successful)

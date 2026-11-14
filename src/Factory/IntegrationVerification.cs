@@ -44,6 +44,12 @@ public interface IRemoteBaseReader
 
 public sealed class GitRemoteBaseReader : IRemoteBaseReader
 {
+    private readonly bool _synchronize;
+
+    public GitRemoteBaseReader() { }
+    internal GitRemoteBaseReader(bool synchronize) => _synchronize = synchronize;
+    internal bool Synchronize => _synchronize;
+
     public async Task<string> ReadBaseCommitAsync(ProjectInfo project, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(project.Origin) || string.IsNullOrWhiteSpace(project.BaseBranch))
@@ -102,7 +108,7 @@ public static class IntegrationVerifier
 
     public static async Task<IntegrationProof> VerifyAsync(ProjectInfo project, FactoryJob job,
         IRemoteBaseReader? remote = null, IIntegrationPullRequestReader? pullRequests = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, string? expectedMergeCommit = null)
     {
         if (!IsCommitSha(job.HeadSha))
             throw new InvalidOperationException("An exact committed source SHA is required for integration verification");
@@ -119,10 +125,6 @@ public static class IntegrationVerifier
                 "rev-parse", project.BaseBranch).Trim(), job.HeadSha);
         }
 
-        var baseSha = await (remote ?? new GitRemoteBaseReader()).ReadBaseCommitAsync(project, ct);
-        if (!IsCommitSha(baseSha))
-            throw new InvalidOperationException("Remote provider returned an invalid base commit");
-
         string incorporatedSha;
         string source;
         if (!string.IsNullOrWhiteSpace(job.PrUrl))
@@ -134,6 +136,8 @@ public static class IntegrationVerifier
             var pr = await (pullRequests ?? new GitHubIntegrationPullRequestReader())
                 .ReadAsync(repository, number, ct);
             ValidateMergedPullRequest(pr, repository, project, job);
+            if (expectedMergeCommit is not null && pr.MergeCommit != expectedMergeCommit)
+                throw new InvalidOperationException("GitHub returned a different merge commit from the verified receipt.");
             incorporatedSha = pr.MergeCommit;
             source = "remote-merged-pr";
         }
@@ -143,8 +147,20 @@ public static class IntegrationVerifier
             source = "remote-ancestry";
         }
 
+        var baseSha = await (remote ?? new GitRemoteBaseReader()).ReadBaseCommitAsync(project, ct);
+        if (!IsCommitSha(baseSha))
+            throw new InvalidOperationException("Remote provider returned an invalid base commit");
         if (!IsAncestor(project.Path, incorporatedSha, baseSha))
             throw new InvalidOperationException("The integration commit is not reachable from the remote base branch");
+        if (remote is GitRemoteBaseReader { Synchronize: true } && !IsAncestor(project.Path, baseSha, project.BaseBranch))
+        {
+            if (GitOperations.Git(project.Path, "branch", "--show-current") != project.BaseBranch ||
+                GitOperations.Git(project.Path, "status", "--porcelain").Length != 0)
+                throw new InvalidOperationException("Check out the clean local base before verifying integration.");
+            var sync = await Commands.RunAsync("git", ["-C", project.Path, "merge", "--ff-only", baseSha],
+                Environment.CurrentDirectory, 120, cancellationToken: ct);
+            Commands.Require(sync, "fast-forward local base");
+        }
 
         // Downstream worktrees currently start from the local base branch. Do not release
         // dependencies until that checkout contains the verified remote base revision.

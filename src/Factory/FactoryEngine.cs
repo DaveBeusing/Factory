@@ -314,7 +314,8 @@ public sealed class FactoryEngine
             ct.ThrowIfCancellationRequested();
             // Checks and reviewers can also modify files; recheck the full worktree.
             WorkPackageScope.ValidateWorktree(p, _store.Job(id));
-           foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id), report, ct);
+           foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id),
+                System.Text.Json.JsonSerializer.Deserialize<QualityResult>(Json.Stringify(report), Json.Options)!, ct);
            EnsureOwned(id, fence);
             report.ReviewFindings.AddRange(report.Findings.Select(message => new ReviewFinding("controller", message)));
            report.Cycle = cycle;

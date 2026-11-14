@@ -1618,7 +1618,9 @@ Test("Review admission survives restart and cannot exceed three cycles", () =>
         var contenders = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
             new StateStore(home.FullName).BeginReviewCycle(job.Id, fence, 99))).ToArray();
         Task.WaitAll(contenders);
-        Assert(contenders.Select(x => x.Result).Order().SequenceEqual([0, 0, 2, 3]));
+        Assert(contenders.Select(x => x.Result).Order().SequenceEqual([0, 0, 0, 2]));
+        store.FinishReviewCycle(job.Id, fence, 2, report);
+        Assert(store.BeginReviewCycle(job.Id, fence, 99) == 3);
         Assert(new StateStore(home.FullName).BeginReviewCycle(job.Id, fence, 99) == 0);
     }
     finally { try { home.Delete(true); } catch { } }

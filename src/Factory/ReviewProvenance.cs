@@ -43,6 +43,10 @@ public sealed partial class StateStore
         using var count = Command(db, tx, "SELECT COUNT(*) FROM review_cycles WHERE job_id=$id;", ("$id", id));
         var used = Convert.ToInt32(count.ExecuteScalar());
         if (used >= Math.Clamp(maximum, 1, ReviewPolicy.MaxCycles)) return 0;
+        using var pending = Command(db, tx, """
+            SELECT 1 FROM review_cycles WHERE job_id=$id AND generation=$generation AND report IS NULL LIMIT 1;
+            """, ("$id", id), ("$generation", fence.Generation));
+        if (pending.ExecuteScalar() is not null) return 0;
         var cycle = used + 1;
         Execute(db, tx, "INSERT INTO review_cycles(job_id,cycle,generation) VALUES($id,$cycle,$generation);",
             ("$id", id), ("$cycle", cycle), ("$generation", fence.Generation));

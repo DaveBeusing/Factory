@@ -1703,7 +1703,7 @@ Test("Uncertain publication closes the round durably and blocks reviewed retry",
     finally { try { home.Delete(true); } catch { } }
 });
 
-Test("Signed review approval survives restart and follows the exact reviewed head", () =>
+await TestAsync("Signed review approval survives restart and guards durable publication reservations", async () =>
 {
     var home = Directory.CreateTempSubdirectory("factory-trusted-review-");
     var oldKey = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
@@ -1717,7 +1717,8 @@ Test("Signed review approval survives restart and follows the exact reviewed hea
             "commit", "--allow-empty", "-m", "Reviewed head");
         var head = GitOperations.Head(repo);
         var store = new StateStore(Path.Combine(home.FullName, "state"));
-        var project = new ProjectInfo { Checks = [new CheckCommand { Name = "fixture", Executable = "fixture" }] };
+        var project = new ProjectInfo { Origin = "https://github.com/example/repo",
+            Checks = [new CheckCommand { Name = "fixture", Executable = "fixture" }] };
         var job = new FactoryJob { ProjectId = project.Id, Worktree = repo, HeadSha = head, SessionId = "builder-session" };
         var fence = store.Change((s, db, tx) =>
         {
@@ -1757,6 +1758,24 @@ Test("Signed review approval survives restart and follows the exact reviewed hea
         catch (ArgumentException) { }
         store.RecordTrustedReview(new(approval, signature));
         Assert(new StateStore(store.Home).IsReviewApproved(job.Id));
+        var decision = new PullRequestDecision(project.Id, job.Id, ReviewPolicy.ProjectRevision(project),
+            "example/repo", "master", new string('a', 40), head, "publisher", "draft", "pr-ci", 0,
+            DateTimeOffset.UtcNow.AddMinutes(5), PullRequestCoordinator.ScopeRevision(job));
+        var signed = new SignedPullRequestDecision(decision, "");
+        new PullRequestCoordinator(store, new FactorySettings()).Reserve(signed, store.Job(job.Id), project);
+        var restarted = new StateStore(store.Home);
+        try
+        {
+            new PullRequestCoordinator(restarted, new FactorySettings()).Reserve(signed, restarted.Job(job.Id), project);
+            throw new Exception("The publication reservation was replayed after restart.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("requires reconciliation")) { }
+        try
+        {
+            await new FactoryEngine(restarted, new FactorySettings()).VerifyIntegrationAsync(job.Id);
+            throw new Exception("Direct verification bypassed the publication reservation.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed publication endpoint")) { }
         GitOperations.Git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
             "commit", "--allow-empty", "-m", "Different head");
         Assert(!store.IsReviewApproved(job.Id));
@@ -1873,6 +1892,7 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
         var appId = 15368;
         var checkUrl = "https://api.github.com/repos/example/repo/check-runs/9";
         var jobCheckUrl = checkUrl;
+        var reviews = Array.Empty<object>();
         var coordinator = new PullRequestCoordinator(new StateStore(home.FullName), new FactorySettings(), (args, _, _) =>
         {
             var endpoint = args.Last();
@@ -1892,6 +1912,7 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
                 {
                     new { id = 9, url = checkUrl, app = new { id = appId }, head_sha = head, name = "build", conclusion = "success" }
                 } } },
+                var route when route.Contains("/pulls/42/reviews?") => new[] { reviews },
                 _ => throw new Exception("Unexpected host request: " + endpoint)
             };
             return Task.FromResult(new CommandResult(0, Json.Stringify(response), ""));
@@ -1907,6 +1928,25 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
         }
         var receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None);
         Assert(receipt.Contains(head) && receipt.Contains("\"workflowId\": 7"));
+        try
+        {
+            await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None,
+                new HashSet<string> { "build", "extra-required" });
+            throw new Exception("An additional required check bypassed workflow validation.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("extra-required")) { }
+        async Task RejectReview()
+        {
+            try
+            {
+                await coordinator.RequireIndependentApprovalAsync(decision, "author", CancellationToken.None);
+                throw new Exception("Missing or stale approval was accepted.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("independent GitHub approval")) { }
+        }
+        await RejectReview();
+        reviews = [new { id = 1, user = new { login = "reviewer" }, state = "APPROVED", commit_id = basis }];
+        await RejectReview();
         workflowId = 8;
         await Reject("latest authorized");
         workflowId = 7;
@@ -4215,7 +4255,7 @@ await TestAsync("Legacy remote PR-ready jobs cannot integrate without signed app
             await new FactoryEngine(reopened, new FactorySettings()).VerifyIntegrationAsync(job.Id, null, verifier);
             throw new Exception("Legacy PR-ready job passed without signed approval.");
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("signed remote review is required")) { }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed publication endpoint")) { }
         Assert(!reopened.Job(job.Id).Integrated && !reopened.Read().VerifiedIntegrations.Contains(job.Id));
     }
     finally { try { home.Delete(true); } catch { } }
@@ -4279,7 +4319,7 @@ await TestAsync("Completed remote builds require a signed decision bound to the 
             await new FactoryEngine(store, settings).VerifyIntegrationAsync(job.Id);
             throw new Exception("A signed remote build integrated without a pull request.");
         }
-        catch (InvalidOperationException ex) when (ex.Message.Contains("Supply the merged pull request")) { }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed publication endpoint")) { }
         Assert(!store.Job(job.Id).Integrated);
         store.Change(s => s.Projects.Single().Origin = "https://github.com/example/other");
         Assert(!store.IsReviewApproved(job.Id));

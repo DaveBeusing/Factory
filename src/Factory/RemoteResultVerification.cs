@@ -24,7 +24,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         _runGitHub = runGitHub;
 
     internal async Task<string> VerifyMergedAsync(ProjectInfo project, FactoryJob job, string mergeCommit,
-        CancellationToken ct)
+        CancellationToken ct, Func<IReadOnlySet<string>, CancellationToken, Task<string>>? verifyWorkflow = null)
     {
         var repository = GitHubRepository(project.Origin);
         var number = PullNumber(job.PrUrl, repository);
@@ -52,10 +52,11 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
         if (ReadBaseSha(latest) != baseSha ||
             latest.RootElement.GetProperty("changed_files").GetInt32() != pr.RootElement.GetProperty("changed_files").GetInt32())
             throw new InvalidOperationException("GitHub PR base changed during verification");
+        var workflowEvidence = verifyWorkflow is null ? null : await verifyWorkflow(checks, ct);
         return Json.Stringify(new
         {
             repository, number, project.BaseBranch, baseSha, job.HeadSha, mergeCommit,
-            requiredChecks = checks.Order(StringComparer.Ordinal).ToArray(), changed
+            requiredChecks = checks.Order(StringComparer.Ordinal).ToArray(), changed, workflowEvidence
         });
     }
 

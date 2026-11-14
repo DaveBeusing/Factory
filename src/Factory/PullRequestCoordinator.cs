@@ -73,10 +73,16 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (pull.GetProperty("merged").GetBoolean())
         {
             var mergeCommit = await RequireMergeReceiptAsync(d, pull, ct);
-            var workflowEvidence = await RequireExactWorkflowAsync(d, project, ct);
+            var author = pull.GetProperty("user").GetProperty("login").GetString();
             return await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, url, verifier, ct,
                 remote: new GitRemoteBaseReader(synchronize: true), coordinated: true, expectedMergeCommit: mergeCommit,
-                workflowEvidence: workflowEvidence);
+                verifyWorkflow: async (checks, cancellation) =>
+                {
+                    var evidence = await RequireExactWorkflowAsync(d, project, cancellation, checks);
+                    await RequireIndependentApprovalAsync(d, author, cancellation);
+                    RequireCurrentDecision(signed, id);
+                    return evidence;
+                });
         }
 
         await RequireCurrentBaseAsync(d, ct);
@@ -246,7 +252,8 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         }
     }
 
-    internal async Task<string> RequireExactWorkflowAsync(PullRequestDecision d, ProjectInfo project, CancellationToken ct)
+    internal async Task<string> RequireExactWorkflowAsync(PullRequestDecision d, ProjectInfo project, CancellationToken ct,
+        IReadOnlySet<string>? requiredChecks = null)
     {
         if (d.WorkflowId <= 0 || project.Checks.Count == 0)
             throw new InvalidOperationException("A signed workflow ID and named checks are required.");
@@ -276,19 +283,19 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             $"{prefix}/check-suites/{suite}/check-runs?per_page=100"], ct);
         var checks = runs.EnumerateArray().SelectMany(page => page.GetProperty("check_runs").EnumerateArray()).ToArray();
         var checkIds = new List<long>();
-        foreach (var check in project.Checks)
+        foreach (var name in requiredChecks ?? project.Checks.Select(check => check.Name).ToHashSet(StringComparer.Ordinal))
         {
-            var candidates = hostedJobs.Where(job => job.GetProperty("name").GetString() == check.Name).ToArray();
+            var candidates = hostedJobs.Where(job => job.GetProperty("name").GetString() == name).ToArray();
             if (candidates.Length != 1 || candidates[0].GetProperty("conclusion").GetString() != "success")
-                throw new InvalidOperationException("The authorized workflow attempt did not pass: " + check.Name);
+                throw new InvalidOperationException("The authorized workflow attempt did not pass: " + name);
             var link = candidates[0].GetProperty("check_run_url").GetString();
             var match = checks.Where(run => run.GetProperty("url").GetString() == link &&
                 run.GetProperty("app").GetProperty("id").GetInt64() == 15368 &&
                 run.GetProperty("head_sha").GetString() == d.HeadCommit &&
-                run.GetProperty("name").GetString() == check.Name &&
+                run.GetProperty("name").GetString() == name &&
                 run.GetProperty("conclusion").GetString() == "success").ToArray();
             if (match.Length != 1)
-                throw new InvalidOperationException("The workflow check did not originate from the trusted app on the exact head: " + check.Name);
+                throw new InvalidOperationException("The workflow check did not originate from the trusted app on the exact head: " + name);
             checkIds.Add(match[0].GetProperty("id").GetInt64());
         }
         return Json.Stringify(new { d.WorkflowId, runId, attempt, suite, d.PullNumber, d.HeadCommit, d.BaseCommit, checkIds });
@@ -336,14 +343,19 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (pull.GetProperty("draft").GetBoolean() || pull.GetProperty("mergeable_state").GetString() != "clean" ||
             pull.GetProperty("base").GetProperty("sha").GetString() != d.BaseCommit)
             throw new InvalidOperationException("The PR is not clean on the authorized base.");
-        await RequireExactWorkflowAsync(d, project, ct);
         var checks = await verifier.RequiredChecksAsync(d.Repository, d.PullNumber, d.BaseBranch, d.HeadCommit, ct);
+        await RequireExactWorkflowAsync(d, project, ct, checks);
         if (!project.Checks.All(check => checks.Contains(check.Name)))
             throw new InvalidOperationException("A configured required check is missing.");
         var changed = await verifier.CompareFilePathsAsync(d.Repository, d.BaseCommit, d.HeadCommit, ct);
         WorkPackageScope.Enforce(job.ExpectedPaths, changed);
         GitOperations.EnforcePaths(changed, project.ProtectedPaths);
         var author = pull.GetProperty("user").GetProperty("login").GetString();
+        await RequireIndependentApprovalAsync(d, author, ct);
+    }
+
+    internal async Task RequireIndependentApprovalAsync(PullRequestDecision d, string? author, CancellationToken ct)
+    {
         var pages = await ReadAsync(["api", "--paginate", "--slurp",
             $"repos/{d.Repository}/pulls/{d.PullNumber}/reviews?per_page=100"], ct);
         var reviews = pages.EnumerateArray().SelectMany(page => page.EnumerateArray())
@@ -391,7 +403,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
     internal static string ScopeRevision(FactoryJob job) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(Json.Stringify(job.ExpectedPaths))));
 
-    private void Reserve(SignedPullRequestDecision signed, FactoryJob before, ProjectInfo project)
+    internal void Reserve(SignedPullRequestDecision signed, FactoryJob before, ProjectInfo project)
     {
         var d = signed.Decision;
         store.Change((state, db, tx) =>
@@ -447,5 +459,24 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
         if (json.RootElement.TryGetProperty("merged", out var merged) && !merged.GetBoolean())
             throw new InvalidOperationException("GitHub did not merge the pull request.");
         return json.RootElement.Clone();
+    }
+}
+
+public sealed partial class StateStore
+{
+    internal bool HasPublicationReservation(Guid jobId)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction(deferred: true);
+        return HasPublicationReservation(db, tx, jobId);
+    }
+
+    internal static bool HasPublicationReservation(Microsoft.Data.Sqlite.SqliteConnection db,
+        Microsoft.Data.Sqlite.SqliteTransaction tx, Guid jobId)
+    {
+        using var query = Command(db, tx, """
+            SELECT 1 FROM lifecycle_audit WHERE entity_id=$id AND entity_kind='publication' LIMIT 1;
+            """, ("$id", jobId));
+        return query.ExecuteScalar() is not null;
     }
 }

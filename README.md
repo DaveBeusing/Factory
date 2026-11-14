@@ -16,12 +16,12 @@ Factory is a **local-first software engineering orchestrator** written in C# and
 
 | Stage | Current implementation | Further reading |
 | --- | --- | --- |
-| **Discover and plan** | Master-first preflight, repository review, goals and explicit plan adoption | [Planning preflight](docs/planning-preflight.md) |
-| **Coordinate** | Dependency-aware queue, budgets, leases and path-conflict checks | [Architecture](docs/architecture.md) |
+| **Discover and plan** | Master-first preflight, policy-governed issue intake, versioned specifications and revision-bound plan adoption | [Planning preflight](docs/planning-preflight.md) |
+| **Coordinate** | Verified dependency commits, budgets, fenced leases and shared-resource checks | [Architecture](docs/architecture.md) |
 | **Execute** | Per-job Git branch and worktree; native Codex execution; scoped remote workers | [Remote workers](docs/remote-workers.md) |
-| **Validate** | Executable checks, scoped changes, independent reviews and commit-bound evidence | [Quality gates](docs/quality.md) |
-| **Operate** | Mission Control workspaces for projects, jobs, plans, workers, recovery and capacity | [Mission Control](docs/mission-control.md) |
-| **Integrate** | Optional draft PR preparation; manual merge and Git-history verification | [Workflow](docs/getting-started.md#plan-run-and-verify) |
+| **Validate** | Executable checks, scoped changes, durable review cycles and signed independent approval for guarded publication | [Quality gates](docs/quality.md) |
+| **Operate** | Mission Control workspaces for projects, jobs, plans, workers, recovery, capacity and policy decisions | [Mission Control](docs/mission-control.md) |
+| **Integrate** | Optional signed draft publication, PR readiness checks, manual merge and Git-history verification | [Guarded publication](docs/guarded-publication.md) |
 
 ## Get started
 
@@ -57,7 +57,7 @@ Register the **Git repository root** and checks appropriate to the target projec
 .\dist\Factory.exe plan --goal '<goal-guid>'
 ```
 
-Review the proposed plan, master-source findings, open work, expected paths, dependencies and validation evidence **before** adopting it.
+Review the proposed plan, master-source findings, open work, expected paths, dependencies and validation evidence **before** adopting it. The CLI example uses the default Manual adoption policy. See [Plan adoption policy](docs/planning-preflight.md#plan-adoption-policy) for high-risk plans subject to independent approval.
 
 ```powershell
 .\dist\Factory.exe adopt --goal '<goal-guid>' --plan-revision '<reviewed-revision-guid>' --mode local --reviewed-existing-work
@@ -94,7 +94,7 @@ The diagram describes the normal flow, not an authorization bypass. Unsupported 
 | Area | Supported now | Not implied |
 | --- | --- | --- |
 | **Platform** | .NET 10 with a validated Windows x64 build/package path | Certified cross-platform distribution |
-| **Storage** | Relational SQLite, **schema 18**, with transactional upgrades from supported relational schemas | Automatic migration of legacy single-JSON-row state |
+| **Storage** | Relational SQLite, **schema 25**, with transactional upgrades from supported relational schemas | Automatic migration of legacy single-JSON-row state |
 | **Providers** | Codex builder; Claude Code and Ollama read-only roles | Arbitrary provider execution or equivalent isolation |
 | **Access** | Controller administrator, project-scoped human credentials, separately scoped worker and executor credentials | Finished enterprise IAM/RBAC or OS sandbox |
 | **Usage** | Recorded tokens, local provider budgets, provider-reported allowance when available | Inferred or fabricated account quota |

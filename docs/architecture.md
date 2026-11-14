@@ -5,7 +5,7 @@
 [← Documentation](README.md) · [Quality](quality.md) · [Roadmap](roadmap.md)
 
 > [!NOTE]
-> This guide describes the implementation inspected on **2026-11-10** at `master` (`a4c858a`), alongside explicitly identified gaps. It is not a certification of runtime security, complete compatibility or external provider availability.
+> This guide describes the implementation inspected on **2026-11-14** at `master` (`77da14c`), alongside explicitly identified gaps. It is not a certification of runtime security, complete compatibility or external provider availability.
 
 ## System overview
 
@@ -36,9 +36,9 @@ Arrows indicate conceptual flow, not separate network services or guaranteed tru
 | CLI and commands | [`Program.cs`](../src/Factory/Program.cs) | Command parsing and orchestration entry points |
 | Dashboard and scoped APIs | [`Dashboard.cs`](../src/Factory/Dashboard.cs), [`ProjectViewerEndpoint.cs`](../src/Factory/ProjectViewerEndpoint.cs) | Authenticated HTTP, embedded UI and project routes |
 | Frontend | [`src/Factory/ui/`](../src/Factory/ui/index.html) | Navigation, rendering, forms and live connection state |
-| Domain and persistence | [`Models.cs`](../src/Factory/Models.cs), [`StateStore.cs`](../src/Factory/StateStore.cs) | Jobs, goals, budgets, relational SQLite schema 18 |
-| Planning | [`GoalsAndPlanning.cs`](../src/Factory/GoalsAndPlanning.cs), [`WorkPackagePreflight.cs`](../src/Factory/WorkPackagePreflight.cs) | Goal proposals, revision adoption, master-first checks |
-| Scheduling | [`Scheduler.cs`](../src/Factory/Scheduler.cs), [`FactoryEngine.cs`](../src/Factory/FactoryEngine.cs) | Eligibility, budgets, capacity, transitions |
+| Domain and persistence | [`Models.cs`](../src/Factory/Models.cs), [`StateStore.cs`](../src/Factory/StateStore.cs) | Jobs, goals, budgets, relational SQLite schema 25 |
+| Planning | [`GoalsAndPlanning.cs`](../src/Factory/GoalsAndPlanning.cs), [`WorkPackagePreflight.cs`](../src/Factory/WorkPackagePreflight.cs) | Goal proposals, master-first checks and policy-controlled revision adoption |
+| Scheduling | [`Scheduler.cs`](../src/Factory/Scheduler.cs), [`FactoryEngine.cs`](../src/Factory/FactoryEngine.cs) | Eligibility, budgets, capacity and fenced execution |
 | Quality / Git | [`Quality.cs`](../src/Factory/Quality.cs), [`GitOperations.cs`](../src/Factory/GitOperations.cs) | Checks, independent review, worktrees and scope |
 | Worker security | [`WorkerAuthentication.cs`](../src/Factory/WorkerAuthentication.cs), [`WorkerAuthorization.cs`](../src/Factory/WorkerAuthorization.cs) | Worker-specific credentials and project capability grants |
 | Providers | [`ProviderRouting.cs`](../src/Factory/ProviderRouting.cs), [`Providers/`](../src/Factory/Providers/Codex/CodexAgentRuntimes.cs) | Role restrictions and provider selection |
@@ -50,10 +50,10 @@ Arrows indicate conceptual flow, not separate network services or guaranteed tru
 Factory records project and goal ownership, proposed plan revisions, jobs, worker leases, token reservations, evidence and operational events. Relevant invariants include:
 
 1. **Preflight** inspects the committed master source and accessible matching work before adoption. Unknown PR visibility is reported as unverified.
-2. **Plans** require explicit revision-bound adoption. A plan is not a grant of execution or publication permissions.
-3. **Scheduler** checks dependencies, file paths, resource limits and active lease ownership. Parallel work is not assumed safe merely because work packages have different titles.
+2. **Plans** require explicit revision-bound adoption. Version 1 specifications bind package scope and acceptance evidence to the saved revision. Accepted GitHub issues remain draft goals until plan adoption.
+3. **Scheduler** checks verified dependency commits, file paths, shared resources, capacity and active lease ownership. Interrupted jobs can retain resource reservations until recovery confirms runner and Git state.
 4. **Execution** uses isolated Git worktrees; scope violations and protected paths fail closed before publication.
-5. **Validation** runs configured deterministic checks, risk-specific reviews and bounded retries. Evidence belongs to the evaluated source revision.
+5. **Validation** runs configured deterministic checks, risk-specific reviews and bounded retries. The controller reserves review cycles durably and binds signed independent approvals to the evaluated revision and evidence.
 6. **Integration** is manually authorized; `verify` checks the correct remote/base/PR history before declaring integration.
 
 See [preflight](planning-preflight.md), [quality](quality.md) and [recovery](recovery.md) for the exact operational conditions.
@@ -63,13 +63,13 @@ See [preflight](planning-preflight.md), [quality](quality.md) and [recovery](rec
 | Capability | Current state | Boundary or next proof |
 | --- | --- | --- |
 | Native runtime | .NET 10; validated Windows x64 packaging | No blanket Linux/macOS support claim |
-| Persistence | Relational SQLite schema 18, transactional upgrade code | Real-world backups, multi-writer and rollback verification |
+| Persistence | Relational SQLite schema 25, transactional upgrade code | Real-world backups, multi-writer and rollback verification |
 | Provider adapters | Codex writes; Claude Code and Ollama for read-only roles | No automatic interchangeability or general model capability negotiation |
 | Operator access | Administrative and project-scoped human credentials/grants | Not a complete organizational identity/RBAC stack |
 | Worker access | Worker-specific tokens, project grants and controller-reviewed capability evidence | Attestation is not a cryptographic OS measurement |
 | Execution isolation | Git worktrees; optional container **checks** | Agent process remains subject to its host OS privileges |
 | Quality | Check and review gates, commit-specific records | A reviewer statement is not a security proof |
-| Publishing | Opt-in push/draft PR preparation, manual merge, history verification | No unattended merge or deployment |
+| Publishing | Opt-in signed draft and readiness decisions, manual GitHub merge and history verification | No unattended merge or deployment |
 | Release | Local SemVer/provenance and Windows package rehearsal | No signed GA distribution or unconditional upgrade support |
 
 ## Trust boundaries

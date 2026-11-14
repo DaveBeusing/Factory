@@ -41,6 +41,18 @@ Changing the objective or ordered acceptance criteria invalidates an existing dr
 
 GitHub PR and issue inventories are optional for local-first or non-GitHub repositories, is capped at 100 entries each, and may be unavailable. In those cases, the operator must check external work manually. The preflight cannot automatically prove that a feature is fully implemented, and it does not approve merges or deployment.
 
+## Plan adoption policy
+
+Administrators read and update the revisioned project policy at `/api/projects/{projectId}/plan-policy`. A policy update sends the current `expectedRevision` and one of the exact rule values below.
+
+| Rule | Adoption |
+| --- | --- |
+| `Manual` | Default. The adopting operator explicitly acknowledges review of the saved revision and existing work. |
+| `IndependentApproval` | For high-risk plans, an identified Planner must adopt and a different identified Planner with a current project grant must approve the exact saved revision and policy revision. Other risk levels follow manual review. |
+| `Deny` | Blocks plan adoption for the project. |
+
+Approval is time-limited and checked again at adoption. A changed source revision, changed policy revision, revoked approval or invalidated grant requires a fresh approval. Use the scoped Goal planner to record approval and adopt high-risk plans under this rule. [Mission Control](mission-control.md#project-goal-planner)
+
 ## GitHub integration policy validation
 
 The controller checks each required context at the verified PR head. For classic branch protection and active rulesets that pin a required check to an app, a successful check run must expose the same app ID. A same-name result from another app or a commit status without verifiable app identity cannot satisfy that pin. Required workflow rules remain blocked because a check context alone cannot establish the workflow's identity.

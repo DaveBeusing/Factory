@@ -99,6 +99,10 @@ Use this path for a quarantined local job with a verifiable previous runner on t
 
 The equivalent administrator action is `POST /api/jobs/{id}/reconcile` with `reviewed: true` and `reason`. A successful reconciliation records the decision and returns the job to `queued`. An unresolved goal hold still prevents a new claim. After reconciling the job and its budgets, use `resume` to allow new claims if the queue is paused. A subsequent runner claim uses a new lease and generation. Lease fencing protects Factory state. Inspect GitHub and the worktree separately for any effects that already occurred.
 
+## Release shared resources after reconciliation
+
+A fenced job may still hold shared resources when its previous runner or Git effects need investigation. Establish that the recorded runner has stopped and reconcile its worktree, branch, pushes and pull requests. An administrator can then submit the current `controlRevision`, `runnerStopped: true`, `gitEffectsReviewed: true` and an evidence reason to `POST /api/jobs/{id}/release-resources`. The controller audits the release and leaves the job cancelled. Resolve retained budget holds separately. [Shared scheduling resources](cli.md#shared-scheduling-resources)
+
 ## Restore or upgrade state
 
 Stop Factory before backing up its state and preserve the existing worktrees. To downgrade, restore a database backup compatible with the previous binary. The schema 3 migration quarantines active goal jobs that had no recorded reservation. The schema 7 migration moves active provider reservations with no recorded process owner to held. Review those records through the same evidence-based settlement workflow.

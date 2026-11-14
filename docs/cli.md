@@ -1,6 +1,6 @@
 # Factory command reference
 
-**Commands verified against the .NET 10 CLI source on 2026-11-10.**
+**Factory CLI and related controller operations.**
 
 [← Documentation](README.md) · [Getting started](getting-started.md) · [Recovery](recovery.md)
 
@@ -85,8 +85,9 @@ dotnet run --project tools/Factory.Versioning -- build-version
 
 ## GitHub issue intake
 
-Run `issue-intake --project NAME` from the local operator CLI. It uses the registered GitHub origin and the paginated GitHub inventory through the planning preflight adapter. Incomplete scans never create a goal. Bot, app, and authenticated self-authored issues are held. The default policy holds observations. Administrators can read and update `/api/projects/{projectId}/issue-intake-policy` with the current `expectedRevision` and a rule of `hold`, `deny`, `escalate` or `accept`. Acceptance creates one linked draft goal per issue. Policy changes immediately invalidate old intake acceptance. A successful rescan is required before an accepted draft can be adopted. A closed or missing issue loses its acceptance on rescan. Drafts are retained for review. If the source or intake policy revision changes, save and review a new plan revision before adoption. Intake does not run jobs or write to GitHub.
-# Versioned specifications
+Run `issue-intake --project NAME` from the local operator CLI. It uses the registered GitHub origin and the paginated GitHub inventory through the planning preflight adapter. Incomplete scans never create a goal. Bot, app, and authenticated self-authored issues are held. The default policy holds observations. Administrators can read and update `/api/projects/{projectId}/issue-intake-policy` with the current `expectedRevision` and a rule of `hold`, `deny`, `escalate` or `accept`. Acceptance creates one linked draft goal per issue. Policy changes immediately invalidate old intake acceptance. After a policy change, a successful rescan is required before an accepted draft can be adopted. Adoption records the decision before the linked draft goal can activate. A closed or missing issue loses its acceptance on rescan. Drafts are retained for review. If the source or intake policy revision changes, save and review a new plan revision before adoption. Intake does not run jobs or write to GitHub.
+
+## Versioned specifications
 
 Plan save endpoints accept `contractVersion: 1`. Each package declares owned files, package dependencies, and an `acceptanceEvidence` array with a criterion and the name of a configured project check. An optional `integratedPrerequisites` array identifies a same-project job, its `headCommit`, and the verified `integratedCommit`. The controller checks these references at save and adoption. Overlapping package paths require explicit dependency ordering.
 

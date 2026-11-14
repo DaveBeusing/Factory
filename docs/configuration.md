@@ -27,10 +27,10 @@ $env:FACTORY_HOME = 'C:\FactoryState'
 
 ## SQLite and upgrade policy
 
-The inspected `master` code sets `StateStore.DatabaseVersion = 18`. This is the **SQLite schema version**; it is separate from product SemVer and from the serialized `FactoryState.Schema` property.
+The inspected `master` code sets `StateStore.DatabaseVersion = 25`. This is the **SQLite schema version**; it is separate from product SemVer and from the serialized `FactoryState.Schema` property.
 
 - Current storage uses relational tables with foreign keys, WAL, indexes and transactional mutations, not the former single JSON row.
-- The code provides upgrade steps for supported earlier **relational** schema versions (including 2–17). Upgrade coverage differs by historical schema; test the exact source/target pair you operate.
+- The code provides upgrade steps for supported earlier **relational** schema versions (including 2–24). Upgrade coverage differs by historical schema; test the exact source/target pair you operate.
 - **Legacy single-row `factory_state` JSON databases are not imported.** A nonempty unsupported database is rejected instead of silently overwritten.
 - Downgrading a binary is not an inverse migration. Restore a verified backup created for the previous version.
 
@@ -57,7 +57,7 @@ Common fields in `settings.json`:
 | `runtime` | Codex adapter mode: `exec` or `app-server` | `exec` |
 | `model`, `modelRoutes` | Provider/model selection | Provider defaults |
 | `allowPush` | Permission to publish a branch | `false` |
-| `autoMerge` | Reserved compatibility setting; no automatic merge implementation | `false` |
+| `autoMerge` | Enables the signed merge verification action for an already merged GitHub PR | `false` |
 | `workspaceRoot` | Worktree storage location | Inside `FACTORY_HOME` |
 | `apiToken` | Controller administrator bearer credential | Locally generated |
 | `workerTokenKey` | Controller secret used for worker-specific credentials | Locally generated |
@@ -85,6 +85,11 @@ Human project grants are distinct from worker project grants. The implemented pr
 | `FACTORY_CLAUDE_EXECUTABLE` | Explicit native Claude Code CLI path |
 | `FACTORY_WORKER_TOKEN` | Worker-scoped credential for `Factory worker` |
 | `FACTORY_REMOTE_EXECUTOR_TOKEN` | Executor credential where configured for mixed remote turns |
+| `FACTORY_REVIEW_PUBLIC_KEY` | PEM public key for signed independent review approvals |
+| `FACTORY_INTEGRATION_PUBLIC_KEY` | PEM public key for signed publication decisions |
+| `FACTORY_WORKFLOW_EVENT_PUBLIC_KEY` | PEM public key for signed workflow event receipts |
+| `FACTORY_WORKFLOW_EVENT_PRIVATE_KEY` | PEM signing key for the optional workflow webhook receiver |
+| `FACTORY_GITHUB_WEBHOOK_SECRET` | Shared secret for authenticating workflow webhook deliveries |
 
 Never print environment dumps containing credentials in logs or diagnostics.
 

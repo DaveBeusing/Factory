@@ -39,6 +39,7 @@ On **Overview**, **Manage queue** and **Run queue** have distinct emphasis. The 
 | **Workers** | Register/configure, start/stop locally managed worker processes, view real heartbeats and platform, enable, drain or disable new remote-job claims |
 | **Recovery** | Review interrupted jobs, checkpoints and actions that require operator evidence |
 | **Activity** | Inspect persisted lifecycle and audit events |
+| **Decisions** | Inspect project policy revisions, issue intake, draft plan revisions, durable review cycles, PR readiness and integration evidence with administrator access |
 | **Capacity** | Inspect provider, model and role usage, local allocations, held reservations, provider-reported costs and Codex account windows |
 | **Settings** | Adjust concurrency, review rounds, worker lease and other supported runtime controls |
 
@@ -63,6 +64,14 @@ Open **Project review** with a project token and select a granted repository. Vi
 Connect with a project token and open **Goal planner**. The project selector lists granted projects. A **Planner** grant in the selected project enables creating and editing draft goals, building work packages, and generating a plan with the configured provider and budget.
 
 Save the plan to create a revision and inspect its master and open-work review before adopting it. The adoption dialog identifies the exact revision and asks for an explicit review acknowledgment and the execution mode. If another planner changes the revision, reopen **Review plan** and review the replacement before adopting.
+
+Under the project's `IndependentApproval` policy, an identified Planner saves a high-risk revision and a different Planner with a current grant opens **Manage independent approval** for that revision. The approver sets an expiry and can revoke their approval from the same dialog. Review the saved revision before adoption. [Plan adoption policy](planning-preflight.md#plan-adoption-policy)
+
+## Decisions workspace
+
+Connect as administrator, open **Decisions** and select a project. The workspace shows plan and intake policy revisions, the draft plan queue, and per-job review and integration evidence. Inspect the current head, recorded review cycles and blockers before submitting a signed review or publication decision. The workspace accepts signed payloads from the configured authorities.
+
+PR readiness shows the base and time of the last successful check. Refresh the evidence after changes to the head, project settings or approval. Historical PR links and historical integration are labeled separately. If the integration target has changed, use **Reverify integration** for an eligible local job or submit signed re-verification for a hosted merge. [Guarded publication](guarded-publication.md)
 
 ## Project recovery
 

@@ -117,7 +117,7 @@ if (args.FirstOrDefault() == "--safe-mode")
             Console.WriteLine("""{"type":"result","subtype":"success","is_error":false,"result":"fixture","usage":{"input_tokens":1,"output_tokens":1}}""");
             return 0;
         default:
-            return 24;
+            return 25;
     }
 }
 
@@ -126,7 +126,7 @@ if (Environment.GetEnvironmentVariable("FACTORY_PREFLIGHT_GH_HEAD") is { } fixtu
 {
     var repository = Array.IndexOf(args, "--repo");
     if (repository < 0 || args.ElementAtOrDefault(repository + 1) != "github.com/fixture/registered")
-        return 24;
+        return 25;
     if (kind == "issue")
     {
         Console.WriteLine("[]");
@@ -1598,6 +1598,99 @@ Test("Worker claim consumption rejects replay after reopen", () =>
     finally { try { home.Delete(true); } catch { } }
 });
 
+Test("Review admission survives restart and cannot exceed three cycles", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-review-cycles-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo();
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "review-test", 120, local: true));
+        var first = store.BeginReviewCycle(job.Id, fence, 99);
+        Assert(first == 1);
+        var report = new QualityResult { HeadSha = new string('a', 40), Passed = true };
+        foreach (var role in ReviewPolicy.Roles)
+            report.ReviewRecords.Add(new(role, report.HeadSha, ReviewPolicy.Revision, "fixture", role, "read-only", "PASS", "UNKNOWN"));
+        Assert(!report.HasIndependentApproval);
+        store.FinishReviewCycle(job.Id, fence, first, report);
+        var contenders = Enumerable.Range(0, 4).Select(_ => Task.Run(() =>
+            new StateStore(home.FullName).BeginReviewCycle(job.Id, fence, 99))).ToArray();
+        Task.WaitAll(contenders);
+        Assert(contenders.Select(x => x.Result).Order().SequenceEqual([0, 0, 0, 2]));
+        store.FinishReviewCycle(job.Id, fence, 2, report);
+        Assert(store.BeginReviewCycle(job.Id, fence, 99) == 3);
+        Assert(new StateStore(home.FullName).BeginReviewCycle(job.Id, fence, 99) == 0);
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
+Test("Signed review approval survives restart and follows the exact reviewed head", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-trusted-review-");
+    var oldKey = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
+    try
+    {
+        using var key = System.Security.Cryptography.RSA.Create(2048);
+        Environment.SetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY", key.ExportSubjectPublicKeyInfoPem());
+        var repo = Directory.CreateDirectory(Path.Combine(home.FullName, "repo")).FullName;
+        GitOperations.Git(repo, "init");
+        GitOperations.Git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "commit", "--allow-empty", "-m", "Reviewed head");
+        var head = GitOperations.Head(repo);
+        var store = new StateStore(Path.Combine(home.FullName, "state"));
+        var project = new ProjectInfo { Checks = [new CheckCommand { Name = "fixture", Executable = "fixture" }] };
+        var job = new FactoryJob { ProjectId = project.Id, Worktree = repo, HeadSha = head, SessionId = "builder-session" };
+        var fence = store.Change((s, db, tx) =>
+        {
+            s.Projects.Add(project);
+            s.Jobs.Add(job);
+            return JobRecovery.Assign(job, "builder", 120, local: true);
+        });
+        store.Change((s, db, tx) =>
+        {
+            StateStore.RecordExecutionProvenance(db, tx, project, s.Jobs.Single(), "fixture");
+            return true;
+        });
+        var cycle = store.BeginReviewCycle(job.Id, fence, 3);
+        store.FinishReviewCycle(job.Id, fence, cycle, new QualityResult
+        {
+            HeadSha = head, Passed = true, Checks = [new CheckReport { Name = "fixture" }],
+            ProjectContractRevision = ReviewPolicy.ProjectRevision(project)
+        });
+        store.UpdateJob(job.Id, current =>
+        {
+            current.State = JobStates.CompletedLocal;
+            current.LeaseOwner = "";
+            current.LeaseToken = "";
+            current.LeaseUntil = null;
+        });
+        var approval = new ReviewApproval(project.Id, job.Id, fence.Generation, cycle, head, ReviewPolicy.Revision,
+            "reviewer", "reviewer-session", "builder", "builder-session", DateTimeOffset.UtcNow.AddMinutes(5),
+            "PASS", ReviewPolicy.ProjectRevision(project));
+        var signature = Convert.ToBase64String(key.SignData(System.Text.Encoding.UTF8.GetBytes(Json.Stringify(approval)),
+            System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss));
+        Assert(!store.IsReviewApproved(job.Id));
+        try
+        {
+            store.RecordTrustedReview(new(approval with { Reviewer = "different-reviewer" }, signature));
+            throw new Exception("A modified signed approval was accepted.");
+        }
+        catch (ArgumentException) { }
+        store.RecordTrustedReview(new(approval, signature));
+        Assert(new StateStore(store.Home).IsReviewApproved(job.Id));
+        GitOperations.Git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "commit", "--allow-empty", "-m", "Different head");
+        Assert(!store.IsReviewApproved(job.Id));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY", oldKey);
+        try { home.Delete(true); } catch { }
+    }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -2591,7 +2684,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 23, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 25, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -3211,7 +3304,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 23);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 25);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3593,8 +3686,181 @@ await TestAsync("Unverified remote success cannot mark a job PR-ready", async ()
         Assert(blocked.TokensIn == 10, "Remote usage accounting was dropped");
         Assert(!await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier()),
             "A stale worker completion was replayed");
+        new StateStore(home).Change((_, db, tx) =>
+        {
+            using var query = db.CreateCommand();
+            query.Transaction = tx;
+            query.CommandText = "SELECT head_sha,report FROM review_cycles WHERE job_id=$job AND generation=$generation;";
+            query.Parameters.AddWithValue("$job", job.Id.ToString());
+            query.Parameters.AddWithValue("$generation", claim.Job.ExecutionGeneration);
+            using var rows = query.ExecuteReader();
+            Assert(rows.Read() && rows.GetString(0) == finished.HeadSha);
+            using var report = System.Text.Json.JsonDocument.Parse(rows.GetString(1));
+            Assert(report.RootElement.GetProperty("assurance").GetString() == "UNKNOWN");
+            Assert(report.RootElement.GetProperty("outcome").GetString() == JobStates.Blocked);
+            Assert(report.RootElement.GetProperty("findings")[0].GetProperty("role").GetString() == "controller");
+            Assert(!rows.Read());
+            return true;
+        });
     }
     finally { try { Directory.Delete(home, true); } catch { } }
+});
+
+await TestAsync("Merged remote PR evidence rejects pending CI, incomplete scope and a changed head", async () =>
+{
+    var project = new ProjectInfo { Origin = "https://github.com/example/repo",
+        Checks = [new CheckCommand { Name = "build" }] };
+    var job = new FactoryJob { HeadSha = new string('a', 40), ExpectedPaths = ["src/"],
+        PrUrl = "https://github.com/example/repo/pull/1", Branch = "factory/fixture" };
+    var merge = new string('b', 40);
+    var head = job.HeadSha;
+    var conclusion = "SUCCESS";
+    var paths = """[[{"filename":"src/file.cs","status":"modified"}]]""";
+    var verifier = new GitHubWorkerResultVerifier((args, _, _) =>
+    {
+        var output = args[1] switch
+        {
+            "graphql" => Json.Stringify(new { data = new { repository = new
+            {
+                @ref = new { refUpdateRule = (object?)null, branchProtectionRule = (object?)null },
+                @object = new { oid = job.HeadSha, statusCheckRollup = new { contexts = new
+                {
+                    pageInfo = new { hasNextPage = false },
+                    nodes = new[] { new { name = "build", isRequired = true, conclusion } }
+                } } }
+            } } }),
+            "--paginate" when args[3].Contains("/rules/") => "[[]]",
+            "--paginate" => paths,
+            _ => $$$"""
+                {"merged":true,"merge_commit_sha":"{{{merge}}}","changed_files":1,
+                "base":{"ref":"master","repo":{"full_name":"example/repo"},"sha":"{{{new string('c', 40)}}}"},
+                "head":{"ref":"factory/fixture","repo":{"full_name":"example/repo"},"sha":"{{{head}}}"}}
+                """
+        };
+        return Task.FromResult(new CommandResult(0, output, ""));
+    });
+    async Task Reject(string expected)
+    {
+        try
+        {
+            await verifier.VerifyMergedAsync(project, job, merge, CancellationToken.None);
+            throw new Exception("Invalid merged PR evidence was accepted.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains(expected)) { }
+    }
+    var receipt = await verifier.VerifyMergedAsync(project, job, merge, CancellationToken.None);
+    Assert(receipt.Contains("src/file.cs") && receipt.Contains(job.HeadSha));
+    conclusion = "PENDING";
+    await Reject("checks");
+    conclusion = "SUCCESS";
+    paths = "[[]]";
+    await Reject("incomplete PR file list");
+    head = new string('d', 40);
+    await Reject("not verified");
+});
+
+await TestAsync("Legacy remote PR-ready jobs cannot integrate without signed approval", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-legacy-pr-ready-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo { Origin = "https://github.com/example/repo" };
+        var job = new FactoryJob
+        {
+            ProjectId = project.Id, Mode = JobExecutionModes.Remote, State = JobStates.PrReady, Stage = "pr",
+            HeadSha = new string('a', 40), PrUrl = "https://github.com/example/repo/pull/1"
+        };
+        job.Branch = $"factory/{job.Id:N}";
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var reopened = new StateStore(home.FullName);
+        try
+        {
+            var verifier = new GitHubWorkerResultVerifier((_, _, _) =>
+                throw new Exception("GitHub verification ran before the signed approval gate."));
+            await new FactoryEngine(reopened, new FactorySettings()).VerifyIntegrationAsync(job.Id, null, verifier);
+            throw new Exception("Legacy PR-ready job passed without signed approval.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("signed remote review is required")) { }
+        Assert(!reopened.Job(job.Id).Integrated && !reopened.Read().VerifiedIntegrations.Contains(job.Id));
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
+await TestAsync("Completed remote builds require a signed decision bound to the target", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-signed-remote-");
+    var oldKey = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
+    try
+    {
+        using var key = System.Security.Cryptography.RSA.Create(2048);
+        Environment.SetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY", key.ExportSubjectPublicKeyInfoPem());
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo { Origin = "https://github.com/example/repo",
+            Checks = [new CheckCommand { Name = "build", Executable = "fixture" }] };
+        var job = new FactoryJob { ProjectId = project.Id, Mode = JobExecutionModes.Remote };
+        store.Change(s =>
+        {
+            s.Projects.Add(project);
+            s.Jobs.Add(job);
+            s.Workers.Add(new WorkerInfo { Id = "worker-01" });
+        });
+        GrantRemoteWorker(store, "worker-01", project.Id);
+        var settings = new FactorySettings { AllowPush = true };
+        var claim = WorkerProtocol.Claim(store, settings, "worker-01") ?? throw new Exception("Missing claim");
+        Assert(store.StartRemoteBuilder(new(claim.WorkerId, project.Id, job.Id,
+            claim.Job.ExecutionGeneration, claim.Job.LeaseToken, claim.ProviderLeaseId), settings));
+        var finished = claim.Job;
+        finished.State = JobStates.CompletedLocal;
+        finished.Stage = "await_manual_integration";
+        finished.HeadSha = new string('a', 40);
+        finished.SessionId = "remote-builder-session";
+        var revision = ReviewPolicy.ProjectRevision(project);
+        var quality = new QualityResult
+        {
+            Passed = true, HeadSha = finished.HeadSha, TreeSha = new string('b', 40),
+            ProjectContractRevision = revision, Checks = [new CheckReport { Name = "build" }]
+        };
+        foreach (var role in ReviewPolicy.Roles) quality.Reviews.Add(role, "PASS\nfixture");
+        var status = new WorkerStatus
+        {
+            WorkerId = claim.WorkerId, JobId = job.Id, Job = finished,
+            ExecutionGeneration = finished.ExecutionGeneration, LeaseToken = finished.LeaseToken,
+            ProviderLeaseId = claim.ProviderLeaseId,
+            Evidence = Json.Stringify(new { jobId = job.Id, commit = finished.HeadSha, finished.Attempt,
+                report = quality, outcome = "ready" })
+        };
+        Assert(await WorkerProtocol.CompleteAsync(store, status, new RefusingWorkerVerifier(), settings: settings));
+        Assert(store.Job(job.Id).Stage == "await_signed_remote_review");
+        Assert(!store.IsReviewApproved(job.Id));
+        var approval = new ReviewApproval(project.Id, job.Id, finished.ExecutionGeneration, 1, finished.HeadSha,
+            ReviewPolicy.Revision, "reviewer", "review-session", "remote:worker-01", finished.SessionId,
+            DateTimeOffset.UtcNow.AddMinutes(5), "PASS", revision);
+        var signature = Convert.ToBase64String(key.SignData(System.Text.Encoding.UTF8.GetBytes(Json.Stringify(approval)),
+            System.Security.Cryptography.HashAlgorithmName.SHA256, System.Security.Cryptography.RSASignaturePadding.Pss));
+        store.RecordTrustedReview(new(approval, signature));
+        Assert(new StateStore(home.FullName).IsReviewApproved(job.Id));
+        try
+        {
+            await new FactoryEngine(store, settings).VerifyIntegrationAsync(job.Id);
+            throw new Exception("A signed remote build integrated without a pull request.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("Supply the merged pull request")) { }
+        Assert(!store.Job(job.Id).Integrated);
+        store.Change(s => s.Projects.Single().Origin = "https://github.com/example/other");
+        Assert(!store.IsReviewApproved(job.Id));
+        store.Change(s =>
+        {
+            s.Projects.Single().Origin = project.Origin;
+            s.Projects.Single().BaseBranch = "release";
+        });
+        Assert(!store.IsReviewApproved(job.Id));
+    }
+    finally
+    {
+        Environment.SetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY", oldKey);
+        try { home.Delete(true); } catch { }
+    }
 });
 
 await TestAsync("Controller-verified remote results are atomically bound to the active lease", async () =>
@@ -3717,7 +3983,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 23);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 25);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

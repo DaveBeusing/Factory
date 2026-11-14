@@ -106,6 +106,8 @@ public static class IntegrationVerifier
     {
         if (!IsCommitSha(job.HeadSha))
             throw new InvalidOperationException("An exact committed source SHA is required for integration verification");
+        if (job.Mode == JobExecutionModes.Remote && string.IsNullOrWhiteSpace(job.PrUrl))
+            throw new InvalidOperationException("Remote integration requires a merged pull request.");
 
         if (string.IsNullOrWhiteSpace(project.Origin))
         {

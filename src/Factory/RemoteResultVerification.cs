@@ -23,6 +23,58 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
     internal GitHubWorkerResultVerifier(Func<string[], int, CancellationToken, Task<CommandResult>> runGitHub) =>
         _runGitHub = runGitHub;
 
+    internal async Task<string> VerifyMergedAsync(ProjectInfo project, FactoryJob job, string mergeCommit,
+        CancellationToken ct)
+    {
+        var repository = GitHubRepository(project.Origin);
+        var number = PullNumber(job.PrUrl, repository);
+        WorkPackageScope.ValidateDeclaration(job.ExpectedPaths);
+        using var pr = await PullAsync(repository, number, ct);
+        ValidateMergedSnapshot(pr, project, job, repository, mergeCommit);
+        var baseSha = ReadBaseSha(pr);
+        var checks = await RequiredChecksAsync(repository, number, project.BaseBranch, job.HeadSha, ct);
+        foreach (var check in project.Checks)
+            if (!checks.Contains(check.Name))
+                throw new InvalidOperationException("Missing required GitHub check: " + check.Name);
+        var filesResult = await _runGitHub(
+            ["api", "--paginate", "--slurp", $"repos/{repository}/pulls/{number}/files?per_page=100"], 60, ct);
+        if (!filesResult.Ok)
+            throw new InvalidOperationException("Unable to verify the merged PR file list");
+        using var files = JsonDocument.Parse(filesResult.Output);
+        if (files.RootElement.EnumerateArray().Sum(page => page.GetArrayLength()) !=
+            pr.RootElement.GetProperty("changed_files").GetInt32())
+            throw new InvalidOperationException("GitHub returned an incomplete PR file list");
+        var changed = ParsePullFilePaths(filesResult.Output);
+        WorkPackageScope.Enforce(job.ExpectedPaths, changed);
+        GitOperations.EnforcePaths(changed, project.ProtectedPaths);
+        using var latest = await PullAsync(repository, number, ct);
+        ValidateMergedSnapshot(latest, project, job, repository, mergeCommit);
+        if (ReadBaseSha(latest) != baseSha ||
+            latest.RootElement.GetProperty("changed_files").GetInt32() != pr.RootElement.GetProperty("changed_files").GetInt32())
+            throw new InvalidOperationException("GitHub PR base changed during verification");
+        return Json.Stringify(new
+        {
+            repository, number, project.BaseBranch, baseSha, job.HeadSha, mergeCommit,
+            requiredChecks = checks.Order(StringComparer.Ordinal).ToArray(), changed
+        });
+    }
+
+    private static void ValidateMergedSnapshot(JsonDocument pull, ProjectInfo project, FactoryJob job,
+        string repository, string mergeCommit)
+    {
+        var pr = pull.RootElement;
+        var result = new MergedPullRequest(pr.GetProperty("merged").GetBoolean(),
+            pr.GetProperty("base").GetProperty("repo").GetProperty("full_name").GetString() ?? "",
+            pr.GetProperty("head").GetProperty("repo").GetProperty("full_name").GetString() ?? "",
+            pr.GetProperty("base").GetProperty("ref").GetString() ?? "",
+            pr.GetProperty("head").GetProperty("ref").GetString() ?? "",
+            pr.GetProperty("head").GetProperty("sha").GetString() ?? "",
+            pr.GetProperty("merge_commit_sha").GetString() ?? "");
+        IntegrationVerifier.ValidateMergedPullRequest(result, repository, project, job);
+        if (result.MergeCommit != mergeCommit)
+            throw new InvalidOperationException("GitHub PR merge commit changed during verification");
+    }
+
     public async Task<VerifiedWorkerResult> VerifyAsync(ProjectInfo project, FactoryJob job,
         WorkerStatus status, CancellationToken ct)
     {
@@ -211,6 +263,10 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
                 var changed = file.GetProperty("filename").GetString();
                 if (string.IsNullOrWhiteSpace(changed))
                     throw new InvalidOperationException("GitHub PR file path missing");
+                if (file.TryGetProperty("status", out var status) && status.GetString() == "renamed" &&
+                    (!file.TryGetProperty("previous_filename", out var source) ||
+                     string.IsNullOrWhiteSpace(source.GetString())))
+                    throw new InvalidOperationException("GitHub renamed file source is missing");
                 paths.Add(changed);
                 if (file.TryGetProperty("previous_filename", out var previous) &&
                     previous.ValueKind == JsonValueKind.String)

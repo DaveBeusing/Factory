@@ -314,9 +314,17 @@ public static class DashboardHost
             Results.Ok(JobRecovery.ReconcileLocal(store, id, input.Reviewed, input.Reason)));
         app.MapPost("/api/jobs/{id:guid}/release-resources", (Guid id, ResourceReleaseInput input) =>
             Results.Ok(JobRecovery.ReleaseResources(store, id, input)));
-        app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, CancellationToken ct) =>
+        app.MapPost("/api/review-approvals", (SignedReviewApproval approval) =>
         {
-            var proof = await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, ct);
+            store.RecordTrustedReview(approval);
+            return Results.NoContent();
+        });
+        app.MapGet("/api/jobs/{id:guid}/review-approved", (Guid id) =>
+            Results.Ok(new { approved = store.IsReviewApproved(id) }));
+        app.MapPost("/api/jobs/{id:guid}/verify", async (Guid id, string? pullRequestUrl, CancellationToken ct) =>
+        {
+            var proof = await new FactoryEngine(store, settings).VerifyIntegrationAsync(id, pullRequestUrl,
+                new GitHubWorkerResultVerifier(), ct);
             return Results.Ok(proof);
         });
         // Registration through Mission Control is administrator-only.

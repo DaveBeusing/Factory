@@ -95,3 +95,7 @@ Run checks against the **actual candidate revision**. Do not copy a passing resu
 - Document untested environments and real limitations.
 
 **Next:** [Recovery](recovery.md) · [Versioning](versioning.md)
+
+## Review provenance and cycle budget
+
+The controller records the checked commit, role, adapter, reported session, requested scope, policy revision, and assurance for each review. An adapter verdict or session identifier alone does not prove independent identity or isolation. Current adapters therefore record UNKNOWN assurance. Local quality can still be used as a manual handover; automatic publication requires independently verified evidence. Review cycles are reserved before execution and never reused after interruption. The lifetime limit is three per job across retries and restarts.

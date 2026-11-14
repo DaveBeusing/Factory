@@ -266,9 +266,11 @@ public sealed class FactoryEngine
         });
         foreach (var plugin in _plugins) await plugin.BeforeJobAsync(p, _store.Job(id), ct);
         var report = new QualityResult();
-        for (var round = 1; round <= Math.Max(1, j.MaxRounds); round++)
+        for (var round = 1; round <= ReviewPolicy.MaxCycles; round++)
         {
             ct.ThrowIfCancellationRequested();
+            var cycle = _store.BeginReviewCycle(id, fence, j.MaxRounds);
+            if (cycle == 0) break;
            Stage(id, fence,round == 1 ? JobStates.Building : JobStates.Reworking, "agent");
            var existing = _store.Job(id);
            var description = round == 1 ? existing.Description :
@@ -312,9 +314,13 @@ public sealed class FactoryEngine
             ct.ThrowIfCancellationRequested();
             // Checks and reviewers can also modify files; recheck the full worktree.
             WorkPackageScope.ValidateWorktree(p, _store.Job(id));
-           foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id), report, ct);
+           foreach (var plugin in _plugins) await plugin.AfterGateAsync(p, _store.Job(id),
+                System.Text.Json.JsonSerializer.Deserialize<QualityResult>(Json.Stringify(report), Json.Options)!, ct);
            EnsureOwned(id, fence);
-            var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
+            report.ReviewFindings.AddRange(report.Findings.Select(message => new ReviewFinding("controller", message)));
+           report.Cycle = cycle;
+           _store.FinishReviewCycle(id, fence, cycle, report);
+           var evidence = QualityEngine.Evidence(_store, _store.Job(id), report);
             UpdateOwned(id, fence, x => x.EvidenceFile = evidence);
            if (report.Passed) break;
            _store.Event(id, "rework", string.Join("; ", report.Findings));
@@ -333,20 +339,10 @@ public sealed class FactoryEngine
         if (GitOperations.Head(worktree) != report.HeadSha)
             throw new ScopeViolationException("Commit changed after quality verification");
         Stage(id, fence,JobStates.AwaitingApproval, "integration");
-        // Push is a side effect requiring explicit operator opt-in in settings plus remote mode.
-        if (j.Mode == "remote" && _settings.AllowPush)
-        {
-            ct.ThrowIfCancellationRequested();
-           Stage(id, fence,JobStates.AwaitingApproval, "push");
-           EnsureOwned(id, fence);
-            var pr = await GitOperations.PublishAsync(p, _store.Job(id), ct);
-            EnsureOwned(id, fence);
-            UpdateOwned(id, fence, x => x.PrUrl = pr);
-        }
-        var ready = j.Mode == "remote" && _settings.AllowPush;
+        // The controller accepts independently signed approvals after the build releases its lease.
         var outcome = _store.Job(id);
-        outcome.State = ready ? JobStates.PrReady : JobStates.CompletedLocal;
-        outcome.Stage = ready ? "pr" : "await_manual_integration";
+        outcome.State = JobStates.CompletedLocal;
+        outcome.Stage = "await_manual_integration";
         foreach (var plugin in _plugins) await plugin.AfterJobAsync(p, outcome, ct);
         EnsureOwned(id, fence);
         Stage(id, fence, outcome.State, outcome.Stage);
@@ -354,15 +350,38 @@ public sealed class FactoryEngine
 
     public async Task<IntegrationProof> VerifyIntegrationAsync(Guid id, CancellationToken ct = default,
         IRemoteBaseReader? remote = null, IIntegrationPullRequestReader? pullRequests = null)
+        => await VerifyIntegrationAsync(id, null, new GitHubWorkerResultVerifier(), ct, remote, pullRequests);
+
+    internal async Task<IntegrationProof> VerifyIntegrationAsync(Guid id, string? pullRequestUrl,
+        GitHubWorkerResultVerifier verifier, CancellationToken ct = default,
+        IRemoteBaseReader? remote = null, IIntegrationPullRequestReader? pullRequests = null)
     {
         var state = _store.Read();
         var job = state.Jobs.Single(j => j.Id == id);
         var project = state.Projects.Single(p => p.Id == job.ProjectId);
         if (job.State is not (JobStates.CompletedLocal or JobStates.PrReady) || job.Integrated || job.LeaseOwner.Length != 0)
             throw new InvalidOperationException("Job is not eligible for integration verification");
+        var remoteIntegration = job.Mode == JobExecutionModes.Remote;
+        var signedRemoteHandoff = remoteIntegration && job.Stage == "await_signed_remote_review";
+        if (remoteIntegration && !_store.IsReviewApproved(id))
+            throw new InvalidOperationException("An exact-commit signed remote review is required.");
+        var originalPullUrl = job.PrUrl;
+        var originalBranch = job.Branch;
+        if (signedRemoteHandoff)
+        {
+            if (string.IsNullOrWhiteSpace(pullRequestUrl))
+                throw new InvalidOperationException("Supply the merged pull request for the signed remote commit.");
+            job.PrUrl = pullRequestUrl;
+            job.Branch = $"factory/{job.Id:N}";
+        }
+        if (remoteIntegration && string.IsNullOrWhiteSpace(job.PrUrl))
+            throw new InvalidOperationException("Remote integration requires a verified pull request.");
 
         // Never accept a local-only ancestry result for a project with a configured remote.
         var proof = await IntegrationVerifier.VerifyAsync(project, job, remote, pullRequests, ct);
+        var pullEvidence = remoteIntegration
+            ? await verifier.VerifyMergedAsync(project, job, proof.IntegratedCommit, ct)
+            : null;
         ct.ThrowIfCancellationRequested();
         var recorded = _store.Change((s, db, tx) =>
         {
@@ -370,12 +389,27 @@ public sealed class FactoryEngine
             var currentProject = s.Projects.Single(p => p.Id == job.ProjectId);
             if (current.State != job.State || current.Integrated || current.LeaseOwner.Length != 0 ||
                 current.Mode != job.Mode || current.ProjectId != job.ProjectId ||
-                current.HeadSha != job.HeadSha || current.Branch != job.Branch ||
-                current.PrUrl != job.PrUrl ||
+                current.HeadSha != job.HeadSha || current.Branch != originalBranch ||
+                current.PrUrl != originalPullUrl ||
                 currentProject.Path != project.Path ||
                 currentProject.Origin != project.Origin ||
-                currentProject.BaseBranch != project.BaseBranch)
+                currentProject.BaseBranch != project.BaseBranch ||
+                (pullEvidence is not null &&
+                    (!current.ExpectedPaths.SequenceEqual(job.ExpectedPaths) ||
+                     ReviewPolicy.ProjectRevision(currentProject) != ReviewPolicy.ProjectRevision(project))) ||
+                (remoteIntegration &&
+                    (current.Stage != job.Stage || current.ExecutionGeneration != job.ExecutionGeneration ||
+                     current.SessionId != job.SessionId ||
+                     !StateStore.IsReviewApproved(db, tx, current, currentProject))))
                 return false;
+            if (pullEvidence is not null)
+            {
+                current.PrUrl = job.PrUrl;
+                current.Branch = job.Branch;
+                StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", id, "controller/github-required-checks",
+                    current.State, current.State, LifecycleReason.RemoteResultVerified, reference: pullEvidence,
+                    generation: current.ExecutionGeneration, state: s);
+            }
             StateStore.RecordLifecycle(db, tx, current.ProjectId, "job", id, "integration-verifier",
                 current.State, JobStates.Integrated, LifecycleReason.IntegrationVerified, reference: proof.IntegratedCommit, state: s);
             StateStore.RecordIntegratedHead(db, tx, current, proof);

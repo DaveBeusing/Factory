@@ -37,6 +37,7 @@
 | [Architecture](architecture.md) | Source boundaries, orchestration and implemented versus planned capabilities |
 | [Quality gates](quality.md) | Check JSON, scope enforcement, evidence and review behavior |
 | [CLI reference](cli.md) | Verified command groups and syntax |
+| [Guarded publication](guarded-publication.md) | Signed draft and readiness decisions, workflow provenance and hosted merge verification |
 | [Mission Control browser tests](../tests/mission-control/README.md) | Local Chromium test workflow |
 | [Versioning and release governance](versioning.md) | SemVer and Git-derived previews, provenance, platform/upgrade evidence |
 | [Queue and SQLite load baseline](queue-load-baseline.md) | Historical LT-06 measurement and provisional warning thresholds |

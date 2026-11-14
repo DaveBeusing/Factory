@@ -127,7 +127,7 @@ Factory requires executable quality checks for implementation work. Choose from 
 2. **Propose a plan** against the current committed `master`. Inspect the preflight findings, related open issues/PRs, scope, dependency graph, owner and expected checks.
 3. **Approve/adopt** only the reviewed revision. The acknowledgement flag must represent a real human review; a missing GitHub inventory is **unknown**, not zero open PRs.
 4. **Run** eligible jobs, then inspect checks, reviews, leases and any failures.
-5. **Integrate manually** using the repository's branch protection and authorized reviewers.
+5. **Integrate manually** using the repository's branch protection and authorized reviewers. For signed draft creation, readiness evidence and hosted merge verification, see [Guarded publication](guarded-publication.md).
 6. **Verify integration** against the actual destination base before dependent jobs run.
 
 ```powershell

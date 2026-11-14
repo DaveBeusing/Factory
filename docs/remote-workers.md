@@ -72,7 +72,7 @@ An attestation records operator judgment; it is not cryptographic proof that the
 
 When a worker submits a PR-ready result, the controller independently verifies the expected GitHub repository, configured base, job branch and source SHA, plus successful **required GitHub checks**. Missing or failing required checks block completion. Worker-supplied review text and logs remain worker-reported even when metadata checks pass.
 
-The controller **does not merge**. Use an authorized PR process and `Factory.exe verify '<job-guid>'` after integration, with the local base updated to the verified remote base when required.
+Use the repository's authorized process to merge. Remote integration requires controller verification of the hosted PR and a signed independent review for the exact head. Use `Factory.exe verify '<job-guid>'` for an eligible job after integration, with the local base updated to the verified remote base when required. The [guarded publication flow](guarded-publication.md) also verifies hosted merges with signed, workflow-bound evidence.
 
 For mixed remote provider routes, use a compatible **v2 worker** and matching controller/executor builds. Remote turn receipts and account allowance semantics are described in [Provider evidence and mixed routing](providers.md#provider-evidence-contract).
 

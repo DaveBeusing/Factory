@@ -31,6 +31,18 @@ public sealed class FactoryEngine
         _plugins = plugins ?? [];
     }
 
+    private bool ProfileAllows(FactoryState state, ProjectInfo project, FactoryJob job)
+    {
+        if (_executionMode != JobExecutionModes.Local) return BuilderExecutionProfile.Allows(project, job);
+        var runtime = _settings.Runtime;
+        if (!_runtimeOverridden)
+        {
+            try { runtime = ProviderRouter.EffectiveCodexRuntime(_settings, ProviderRouter.Resolve(_settings, state, project.Id, "builder")); }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException) { return false; }
+        }
+        return BuilderExecutionProfile.AllowsLocal(project, job, runtime, _runtimeOverridden);
+    }
+
     private bool Claim(Guid id)
     {
         return _store.Change((s, db, tx) =>
@@ -39,7 +51,7 @@ public sealed class FactoryEngine
            if (!JobExecutionModes.Matches(j, _executionMode) || j.State != JobStates.Queued ||
                 !DependencyGraph.DependenciesSatisfied(j, s.Jobs) || s.Paused) return false;
            var selected = JobScheduler.Select(s, _settings.MaxParallel, _executionMode,
-                candidate => BuilderExecutionProfile.Allows(s.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
+                candidate => ProfileAllows(s, s.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
                 reservationTokens: _settings.GoalReservationTokens);
            if (!selected.Any(x => x.Id == id)) return false;
            JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true,
@@ -90,7 +102,7 @@ public sealed class FactoryEngine
            }
             var snapshot = _store.Read();
             var selected = JobScheduler.Select(snapshot, _settings.MaxParallel, _executionMode,
-                candidate => BuilderExecutionProfile.Allows(snapshot.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
+                candidate => ProfileAllows(snapshot, snapshot.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
                 reservationTokens: _settings.GoalReservationTokens);
            foreach (var j in selected)
             {
@@ -129,9 +141,12 @@ public sealed class FactoryEngine
         if (!JobExecutionModes.Matches(claimed, _executionMode))
             throw new InvalidOperationException("Job is not claimed by this runner for its execution mode");
         JobRecovery.Require(claimed, fence);
-        if (!BuilderExecutionProfile.Allows(_store.Read().Projects.Single(p => p.Id == claimed.ProjectId), claimed))
+        var admission = _store.Read();
+        if (!ProfileAllows(admission, admission.Projects.Single(p => p.Id == claimed.ProjectId), claimed))
             throw new InvalidOperationException("The runner cannot enforce the requested execution profile.");
 
+        if (!_store.StartBuilderClaim(id, fence))
+            throw new LostExecutionLeaseException("This execution claim is stale or has already started.");
         using var executionCancel = CancellationTokenSource.CreateLinkedTokenSource(ct);
         using var heartbeatCancel = CancellationTokenSource.CreateLinkedTokenSource(executionCancel.Token);
         var heartbeat = Task.Run(async () =>

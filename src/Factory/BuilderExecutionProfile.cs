@@ -14,6 +14,20 @@ internal static class BuilderExecutionProfile
 
     // Existing adapters cannot attest the requested OS-level restrictions. A
     // worktree, a worker's assertion, and credential stripping are insufficient.
+    internal static bool AllowsLocal(ProjectInfo project, FactoryJob job, string runtime,
+        bool customRuntime)
+    {
+        if (!Allows(project, job)) return false;
+        return project.RequiredExecutionCapabilities.Concat(job.RequiredExecutionCapabilities).All(capability =>
+            capability switch
+            {
+                "git-cli" => true,
+                "native-checks" => project.Checks.Any(check => string.IsNullOrWhiteSpace(check.ContainerImage)),
+                "container-checks" => project.Checks.Any(check => !string.IsNullOrWhiteSpace(check.ContainerImage)),
+                _ => !customRuntime && (capability == "native-agent" || capability == "runtime:" + runtime)
+            });
+    }
+
     internal static bool Allows(ProjectInfo project, FactoryJob job) =>
         !project.RequiredExecutionCapabilities.Concat(job.RequiredExecutionCapabilities)
             .Any(requirement => IsRestriction(requirement) || !WorkerAuthorization.IsKnownCapability(requirement));
@@ -33,6 +47,9 @@ public sealed partial class StateStore
             CREATE TABLE IF NOT EXISTS consumed_worker_claims(
                 job_id TEXT PRIMARY KEY, generation INTEGER NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS started_builder_claims(
+                job_id TEXT PRIMARY KEY, generation INTEGER NOT NULL
+            );
             PRAGMA user_version=23;
             """);
 
@@ -46,6 +63,22 @@ public sealed partial class StateStore
             ON CONFLICT(job_id) DO UPDATE SET generation=excluded.generation
             WHERE excluded.generation>consumed_worker_claims.generation;
             """, ("$job", job), ("$generation", generation));
+        var accepted = command.ExecuteNonQuery() == 1;
+        tx.Commit();
+        return accepted;
+    }
+
+    internal bool StartBuilderClaim(Guid job, ExecutionFence fence)
+    {
+        using var db = Open();
+        using var tx = db.BeginTransaction();
+        var current = ReadJob(db, tx, job);
+        if (current is null || !JobRecovery.Matches(current, fence)) return false;
+        using var command = Command(db, tx, """
+            INSERT INTO started_builder_claims(job_id,generation) VALUES($job,$generation)
+            ON CONFLICT(job_id) DO UPDATE SET generation=excluded.generation
+            WHERE excluded.generation>started_builder_claims.generation;
+            """, ("$job", job), ("$generation", fence.Generation));
         var accepted = command.ExecuteNonQuery() == 1;
         tx.Commit();
         return accepted;

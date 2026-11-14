@@ -96,7 +96,10 @@ public static class WorkerProtocol
                     continue;
                 var requiresProviderLease = RemoteProviderRouting.Required(project, job);
                 if (StateStore.ReviewCyclesUsed(db, tx, job.Id) >= Math.Clamp(job.MaxRounds, 1, ReviewPolicy.MaxCycles))
+                {
+                    StateStore.BlockExhaustedReviews(db, tx, job, s);
                     continue;
+                }
                 var routes = requiresProviderLease ? RemoteProviderRouting.Plan(s, settings, job) : null;
                 if (requiresProviderLease && routes is null) continue;
                 JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
@@ -411,6 +414,8 @@ public static class WorkerProtocol
                 j.Stage = scopeBlocked ? "scope" : "remote_verification_failed";
                 j.Error = scopeBlocked ? req.Job!.Error : pendingReview is not null
                     ? "Unverified or exhausted final goal usage" : failure;
+                if (StateStore.ReviewCyclesUsed(db, tx, j.Id) >= Math.Clamp(j.MaxRounds, 1, ReviewPolicy.MaxCycles))
+                    j.Error += " Review cycle limit reached; review the preserved evidence before authorizing a replacement.";
                 s.Events.Add(new FactoryEvent { JobId = j.Id,
                     Type = scopeBlocked ? "scope_violation" : "remote_rejected", Message = j.Error });
             }

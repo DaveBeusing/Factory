@@ -844,6 +844,30 @@ public sealed partial class StateStore
     internal void InterruptFencedStage(Guid jobId, ExecutionFence fence) =>
         WriteFencedStage(jobId, fence, JobStates.Paused, "interrupted", null, interrupted: true);
 
+    internal void RecordExecutionFailure(Guid id, ExecutionFence fence, ExecutionFailure failure, string error)
+    {
+        Change((state, db, tx) =>
+        {
+            var job = state.Jobs.Single(j => j.Id == id);
+            JobRecovery.Require(job, fence);
+            CloseInterruptedReview(db, tx, job, failure.Kind, error);
+            var exhausted = ReviewCyclesUsed(db, tx, id) >= Math.Clamp(job.MaxRounds, 1, ReviewPolicy.MaxCycles);
+            var outcome = exhausted ? JobStates.Blocked : failure.State;
+            if (exhausted) error += " Review cycle limit reached; review preserved evidence before authorizing a replacement.";
+            RecordLifecycle(db, tx, job.ProjectId, "job", id, fence.Owner, job.State, outcome,
+                JobLifecycle.FencedTransition(job.State, outcome),
+                reference: Json.Stringify(new { kind = failure.Kind.ToString(), error, job.CheckpointStage, job.CheckpointCommit }),
+                generation: fence.Generation, state: state);
+            job.State = outcome;
+            job.Stage = failure.Stage;
+            job.Error = error;
+            job.UpdatedAt = DateTimeOffset.UtcNow;
+            if (failure.Stage == "scope")
+                state.Events.Add(new FactoryEvent { JobId = id, Type = "scope_violation", Message = error });
+            return true;
+        });
+    }
+
     private void WriteFencedStage(Guid jobId, ExecutionFence fence, string nextState, string stage,
         string? error, bool interrupted = false, FactoryJob? expected = null)
     {
@@ -879,7 +903,7 @@ public sealed partial class StateStore
             throw new LostExecutionLeaseException("Execution is no longer active");
         if (interrupted)
         {
-            if (previousStage is "commit" or "push" or "pr")
+            if (previousStage is "commit" or "push" or "pr" or "merge")
             {
                 nextState = JobStates.Blocked;
                 stage = "interrupted_git";
@@ -934,6 +958,10 @@ public sealed partial class StateStore
         }
         RecordLifecycle(db, tx, projectId, "job", jobId, fence.Owner, previousState,
             nextState, reason, generation: fence.Generation);
+        if (interrupted && ReadJob(db, tx, jobId) is { } interruptedJob)
+            CloseInterruptedReview(db, tx, interruptedJob,
+                stage == "interrupted_git" ? ExecutionFailureKind.UncertainSideEffect : ExecutionFailureKind.Transient,
+                error ?? "Execution cancelled.");
         tx.Commit();
     }
 

@@ -1622,6 +1622,47 @@ Test("Review admission survives restart and cannot exceed three cycles", () =>
         store.FinishReviewCycle(job.Id, fence, 2, report);
         Assert(store.BeginReviewCycle(job.Id, fence, 99) == 3);
         Assert(new StateStore(home.FullName).BeginReviewCycle(job.Id, fence, 99) == 0);
+        store.RecordExecutionFailure(job.Id, fence,
+            ExecutionFailure.From("review", new TimeoutException()), "Reviewer timed out.");
+        store.UpdateJob(job.Id, j => { j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null; });
+        var restarted = new StateStore(home.FullName);
+        Assert(restarted.Job(job.Id).State == JobStates.Blocked);
+        try
+        {
+            MissionControlManager.ControlJob(restarted, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("Exhausted review cycles were reset by retry.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("cycle limit")) { }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
+Test("Uncertain publication closes the round durably and blocks reviewed retry", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-uncertain-publication-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo();
+        var job = new FactoryJob { ProjectId = project.Id };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        var fence = store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "fault-injection", 60, local: true));
+        Assert(store.BeginReviewCycle(job.Id, fence, 3) == 1);
+        store.SetFencedStage(job.Id, fence, JobStates.AwaitingApproval, "push");
+        var failure = ExecutionFailure.From("push", new TimeoutException("Response lost"));
+        Assert(failure.Kind == ExecutionFailureKind.UncertainSideEffect);
+        store.RecordExecutionFailure(job.Id, fence, failure, "Response lost");
+        store.UpdateJob(job.Id, j => { j.LeaseOwner = ""; j.LeaseToken = ""; j.LeaseUntil = null; });
+        var reopened = new StateStore(home.FullName);
+        Assert(reopened.Job(job.Id).Stage == "interrupted_git");
+        Assert(reopened.Read().Events.Any(e => e.JobId == job.Id && e.Message.Contains("UncertainSideEffect")));
+        try
+        {
+            MissionControlManager.ControlJob(reopened, job.Id, new ControlInput { Action = "retry", Reviewed = true });
+            throw new Exception("An uncertain publication was replayed.");
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("explicit reconciliation")) { }
+        Assert(reopened.Job(job.Id).State == JobStates.Blocked);
     }
     finally { try { home.Delete(true); } catch { } }
 });

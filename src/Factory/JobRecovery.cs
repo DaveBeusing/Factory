@@ -9,6 +9,21 @@ public readonly record struct ExecutionFence(long Generation, string Token, stri
 
 public sealed class LostExecutionLeaseException(string message) : InvalidOperationException(message);
 
+internal enum ExecutionFailureKind { Deterministic, Transient, Policy, Conflict, UncertainSideEffect }
+
+internal sealed record ExecutionFailure(ExecutionFailureKind Kind, string State, string Stage)
+{
+    internal static ExecutionFailure From(string stage, Exception error) => (stage, error) switch
+    {
+        (_, ScopeViolationException) => new(ExecutionFailureKind.Policy, JobStates.Blocked, "scope"),
+        ("commit" or "push" or "pr" or "merge", _) => new(ExecutionFailureKind.UncertainSideEffect, JobStates.Blocked, "interrupted_git"),
+        (_, TokenBudgetExceededException) => new(ExecutionFailureKind.Policy, JobStates.Blocked, "budget"),
+        (_, TimeoutException) => new(ExecutionFailureKind.Transient, JobStates.Failed, "transient"),
+        ("worktree", _) => new(ExecutionFailureKind.Conflict, JobStates.Blocked, "reconcile"),
+        _ => new(ExecutionFailureKind.Deterministic, JobStates.Failed, "deterministic")
+    };
+}
+
 /// <summary>
 /// Durable claim/fence policy shared by controller, local runner and remote protocol.
 /// A lease expiry quarantines work; it never grants permission to replay it.
@@ -108,6 +123,7 @@ public static class JobRecovery
                 GoalBudgetLedger.Hold(s, job, "expired worker lease");
                 var previousOwner = job.LeaseOwner;
                 var previousGeneration = job.ExecutionGeneration;
+                StateStore.CloseInterruptedReview(db, tx, job, ExecutionFailureKind.Conflict, "Execution lease expired.");
                 StateStore.RecordLifecycle(db, tx, job.ProjectId, "job", job.Id, previousOwner, job.State,
                     JobStates.Blocked, LifecycleReason.LeaseFenced, reference: job.CheckpointCommit, generation: previousGeneration, state: s);
                 job.ExecutionGeneration = checked(previousGeneration + 1); // fence old owner first
@@ -170,6 +186,7 @@ public static class JobRecovery
         {
             var j = s.Jobs.Single(j => j.Id == id);
             VerifyRecoverySnapshot(snapshot, j);
+            StateStore.RequireReviewCapacity(db, tx, j.Id, j.MaxRounds);
             StateStore.RecordLifecycle(db, tx, j.ProjectId, "job", j.Id, "local-operator", j.State,
                 JobStates.Queued, LifecycleReason.Reconciled, reference: j.CheckpointCommit, generation: j.ExecutionGeneration, state: s);
             j.State = JobStates.Queued;

@@ -11,7 +11,7 @@ public interface IWorkerResultVerifier
 }
 
 public sealed record VerifiedWorkerResult(string EvidenceJson, string? TreeSha = null);
-internal sealed record RequiredCheckRun(string Name, long AppId, long RunId);
+internal sealed record RequiredCheckRun(string Name, long AppId, string NodeId);
 
 public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
 {
@@ -326,7 +326,7 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
                 }
                 object(oid: $sha) { ... on Commit { oid statusCheckRollup {
                   contexts(first: 100) { pageInfo { hasNextPage } nodes {
-                    ... on CheckRun { databaseId name isRequired(pullRequestNumber: $pr) conclusion checkSuite { app { databaseId } } }
+                    ... on CheckRun { id name isRequired(pullRequestNumber: $pr) conclusion checkSuite { app { databaseId } } }
                     ... on StatusContext { context isRequired(pullRequestNumber: $pr) state }
                   } }
                 } } }
@@ -436,10 +436,10 @@ public sealed class GitHubWorkerResultVerifier : IWorkerResultVerifier
             check.TryGetProperty("checkSuite", out var suite) && suite.ValueKind == JsonValueKind.Object &&
             suite.TryGetProperty("app", out var app) && app.ValueKind == JsonValueKind.Object &&
             app.GetProperty("databaseId").GetInt64() == expected).ToArray();
-        if (matches.Length != 1 || !matches[0].TryGetProperty("databaseId", out var id) ||
-            !id.TryGetInt64(out var runId) || runId <= 0)
+        if (matches.Length != 1 || !matches[0].TryGetProperty("id", out var id) ||
+            id.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(id.GetString()))
             throw new InvalidOperationException("A required context must identify one exact successful check run: " + name);
-        var receipt = new RequiredCheckRun(name, expected, runId);
+        var receipt = new RequiredCheckRun(name, expected, id.GetString()!);
         if (!requiredRuns.Contains(receipt)) requiredRuns.Add(receipt);
     }
 

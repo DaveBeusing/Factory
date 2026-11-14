@@ -1940,7 +1940,17 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
         var checkUrl = "https://api.github.com/repos/example/repo/check-runs/9";
         var jobCheckUrl = checkUrl;
         var reviews = Array.Empty<object>();
-        RequiredCheckRun[] required = [new("build", 15368, 9)];
+        const long checkId = 132435614163;
+        const string nodeId = "CR_example_opaque";
+        using var context = System.Text.Json.JsonDocument.Parse("\"build\"");
+        using var appPin = System.Text.Json.JsonDocument.Parse("15368");
+        using var rollup = System.Text.Json.JsonDocument.Parse(Json.Stringify(new
+        {
+            id = nodeId, name = "build", checkSuite = new { app = new { databaseId = 15368 } }
+        }));
+        var selected = new List<RequiredCheckRun>();
+        GitHubWorkerResultVerifier.VerifyRequiredRun(context.RootElement, appPin.RootElement, [rollup.RootElement], selected);
+        IReadOnlyList<RequiredCheckRun> required = selected;
         var coordinator = new PullRequestCoordinator(new StateStore(home.FullName), new FactorySettings(), (args, _, _) =>
         {
             var endpoint = args.Last();
@@ -1958,7 +1968,7 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
                 } } },
                 var route when route.Contains("/check-suites/12/") => new[] { new { check_runs = new[]
                 {
-                    new { id = 9, url = checkUrl, app = new { id = appId }, head_sha = head, name = "build", conclusion = "success" }
+                    new { id = checkId, node_id = nodeId, url = checkUrl, app = new { id = appId }, head_sha = head, name = "build", conclusion = "success" }
                 } } },
                 var route when route.Contains("/pulls/42/reviews?") => new[] { reviews },
                 _ => throw new Exception("Unexpected host request: " + endpoint)
@@ -1975,16 +1985,16 @@ await TestAsync("Hosted CI rejects substituted workflows, stale heads, failed at
             catch (InvalidOperationException ex) when (ex.Message.Contains(message)) { }
         }
         var receipt = await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None, required);
-        Assert(receipt.Contains(head) && receipt.Contains("\"workflowId\": 7"));
-        required = [new("build", 99, 9)];
+        Assert(receipt.Contains(head) && receipt.Contains("\"workflowId\": 7") && receipt.Contains("132435614163"));
+        required = [new("build", 99, nodeId)];
         await Reject("pin the authorized");
-        required = [new("build", 15368, 10)];
+        required = [new("build", 15368, "CR_different")];
         await Reject("trusted app");
-        required = [new("build", 15368, 9)];
+        required = selected;
         try
         {
             await coordinator.RequireExactWorkflowAsync(decision, project, CancellationToken.None,
-                [new("build", 15368, 9), new("extra-required", 15368, 11)]);
+                [new("build", 15368, nodeId), new("extra-required", 15368, "CR_extra")]);
             throw new Exception("An additional required check bypassed workflow validation.");
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("extra-required")) { }

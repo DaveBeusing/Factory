@@ -295,7 +295,7 @@ internal sealed class PullRequestCoordinator(StateStore store, FactorySettings s
             var link = candidates[0].GetProperty("check_run_url").GetString();
             var match = checks.Where(run => run.GetProperty("url").GetString() == link &&
                 run.GetProperty("app").GetProperty("id").GetInt64() == required.AppId &&
-                run.GetProperty("id").GetInt64() == required.RunId &&
+                run.TryGetProperty("node_id", out var node) && node.GetString() == required.NodeId &&
                 run.GetProperty("head_sha").GetString() == d.HeadCommit &&
                 run.GetProperty("name").GetString() == name &&
                 run.GetProperty("conclusion").GetString() == "success").ToArray();

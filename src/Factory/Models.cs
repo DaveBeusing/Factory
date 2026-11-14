@@ -32,6 +32,7 @@ internal enum LifecycleReason
     OperatorResumed,
     OperatorRetried,
     Reconciled,
+    SchedulingResourcesReleased,
     IntegrationVerified,
     PlanProposed,
     PlanSuperseded,
@@ -80,6 +81,7 @@ internal static class JobLifecycle
 
 public sealed class FactoryState
 {
+    internal HashSet<Guid> VerifiedIntegrations { get; } = [];
     public int Schema { get; set; } = 1;
     public List<ProjectInfo> Projects { get; set; } = [];
     public List<FactoryJob> Jobs { get; set; } = [];
@@ -143,6 +145,7 @@ public sealed class FactoryJob
     public int MaxRounds { get; set; } = 3;
     public List<Guid> DependsOn { get; set; } = [];
     public List<string> ExpectedPaths { get; set; } = [];
+    public List<string> SharedResources { get; set; } = [];
     public List<string> RequiredExecutionCapabilities { get; set; } = [];
     public string Branch { get; set; } = "";
     public string Worktree { get; set; } = "";

@@ -11,6 +11,7 @@ public sealed class PlannedPackage
     public string Risk { get; set; } = "medium";
     public int Priority { get; set; } = 50;
     public List<string> Files { get; set; } = [];
+    public List<string> SharedResources { get; set; } = ["unknown"];
     public List<int> DependsOn { get; set; } = [];
     public List<AcceptanceEvidence> AcceptanceEvidence { get; set; } = [];
     public List<IntegratedPrerequisite> IntegratedPrerequisites { get; set; } = [];
@@ -100,6 +101,8 @@ public static class Planning
             "Work packages must be independently reviewable and based on master, never stacked on other PR branches. " +
             "Return ONLY valid JSON with a packages array, each item with title, description, risk (low|medium|high), " +
             "priority (0..100), files string array and dependsOn integer array (zero-based indices). " +
+            "Declare sharedResources as kind:name keys (interface, schema, ci, config, generated), " +
+            "an empty array when none are shared, or [\"unknown\"] when ownership is uncertain. " +
             "Set contractVersion to 1 and include acceptanceEvidence " +
             "(objects with criterion and check) using these configured check names: " +
             Json.Stringify(p.Checks.Select(c => c.Name).ToArray()) + ". " +
@@ -156,6 +159,7 @@ public static class Planning
             if (item is null || string.IsNullOrWhiteSpace(item.Title) || string.IsNullOrWhiteSpace(item.Description) ||
                 item.Files is null || item.DependsOn is null)
                 throw new ArgumentException($"Invalid package {index}");
+            if (plan.ContractVersion == 1) SchedulingResources.Validate(item.SharedResources);
             if (item.Priority is < 0 or > 100) throw new ArgumentException("Priority out of range");
             if (!new[] { "low", "medium", "high" }.Contains(item.Risk)) throw new ArgumentException("Invalid risk");
             if (item.DependsOn.Any(i => i < 0 || i >= plan.Packages.Count || i == index))
@@ -277,7 +281,8 @@ public static class Planning
         var jobs = plan.Packages.Select((pkg, index) => retained.TryGetValue(index, out var existing) ? existing : new FactoryJob
         {
             ProjectId = goal.ProjectId, GoalId = goal.Id, Title = pkg.Title, Description = pkg.Description,
-            Risk = pkg.Risk, Priority = pkg.Priority, ExpectedPaths = pkg.Files.ToList(), Mode = mode
+            Risk = pkg.Risk, Priority = pkg.Priority, ExpectedPaths = pkg.Files.ToList(),
+            SharedResources = plan.ContractVersion == 1 ? pkg.SharedResources.ToList() : ["unknown"], Mode = mode
         }).ToList();
         for (var i = 0; i < jobs.Count; i++)
         {

@@ -1441,6 +1441,131 @@ Test("Versioned specifications require evidence and ordered ownership", () =>
     }
 });
 
+Test("Scheduler serializes shared resources and explains the decision", () =>
+{
+    var project = new ProjectInfo { MaxParallel = 4 };
+    var first = new FactoryJob { ProjectId = project.Id, Priority = 90, ExpectedPaths = ["a.cs"], SharedResources = ["schema:sqlite"] };
+    var second = new FactoryJob { ProjectId = project.Id, Priority = 80, ExpectedPaths = ["b.cs"], SharedResources = ["schema:SQLite"] };
+    var other = new FactoryJob { ProjectId = project.Id, Priority = 70, ExpectedPaths = ["c.cs"], SharedResources = ["interface:checks"] };
+    var state = new FactoryState { Projects = [project], Jobs = [second, other, first] };
+    var decisions = new List<SchedulingDecision>();
+    var chosen = JobScheduler.SelectWithReasons(state, 4, "local", null, 512, decisions);
+    Assert(chosen.Select(j => j.Id).SequenceEqual([first.Id, other.Id]));
+    Assert(decisions.Single(d => d.JobId == second.Id) == new SchedulingDecision(second.Id, "ownership_conflict", first.Id));
+    first.State = JobStates.Preparing;
+    first.LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(1);
+    Assert(JobScheduler.Select(state, 4).Single().Id == other.Id);
+    first.State = JobStates.CompletedLocal;
+    first.LeaseOwner = "local-runner";
+    Assert(JobScheduler.Select(state, 4).Single().Id == other.Id);
+    first.SharedResources = ["unknown"];
+    Assert(JobScheduler.Select(state, 4).Count == 0);
+    first.LeaseUntil = DateTimeOffset.UtcNow.AddMinutes(-1);
+    Assert(JobScheduler.Select(state, 4).Count == 0);
+    first.LeaseOwner = "";
+    first.State = JobStates.Blocked;
+    first.Stage = "reconcile";
+    Assert(JobScheduler.Select(state, 4).Count == 0);
+});
+
+
+Test("Reviewed release clears a fenced reservation without replay", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-resource-release-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo();
+        var old = new FactoryJob { ProjectId = project.Id, Mode = "remote", State = JobStates.Blocked,
+            Stage = "reconcile", CheckpointStage = "push", ExpectedPaths = ["a.cs"], SharedResources = ["schema:sqlite"] };
+        var next = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["b.cs"], SharedResources = ["schema:sqlite"] };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.AddRange([old, next]); });
+        Assert(JobScheduler.Select(store.Read(), 4).Count == 0);
+        var input = new ResourceReleaseInput(old.ControlRevision, true, true, "Confirmed stopped and reviewed remote Git effects");
+        var released = JobRecovery.ReleaseResources(store, old.Id, input);
+        Assert(released.State == JobStates.Cancelled && released.Stage == "resources_released");
+        var reopened = new StateStore(home.FullName);
+        Assert(JobScheduler.Select(reopened.Read(), 4).Single().Id == next.Id);
+        try
+        {
+            JobRecovery.ReleaseResources(reopened, old.Id, input);
+            throw new Exception("A stale release was accepted.");
+        }
+        catch (InvalidOperationException) { }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
+Test("Resource release verifies the recorded local runner after a mode change", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-resource-provenance-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo();
+        var job = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["a.cs"] };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.Add(job); });
+        store.Change(s => JobRecovery.Assign(s.Jobs.Single(), "fixture-runner", 120, local: true));
+        store.UpdateJob(job.Id, j => j.LeaseUntil = DateTimeOffset.UtcNow.AddSeconds(-1));
+        Assert(JobRecovery.QuarantineExpired(store).Contains(job.Id));
+        using var runner = new CancellationTokenSource();
+        LocalJobControl.Register(job.Id, runner);
+        try
+        {
+            store.UpdateJob(job.Id, j => j.Mode = JobExecutionModes.Remote);
+            var snapshot = new StateStore(home.FullName).Job(job.Id);
+            var release = new ResourceReleaseInput(snapshot.ControlRevision, true, true, "Reviewed Git effects and runner");
+            try
+            {
+                JobRecovery.ReleaseResources(store, job.Id, release);
+                throw new Exception("Mode change bypassed the live runner check.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("still alive", StringComparison.Ordinal)) { }
+            Assert(store.Job(job.Id).ControlRevision == snapshot.ControlRevision);
+        }
+        finally { LocalJobControl.Unregister(job.Id); }
+        var stopped = store.Job(job.Id);
+        Assert(JobRecovery.ReleaseResources(store, job.Id,
+            new(stopped.ControlRevision, true, true, "Verified runner termination and Git effects")).State == JobStates.Cancelled);
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
+Test("Interrupted Git retries keep ownership until reviewed release", () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-interrupted-git-retry-");
+    try
+    {
+        var store = new StateStore(home.FullName);
+        var project = new ProjectInfo();
+        var old = new FactoryJob { ProjectId = project.Id, Mode = "remote", State = JobStates.Blocked,
+            Stage = "interrupted_git", ExpectedPaths = ["a.cs"], SharedResources = ["config:ci"] };
+        var next = new FactoryJob { ProjectId = project.Id, ExpectedPaths = ["b.cs"], SharedResources = ["config:ci"] };
+        store.Change(s => { s.Projects.Add(project); s.Jobs.AddRange([old, next]); });
+
+        foreach (var action in new[] { "retry", "resume" })
+        {
+            try
+            {
+                MissionControlManager.ControlJob(new StateStore(home.FullName), old.Id, new ControlInput
+                {
+                    Action = action, Reviewed = true, ControlRevision = old.ControlRevision
+                });
+                throw new Exception("Interrupted Git work was requeued.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("explicit reconciliation", StringComparison.Ordinal)) { }
+            Assert(store.Job(old.Id).ControlRevision == old.ControlRevision);
+            Assert(JobScheduler.Select(store.Read(), 4).Count == 0);
+        }
+
+        JobRecovery.ReleaseResources(store, old.Id,
+            new ResourceReleaseInput(old.ControlRevision, true, true, "Confirmed stopped and reviewed remote Git effects"));
+        Assert(store.Job(old.Id).State == JobStates.Cancelled);
+        Assert(JobScheduler.Select(store.Read(), 4).Single().Id == next.Id);
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 Test("Path normalization", () => Assert(GitOperations.SamePath(".", Path.GetFullPath("."))));
 Test("Agent executable locator picks first existing binary", () =>
 {
@@ -1492,6 +1617,7 @@ Test("Dependency integration gate", () =>
     var a = new FactoryJob(); var b = new FactoryJob { DependsOn = [a.Id] };
     Assert(!DependencyGraph.DependenciesSatisfied(b, [a,b]));
     a.Integrated = true;
+    a.State = JobStates.Integrated;
     Assert(DependencyGraph.DependenciesSatisfied(b, [a,b]));
 });
 Test("Unknown files conflict", () =>
@@ -2248,7 +2374,8 @@ await TestAsync("Remote integration rejects unpushed local history and stale loc
         Git(checkout, "pull", "--ff-only", "origin", "master");
         var refreshed = await engine.VerifyIntegrationAsync(stale.Id);
         Assert(refreshed.BaseCommit == remoteCommit && refreshed.IntegratedCommit == remoteCommit);
-        Assert(DependencyGraph.DependenciesSatisfied(new FactoryJob { DependsOn = [stale.Id] },
+        Assert(store.Read().VerifiedIntegrations.Contains(stale.Id));
+        Assert(DependencyGraph.DependenciesSatisfied(new FactoryJob { ProjectId = project.Id, DependsOn = [stale.Id] },
             store.Read().Jobs), "Verified remote integration did not release dependent work");
     }
     finally { try { Directory.Delete(root, true); } catch { } }
@@ -2430,7 +2557,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 21, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 22, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -3048,7 +3175,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 21);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 22);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -3548,7 +3675,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 21);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 22);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

@@ -3,6 +3,8 @@ using System.Security.Cryptography;
 
 namespace Factory;
 
+public sealed record ResourceReleaseInput(string ControlRevision, bool RunnerStopped, bool GitEffectsReviewed, string Reason);
+
 public readonly record struct ExecutionFence(long Generation, string Token, string Owner);
 
 public sealed class LostExecutionLeaseException(string message) : InvalidOperationException(message);
@@ -13,6 +15,26 @@ public sealed class LostExecutionLeaseException(string message) : InvalidOperati
 /// </summary>
 public static class JobRecovery
 {
+    internal static FactoryJob ReleaseResources(StateStore store, Guid id, ResourceReleaseInput input)
+    {
+        var reason = input.Reason?.Trim();
+        if (!input.RunnerStopped || !input.GitEffectsReviewed || reason is not { Length: >= 10 and <= 1000 })
+            throw new ArgumentException("Confirm runner termination and Git reconciliation with a 10–1000 character reason.");
+        return store.ReleaseSchedulingResources(id, input, reason);
+    }
+
+    internal static void VerifyResourceRelease(FactoryJob job, ResourceReleaseInput input)
+    {
+        if (job.ControlRevision != input.ControlRevision || job.State != JobStates.Blocked ||
+            job.Stage is not ("reconcile" or "interrupted_git") ||
+            job.LeaseOwner.Length != 0 || job.LeaseToken.Length != 0 || job.LeaseUntil is not null)
+            throw new InvalidOperationException("The job changed or is not awaiting release of a fenced reservation.");
+
+        // Only local process identity can be verified by this controller. An administrator
+        // must establish termination out of band for a remote or former-host runner.
+        if (string.Equals(job.WorkerMachineName, Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+            EnsurePreviousRunnerStopped(job);
+    }
     public static ExecutionFence Assign(FactoryJob job, string owner, int leaseSeconds, bool local,
         FactoryState? state = null, int reservationTokens = GoalBudgetLedger.DefaultReservationTokens)
     {
@@ -80,8 +102,7 @@ public static class JobRecovery
             var ids = new List<Guid>();
             foreach (var job in s.Jobs.Where(j => (mode is null || j.Mode == mode) &&
                 !string.IsNullOrEmpty(j.LeaseOwner) &&
-                j.LeaseUntil <= DateTimeOffset.UtcNow &&
-                JobStates.Active.Contains(j.State)))
+                j.LeaseUntil <= DateTimeOffset.UtcNow))
             {
                 RemoteProviderRouting.HoldTurns(s, job, "Remote worker lease expired");
                 GoalBudgetLedger.Hold(s, job, "expired worker lease");
@@ -107,7 +128,7 @@ public static class JobRecovery
 
     private static void EnsurePreviousRunnerStopped(FactoryJob job)
     {
-        if (job.Mode != JobExecutionModes.Local || job.WorkerProcessId <= 0 ||
+        if (job.WorkerProcessId <= 0 ||
             job.WorkerProcessStartedAt is null ||
             string.IsNullOrWhiteSpace(job.WorkerMachineName) ||
             !job.WorkerMachineName.Equals(Environment.MachineName, StringComparison.OrdinalIgnoreCase))
@@ -163,7 +184,7 @@ public static class JobRecovery
 
     internal static void VerifyLocalRecoveryEvidence(FactoryJob snapshot)
     {
-        if (snapshot.State != JobStates.Blocked || snapshot.Stage != "reconcile" ||
+        if (snapshot.Mode != JobExecutionModes.Local || snapshot.State != JobStates.Blocked || snapshot.Stage != "reconcile" ||
             !string.IsNullOrEmpty(snapshot.LeaseOwner))
             throw new InvalidOperationException("Job is not waiting for reconciliation");
         EnsurePreviousRunnerStopped(snapshot);

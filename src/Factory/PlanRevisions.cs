@@ -64,10 +64,10 @@ public sealed partial class StateStore
             JsonSerializer.Deserialize<FactoryPlan>(content, Json.Options)?.ContractVersion == 1;
     }
 
-    internal static void VerifySpecificationAdoption(SqliteConnection db, SqliteTransaction tx, FactoryGoal goal,
+    internal static Dictionary<int, FactoryJob> VerifySpecificationAdoption(SqliteConnection db, SqliteTransaction tx, FactoryGoal goal,
         FactoryPlan plan, IReadOnlyList<FactoryJob> jobs)
     {
-        if (goal.State == "draft" && !jobs.Any(j => j.GoalId == goal.Id)) return;
+        if (goal.State == "draft" && !jobs.Any(j => j.GoalId == goal.Id)) return [];
         if (goal.State != "active" || plan.ContractVersion != 1 || !SpecificationContracts.CanRevise(goal, jobs))
             throw new InvalidOperationException("Existing jobs prevent specification replacement.");
         using var adopted = Command(db, tx, """
@@ -76,12 +76,34 @@ public sealed partial class StateStore
             """, ("$project", goal.ProjectId), ("$goal", goal.Id));
         if (adopted.ExecuteScalar() is not string previous || previous == plan.Revision.ToString())
             throw new InvalidOperationException("A new specification revision must be reviewed before replacing jobs.");
+        using var revision = Command(db, tx, """
+            SELECT content FROM goal_plan_revisions WHERE goal_id=$goal AND revision=$revision;
+            """, ("$goal", goal.Id), ("$revision", previous));
+        var prior = JsonSerializer.Deserialize<FactoryPlan>((string)revision.ExecuteScalar()!, Json.Options)!;
+        var retained = new Dictionary<int, FactoryJob>();
+        foreach (var job in jobs.Where(j => j.GoalId == goal.Id && SpecificationContracts.IsIntegrated(j)))
+        {
+            using var proof = Command(db, tx, """
+                SELECT 1 FROM lifecycle_audit WHERE project_id=$project AND entity_id=$job
+                    AND entity_kind='job' AND reason_code='IntegrationVerified' LIMIT 1;
+                """, ("$project", goal.ProjectId), ("$job", job.Id));
+            if (proof.ExecuteScalar() is null)
+                throw new InvalidOperationException("An integrated predecessor has no durable integration proof.");
+            var old = prior.Packages.SingleOrDefault(p => p.Title == job.Title);
+            var index = plan.Packages.FindIndex(p => p.Title == job.Title);
+            if (old is null || index < 0 || Json.Stringify(old) != Json.Stringify(plan.Packages[index]))
+                throw new InvalidOperationException("Retain each integrated package contract unchanged in a replacement revision.");
+            if (!retained.TryAdd(index, job))
+                throw new InvalidOperationException("Multiple integrations match the same package.");
+        }
+        return retained;
     }
 
     internal static IReadOnlyList<FactoryJob> RetireSpecificationJobs(SqliteConnection db, SqliteTransaction tx,
         IReadOnlyList<FactoryJob> jobs, FactoryGoal goal, FactoryPlan plan, string actor)
     {
-        var current = jobs.Where(job => job.GoalId == goal.Id && !SpecificationContracts.IsSuperseded(job)).ToArray();
+        var current = jobs.Where(job => job.GoalId == goal.Id && !SpecificationContracts.IsSuperseded(job) &&
+            !SpecificationContracts.IsIntegrated(job)).ToArray();
         foreach (var job in current)
         {
             RequireSettledJobProviderUsage(db, tx, job.Id);

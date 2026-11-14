@@ -164,14 +164,14 @@ public sealed partial class StateStore
         if (!input.ReviewedExistingWork)
             throw new ScopedProjectRejected(DraftGoalStatus.Invalid, "Confirm review of existing work before adoption.");
         Planning.VerifyAdoption(plan, snapshot, scope.Project, scope.Goal, input.Mode, true, input.PlanRevision);
-        var jobs = Planning.BuildAdoptedJobs(plan, scope.Goal, input.Mode);
 
         using var tx = db.BeginTransaction();
         var current = ReadPlanScope(db, tx, verifier, projectId, goalId);
         RequireDraftPlanTarget(current);
         Planning.VerifyAdoptionTarget(plan, current.StoredPlan, scope.Project, current.Project, current.Goal);
         var currentState = Load(db, tx);
-        VerifySpecificationAdoption(db, tx, current.Goal, plan, currentState.Jobs);
+        var retained = VerifySpecificationAdoption(db, tx, current.Goal, plan, currentState.Jobs);
+        var jobs = Planning.BuildAdoptedJobs(plan, current.Goal, input.Mode, retained);
         VerifySpecification(db, tx, plan, currentState);
         if (DecidePlanAdoption(db, tx, plan, current.SubjectId.ToString()) != PolicyOutcome.Allow)
         {

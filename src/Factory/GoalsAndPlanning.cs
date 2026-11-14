@@ -200,13 +200,13 @@ public static class Planning
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             VerifyAdoptionTarget(plan, StateStore.ReadStoredPlanRevision(db, tx, goalId),
                 requestedProject, project, goal);
-            StateStore.VerifySpecificationAdoption(db, tx, goal, plan, state.Jobs);
+            var retained = StateStore.VerifySpecificationAdoption(db, tx, goal, plan, state.Jobs);
             StateStore.VerifySpecification(db, tx, plan, state);
             if (StateStore.DecidePlanAdoption(db, tx, plan, "local-operator") != PolicyOutcome.Allow)
                 return null;
             if (goal.State == "active")
                 StateStore.RetireSpecificationJobs(db, tx, state.Jobs, goal, plan, "local-operator");
-            var jobs = BuildAdoptedJobs(plan, goal, mode);
+            var jobs = BuildAdoptedJobs(plan, goal, mode, retained);
             state.Jobs.AddRange(jobs);
             goal.State = "active";
             StateStore.RecordPlanAdoption(db, tx, plan, "local-operator");
@@ -271,18 +271,27 @@ public static class Planning
             throw new InvalidOperationException("master advanced; regenerate the plan");
     }
 
-    internal static List<FactoryJob> BuildAdoptedJobs(FactoryPlan plan, FactoryGoal goal, string mode)
+    internal static List<FactoryJob> BuildAdoptedJobs(FactoryPlan plan, FactoryGoal goal, string mode,
+        IReadOnlyDictionary<int, FactoryJob> retained)
     {
-        var jobs = plan.Packages.Select(pkg => new FactoryJob
+        var jobs = plan.Packages.Select((pkg, index) => retained.TryGetValue(index, out var existing) ? existing : new FactoryJob
         {
             ProjectId = goal.ProjectId, GoalId = goal.Id, Title = pkg.Title, Description = pkg.Description,
             Risk = pkg.Risk, Priority = pkg.Priority, ExpectedPaths = pkg.Files.ToList(), Mode = mode
         }).ToList();
         for (var i = 0; i < jobs.Count; i++)
-            jobs[i].DependsOn = plan.Packages[i].DependsOn.Select(index => jobs[index].Id)
+        {
+            var dependencies = plan.Packages[i].DependsOn.Select(index => jobs[index].Id)
                 .Concat(plan.ContractVersion == 1 ? plan.Packages[i].IntegratedPrerequisites.Select(p => p.JobId) : [])
                 .ToList();
-        if (DependencyGraph.WouldCycle(jobs)) throw new InvalidOperationException("Cyclic plan");
-        return jobs;
+            if (retained.ContainsKey(i))
+            {
+                if (!jobs[i].DependsOn.SequenceEqual(dependencies) || jobs[i].Mode != mode)
+                    throw new InvalidOperationException("Integrated package dependencies and execution mode must remain unchanged.");
+            }
+            else jobs[i].DependsOn = dependencies;
+        }
+        // Internal cycles were checked on the package indices; external edges only target verified integrations.
+        return jobs.Where((_, index) => !retained.ContainsKey(index)).ToList();
     }
 }

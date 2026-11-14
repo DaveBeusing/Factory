@@ -1088,6 +1088,31 @@ await TestAsync("Plan adoption requires the reviewed plan and current goal revis
         var replacement = Planning.Adopt(store, goal.Id, "local", true, amended.Revision!.Value).Single();
         Assert(replacement.Id != attempted.Id && store.Job(attempted.Id).State == JobStates.Cancelled);
         Assert(store.Job(attempted.Id).Attempt == 1);
+
+        FactoryPlan Sequence(string title, Guid? revision)
+        {
+            var sequence = Draft(store.Read().Goals.Single(), "Predecessor", revision);
+            sequence.Packages.Add(new PlannedPackage { Title = title, Description = "Follow up",
+                Files = ["later.txt"], DependsOn = [0], AcceptanceEvidence = [new("Verified", "fixture")] });
+            return MissionControlManager.SavePlan(store, sequence);
+        }
+        var two = Sequence("Dependent", amended.Revision);
+        var pair = Planning.Adopt(store, goal.Id, "local", true, two.Revision!.Value);
+        store.Change((s, db, tx) =>
+        {
+            var predecessor = s.Jobs.Single(job => job.Id == pair[0].Id);
+            StateStore.RecordLifecycle(db, tx, predecessor.ProjectId, "job", predecessor.Id, "fixture-verifier",
+                JobStates.PrReady, JobStates.Integrated, LifecycleReason.IntegrationVerified,
+                reference: new string('a', 40), state: s);
+            predecessor.Integrated = true;
+            predecessor.State = JobStates.Integrated;
+            return 0;
+        });
+        store.UpdateJob(pair[1].Id, job => { job.State = JobStates.Blocked; job.Stage = "scope"; job.Attempt = 1; });
+        var updated = Sequence("Amended dependent", two.Revision);
+        var dependent = Planning.Adopt(store, goal.Id, "local", true, updated.Revision!.Value).Single();
+        Assert(dependent.DependsOn.SequenceEqual([pair[0].Id]));
+        Assert(store.Job(pair[0].Id).Integrated && store.Job(pair[1].Id).State == JobStates.Cancelled);
     }
     finally { try { Directory.Delete(root, true); } catch { } }
 });

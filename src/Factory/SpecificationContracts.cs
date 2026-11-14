@@ -14,15 +14,18 @@ internal static class SpecificationContracts
     internal static bool IsSuperseded(FactoryJob job) =>
         job.State == JobStates.Cancelled && job.Stage == "specification_superseded";
 
+    internal static bool IsIntegrated(FactoryJob job) => job.Integrated && job.State == JobStates.Integrated;
+
     internal static bool CanRevise(FactoryGoal goal, IReadOnlyList<FactoryJob> jobs)
     {
         if (goal.State == "draft") return true;
         if (goal.State != "active") return false;
         var current = jobs.Where(job => job.GoalId == goal.Id && !IsSuperseded(job)).ToArray();
-        return current.Length > 0 && current.All(job => job.LeaseOwner.Length == 0 &&
+        var remaining = current.Where(job => !IsIntegrated(job)).ToArray();
+        return remaining.Length > 0 && remaining.All(job => job.LeaseOwner.Length == 0 &&
             (job.State == JobStates.Queued && job.Attempt == 0 ||
              job.State == JobStates.Blocked && job.Stage == "scope")) &&
-            !jobs.Any(job => job.GoalId != goal.Id && current.Any(old => job.DependsOn.Contains(old.Id)));
+            !jobs.Any(job => job.GoalId != goal.Id && remaining.Any(old => job.DependsOn.Contains(old.Id)));
     }
 
     internal static void ValidateNew(FactoryPlan plan)

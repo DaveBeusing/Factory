@@ -26,6 +26,19 @@ public static class ManagedWorkers
         if (DateTimeOffset.UtcNow - worker.Heartbeat < TimeSpan.FromSeconds(20))
             throw new InvalidOperationException("Worker already connected; cannot start a second process using the same ID");
         if (RunningIds().Contains(id)) throw new InvalidOperationException("Worker process already running");
+        var process = Process.Start(CreateStartInfo(store.Home, settings, listenUrl, id))
+            ?? throw new InvalidOperationException("Unable to launch worker process");
+        if (!Processes.TryAdd(id, process))
+        {
+            process.Kill(entireProcessTree: true);
+            process.Dispose();
+            throw new InvalidOperationException("Worker already started");
+        }
+        store.Event(null, "worker_started", "Managed local process launched: " + id);
+    }
+
+    internal static ProcessStartInfo CreateStartInfo(string home, FactorySettings settings, string listenUrl, string id)
+    {
         var executable = Environment.ProcessPath ?? throw new InvalidOperationException("Executable path not available");
         var psi = new ProcessStartInfo(executable)
         {
@@ -37,20 +50,11 @@ public static class ManagedWorkers
             psi.ArgumentList.Add(typeof(Program).Assembly.Location);
         var slug = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(id)))[..20];
         psi.ArgumentList.Add("worker"); psi.ArgumentList.Add("--server"); psi.ArgumentList.Add(listenUrl);
-        psi.ArgumentList.Add("--workspace"); psi.ArgumentList.Add(Path.Combine(store.Home, "managed-workers", slug));
+        psi.ArgumentList.Add("--workspace"); psi.ArgumentList.Add(Path.Combine(home, "managed-workers", slug));
         psi.ArgumentList.Add("--id"); psi.ArgumentList.Add(id);
-        // A managed worker receives only its scoped credential, never the admin secret.
-        psi.Environment.Remove("FACTORY_TOKEN");
-        psi.Environment.Remove("FACTORY_REMOTE_EXECUTOR_TOKEN");
+        Commands.RemoveInheritedCredentials(psi);
         psi.Environment["FACTORY_WORKER_TOKEN"] = WorkerAuthentication.CreateToken(settings.WorkerTokenKey, id);
-        var process = Process.Start(psi) ?? throw new InvalidOperationException("Unable to launch worker process");
-        if (!Processes.TryAdd(id, process))
-        {
-            process.Kill(entireProcessTree: true);
-            process.Dispose();
-            throw new InvalidOperationException("Worker already started");
-        }
-        store.Event(null, "worker_started", "Managed local process launched: " + id);
+        return psi;
     }
     public static void Stop(StateStore store, string id)
     {

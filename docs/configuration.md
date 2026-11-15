@@ -52,7 +52,7 @@ Common fields in `settings.json`:
 | Setting | Meaning | Typical default |
 | --- | --- | --- |
 | `maxParallel` | Global simultaneous jobs | `3` |
-| `maxAgentSessions` | Concurrent native agent sessions | `6` |
+| `maxAgentSessions` | Shared concurrent agent-turn limit for the controller. After a reduction, running turns finish and new turns wait until capacity is available. | `6` |
 | `maxReviewRounds` | Bounded validation/rework rounds | `3` |
 | `leaseSeconds` | Worker lease duration | `120` |
 | `runtime` | Codex adapter mode: `exec` or `app-server` | `exec` |

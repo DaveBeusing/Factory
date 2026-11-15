@@ -5,7 +5,7 @@
 [← Documentation](README.md) · [Quality](quality.md) · [Roadmap](roadmap.md)
 
 > [!NOTE]
-> This guide describes the implementation inspected on **2026-11-14** at `master` (`77da14c`), alongside explicitly identified gaps. It is not a certification of runtime security, complete compatibility or external provider availability.
+> This guide describes the implementation at `master` (`0790fe0`). Its support and validation boundaries are documented in the linked operator guides.
 
 ## System overview
 
@@ -42,6 +42,7 @@ Arrows indicate conceptual flow, not separate network services or guaranteed tru
 | Quality / Git | [`Quality.cs`](../src/Factory/Quality.cs), [`GitOperations.cs`](../src/Factory/GitOperations.cs) | Checks, independent review, worktrees and scope |
 | Worker security | [`WorkerAuthentication.cs`](../src/Factory/WorkerAuthentication.cs), [`WorkerAuthorization.cs`](../src/Factory/WorkerAuthorization.cs) | Worker-specific credentials and project capability grants |
 | Providers | [`ProviderRouting.cs`](../src/Factory/ProviderRouting.cs), [`Providers/`](../src/Factory/Providers/Codex/CodexAgentRuntimes.cs) | Role restrictions and provider selection |
+| Agent policies | [`AgentPolicies.cs`](../src/Factory/AgentPolicies.cs), [`AgentRuntime.cs`](../src/Factory/AgentRuntime.cs) | Versioned role contracts, runtime admission and shared session limit |
 | Remote execution | [`RemoteWorkers.cs`](../src/Factory/RemoteWorkers.cs), [`RemoteProviderRouting.cs`](../src/Factory/RemoteProviderRouting.cs) | Leases, mixed provider routing and receipts |
 | Builds and versions | [`Build.ps1`](../Build.ps1), [`Directory.Build.props`](../Directory.Build.props) | Release build, Git-derived SemVer and manifest |
 
@@ -64,7 +65,7 @@ See [preflight](planning-preflight.md), [quality](quality.md) and [recovery](rec
 | --- | --- | --- |
 | Native runtime | .NET 10; validated Windows x64 packaging | No blanket Linux/macOS support claim |
 | Persistence | Relational SQLite schema 26, transactional upgrade code | Real-world backups, multi-writer and rollback verification |
-| Provider adapters | Codex writes; Claude Code and Ollama for read-only roles | No automatic interchangeability or general model capability negotiation |
+| Provider adapters | Codex builder, Claude Code and Ollama read-only roles, versioned controller role policies | Claude headless admission is capability-checked. Authenticated billing and Claude builder validation remain open. |
 | Operator access | Administrative and project-scoped human credentials/grants | Not a complete organizational identity/RBAC stack |
 | Worker access | Worker-specific tokens, project grants and controller-reviewed capability evidence | Attestation is not a cryptographic OS measurement |
 | Execution isolation | Git worktrees; optional container **checks** | Agent process remains subject to its host OS privileges |

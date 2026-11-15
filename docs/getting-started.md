@@ -112,6 +112,18 @@ A graphical app or a PowerShell alias is not a substitute for the native CLI exe
 
 ## Configure a target repository
 
+### Optional Claude Code setup
+
+Install the bundled operator profiles and skills from a built Factory package. This step works offline and needs no Claude account.
+
+```powershell
+.\dist\Factory.exe install-skills --provider claude
+```
+
+For live headless turns, install and authenticate the native Claude Code CLI (2.1.248 or newer). Use `Install-Dependencies.ps1 -Provider ClaudeCode` to check the local prerequisites. After registering the project, open **Projects → Inspect → Configure AI providers** in Mission Control and assign a configured Claude profile to Planning, Analysis or a review role. Keep the builder on Codex. [Claude Code configuration](providers.md#claude-code)
+
+### Register the repository
+
 Start with a clean checkout of the target repository's **`master`** branch. Choose quality checks appropriate for that project; a generic template might need editing before use.
 
 ```powershell

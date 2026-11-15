@@ -15,6 +15,7 @@
 | **Understand the CLI** | [CLI reference](cli.md) | [Quality checks](quality.md) |
 | **Use the dashboard** | [Mission Control](mission-control.md) | [Project review](project-reviews.md) |
 | **Plan work safely** | [Master-first preflight](planning-preflight.md) | [Provider routing and budgets](providers.md) |
+| **Configure agent roles or Claude Code** | [Controller agent roles](providers.md#controller-agent-roles) | [Optional Claude Code setup](getting-started.md#optional-claude-code-setup) |
 | **Configure workers** | [Remote workers](remote-workers.md) | [Operator authorization](operator-authorization.md) |
 | **Handle interrupted work** | [Recovery](recovery.md) | [Capacity and provider holds](providers.md#budget-semantics) |
 | **Assess implementation** | [Architecture and limitations](architecture.md) | [Roadmap](roadmap.md) |

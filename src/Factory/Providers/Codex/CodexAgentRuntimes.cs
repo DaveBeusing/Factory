@@ -212,7 +212,7 @@ public sealed class AppServerAgentRuntime(string model, bool verifyModel = false
         if (!readOnly) _session = null;
         var threadParameters = new Dictionary<string, object?>
         {
-            ["cwd"] = directory, ["approvalPolicy"] = "never", ["sandbox"] = readOnly ? "readOnly" : "workspaceWrite"
+            ["cwd"] = directory, ["approvalPolicy"] = "never", ["sandbox"] = readOnly ? "read-only" : "workspace-write"
         };
         if (!string.IsNullOrEmpty(model)) threadParameters["model"] = model;
         if (resume)

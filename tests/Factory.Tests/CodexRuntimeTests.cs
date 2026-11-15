@@ -81,9 +81,11 @@ internal static class CodexRuntimeTests
             "Early or unrelated turn evidence was attributed incorrectly");
         Require(transcript.Contains("thread/start") && transcript.Contains("decline") &&
             !transcript.Contains("thread/resume"), "Unknown binding should start fresh and decline approvals");
+        Require(SandboxRequest(transcript, "thread/start") == "workspace-write", "Invalid v2 start sandbox mode");
 
         var (resumed, resumeRequest) = await Run([ready, Thread(directory, "workspaceWrite"), turnStarted, message, completed], "thread");
         Require(resumed.Success && resumeRequest.Contains("thread/resume"), "Matching builder session did not resume");
+        Require(SandboxRequest(resumeRequest, "thread/resume") == "workspace-write", "Invalid v2 resume sandbox mode");
         var (wrongProvider, providerRequest) = await Run([ready, Thread(directory, "workspaceWrite", provider: "another")], "thread");
         Require(!wrongProvider.Success && providerRequest.Contains("thread/resume") &&
             !providerRequest.Contains("turn/start"), "Changed provider was allowed on the resumed turn");
@@ -93,6 +95,7 @@ internal static class CodexRuntimeTests
             "thread", readOnly: true);
         Require(review.Success && reviewRequest.Contains("thread/start") &&
             !reviewRequest.Contains("thread/resume"), "Read-only review resumed a builder session");
+        Require(SandboxRequest(reviewRequest, "thread/start") == "read-only", "Invalid v2 read-only sandbox mode");
 
         var (wrongDirectory, wrongDirectoryRequest) = await Run([ready, Thread(Path.Combine(directory, "other"), "workspaceWrite")], "thread");
         Require(!wrongDirectory.Success && !wrongDirectoryRequest.Contains("turn/start"),
@@ -114,6 +117,18 @@ internal static class CodexRuntimeTests
         {
             Require(ex.Message.Contains("size limit"), "Oversized event must be rejected before parsing");
         }
+    }
+
+    private static string? SandboxRequest(string transcript, string request)
+    {
+        foreach (var line in transcript.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            using var message = JsonDocument.Parse(line);
+            var root = message.RootElement;
+            if (root.TryGetProperty("method", out var method) && method.GetString() == request)
+                return root.GetProperty("params").GetProperty("sandbox").GetString();
+        }
+        return null;
     }
 
     internal static async Task PlannerEvidenceAsync()

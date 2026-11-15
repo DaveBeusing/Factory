@@ -102,10 +102,17 @@ public static class Commands
         foreach (var arg in argv) info.ArgumentList.Add(arg);
         // The native agent CLI, Git and configured quality checks are untrusted child
         // processes: they must not inherit controller or worker API bearer credentials.
+        RemoveInheritedCredentials(info);
+        return info;
+    }
+
+    internal static void RemoveInheritedCredentials(ProcessStartInfo info)
+    {
         info.Environment.Remove("FACTORY_TOKEN");
         info.Environment.Remove("FACTORY_WORKER_TOKEN");
         info.Environment.Remove("FACTORY_REMOTE_EXECUTOR_TOKEN");
-        return info;
+        info.Environment.Remove("FACTORY_GITHUB_WEBHOOK_SECRET");
+        info.Environment.Remove("FACTORY_WORKFLOW_EVENT_PRIVATE_KEY");
     }
     private static string QuoteCmd(string argument)
     {

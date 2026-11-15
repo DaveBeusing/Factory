@@ -124,6 +124,16 @@ For live headless turns, install and authenticate the native Claude Code CLI (2.
 
 ### Register the repository
 
+In Mission Control, open **Projects → Add project** to create a local Git repository, clone a remote repository, or register an existing checkout. Select the optional setup guide for shortcuts to project review, draft goals and planning. [Project setup in Mission Control](mission-control.md#set-up-a-project)
+
+To create a local repository from the CLI, use a destination that does not exist yet.
+
+```powershell
+.\dist\Factory.exe project create --name 'my-project' --source new --path 'D:\Code\my-project'
+```
+
+For an existing repository, use `init`.
+
 Start with a clean checkout of the target repository's **`master`** branch. Choose quality checks appropriate for that project; a generic template might need editing before use.
 
 ```powershell

@@ -49,6 +49,7 @@ public static class Program
             Console.WriteLine("""
 Factory | C# / .NET 10
   version | doctor | init <repo> --name NAME [--base master] [--checks-json PATH]
+  project create --name NAME --source new|clone|remote [--path PATH] [--remote-url URL] [--checks-json PATH]
   enqueue --project NAME --title TITLE --description TEXT [--mode local|remote] [--paths file1,file2] --reviewed-existing-work
   run | recover | reconcile <job-guid> --reviewed --reason TEXT | status | pause | resume | verify <job-guid>
   goal add --project NAME --objective TEXT [--criteria TEXT] [--budget TOKENS]
@@ -117,6 +118,19 @@ Environment: FACTORY_HOME overrides the local state directory.
                 }
                 Console.WriteLine("State: " + report.StateDirectory);
                 Console.WriteLine("API token file: " + report.SettingsFile);
+                return 0;
+            }
+            case "project" when args.Length > 1 && args[1] == "create":
+            {
+                var checksFile = Option(args, "checks-json");
+                Print(await ProjectProvisioning.CreateAsync(store, new ProjectInput
+                {
+                    Name = Required(args, "name"),
+                    Source = Required(args, "source"),
+                    Path = Option(args, "path"),
+                    RemoteUrl = Option(args, "remote-url"),
+                    Checks = string.IsNullOrEmpty(checksFile) ? [] : CheckLoader.Read(checksFile)
+                }));
                 return 0;
             }
             case "init":

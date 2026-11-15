@@ -265,7 +265,8 @@ public static class DashboardHost
             Results.Ok(store.IssueIntakePolicy(projectId)));
         app.MapPut("/api/projects/{projectId:guid}/issue-intake-policy", (Guid projectId, IssueIntakePolicyInput input) =>
             Results.Ok(new { revision = store.SetIssueIntakePolicy(projectId, input) }));
-        app.MapPost("/api/projects", (ProjectInput input) => Results.Created("/api/state", MissionControlManager.CreateProject(store, input)));
+        app.MapPost("/api/projects", async (ProjectInput input, CancellationToken ct) =>
+            Results.Created("/api/state", await ProjectProvisioning.CreateAsync(store, input, ct)));
         app.MapPut("/api/projects/{id:guid}", (Guid id, ProjectInput input) => Results.Ok(MissionControlManager.UpdateProject(store, id, input)));
         app.MapPost("/api/projects/{id:guid}/action", (Guid id, ControlInput input) =>
             Results.Ok(MissionControlManager.SetProjectStatus(store, id, input.Action)));

@@ -78,6 +78,77 @@ browserTest('same-token reconnect, settings preservation and queue pause', async
   await writeFile(path.join(home, 'settings.json'), JSON.stringify({ autoMerge: true }));
 });
 
+browserTest('creates a local project and can leave guided setup with a draft goal', async ({ page, nav, form, home, api }) => {
+  const repo = path.join(home, 'guided-project');
+  await nav.getByRole('button', { name: 'Projects' }).click();
+  await page.getByRole('button', { name: 'Add project', exact: true }).first().click();
+  const source = form.getByLabel('Repository source');
+  const guideOption = form.getByLabel('Guide me through review and goal planning after registration');
+  assert.equal(await guideOption.isChecked(), false);
+  await source.selectOption('remote');
+  await form.getByLabel('Remote repository URL').waitFor();
+  assert.equal(await form.getByLabel('Destination folder').isVisible(), false);
+  await source.selectOption('clone');
+  await form.getByLabel('Destination folder').waitFor();
+  await source.selectOption('new');
+  assert.equal(await form.getByLabel('Remote repository URL').isVisible(), false);
+  await form.getByLabel('Project name').fill('Guided project');
+  await form.getByLabel('Destination folder').fill(repo);
+  await guideOption.check();
+  await form.getByRole('button', { name: 'Register project', exact: true }).click();
+  await form.waitFor({ state: 'hidden' });
+  const setup = page.getByRole('region', { name: 'Project setup guide' });
+  await setup.getByRole('button', { name: 'Review project' }).click();
+  await page.getByRole('button', { name: 'Analyze project' }).click();
+  await page.getByRole('heading', { name: 'Review findings' }).waitFor();
+  await setup.getByRole('button', { name: 'Create draft goal' }).click();
+  await form.getByLabel('Outcome / objective').fill('Add a project README');
+  await form.getByLabel('Acceptance criteria (one per line)').fill('Document how to build the project');
+  await form.getByRole('button', { name: 'Create draft goal' }).click();
+  await form.waitFor({ state: 'hidden' });
+  await setup.getByRole('button', { name: 'Open goal planner' }).click();
+  await setup.getByRole('button', { name: 'Exit guide' }).click();
+  await setup.waitFor({ state: 'hidden' });
+
+  const state = await api('state');
+  assert.equal(state.projects.length, 1);
+  assert.equal(state.goals.length, 1);
+  assert.equal(state.goals[0].projectId, state.projects[0].id);
+  assert.equal(state.goals[0].state, 'draft');
+  assert.equal(state.jobs.length, 0);
+  assert.equal(execFileSync('git', ['branch', '--show-current'], { cwd: repo, encoding: 'utf8' }).trim(), 'master');
+  assert.equal(execFileSync('git', ['rev-list', '--count', 'master'], { cwd: repo, encoding: 'utf8' }).trim(), '1');
+});
+
+browserTest('clones into explicit and Factory-managed destinations', async ({ home, api, fixture }) => {
+  const checkout = path.join(home, 'explicit-checkout');
+  const create = data => api('projects', { method: 'POST', data });
+  const remoteUrl = 'git@fixture.invalid:project.git';
+  const clone = await create({ name: 'Explicit clone', source: 'clone', path: checkout, remoteUrl });
+  const managed = await create({ name: 'Managed clone', source: 'remote', remoteUrl });
+  assert.equal(path.relative(checkout, clone.path), '');
+  assert.equal(path.relative(path.join(home, 'repositories'), path.dirname(managed.path)), '');
+  for (const project of [clone, managed]) {
+    assert.equal(project.origin, remoteUrl);
+    assert.equal(execFileSync('git', ['rev-parse', 'master'], { cwd: project.path, encoding: 'utf8' }).trim(), fixture.head);
+  }
+  await assert.rejects(create({ name: 'Overwrite attempt', source: 'new', path: checkout }), /does not already exist/);
+  await assert.rejects(create({ name: 'Local URL', source: 'remote', remoteUrl: 'file:///project.git' }), /HTTPS or SSH/);
+  assert.equal((await api('state')).projects.length, 2);
+}, async home => {
+  const remote = path.join(home, 'remote-fixture');
+  await mkdir(remote);
+  const git = (...args) => execFileSync('git', args, { cwd: remote, encoding: 'utf8' }).trim();
+  git('init', '--initial-branch=master', '--template=');
+  git('-c', 'user.name=Factory Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'commit.gpgsign=false',
+    'commit', '--allow-empty', '-m', 'Remote fixture');
+  const ssh = path.join(home, 'fixture-ssh.sh').replaceAll('\\', '/');
+  await writeFile(ssh, 'exec git upload-pack "$FACTORY_FIXTURE_REMOTE"\n');
+  return { head: git('rev-parse', 'master'), env: {
+    GIT_SSH_COMMAND: `sh "${ssh}"`, GIT_SSH_VARIANT: 'simple', FACTORY_FIXTURE_REMOTE: remote.replaceAll('\\', '/')
+  } };
+});
+
 browserTest('project quality presets, modal notifications and Factory doctor', async ({ page, nav, form, home }) => {
   const track = page.locator('.overview-allowance .progress-track');
   const fill = track.locator('.progress-fill');
@@ -90,7 +161,13 @@ browserTest('project quality presets, modal notifications and Factory doctor', a
   await page.emulateMedia({ reducedMotion: 'no-preference' });
 
   await nav.getByRole('button', { name: 'Projects' }).click();
-  await page.getByRole('button', { name: 'Add project', exact: true }).first().click();
+  const addProject = page.getByRole('button', { name: 'Add project', exact: true }).first();
+  await addProject.hover();
+  await page.waitForFunction(() => getComputedStyle(document.querySelector('[data-act="create-project"]:hover')).rotate === '-0.35deg');
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  assert.equal(await addProject.evaluate(el => getComputedStyle(el).scale), 'none');
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+  await addProject.click();
   const editor = form.getByLabel('Quality checks (JSON array)');
   const presets = form.getByLabel('Add quality check preset');
   await editor.fill('[{"name":"custom","executable":"git","arguments":[],"timeoutSeconds":20}]');
@@ -106,6 +183,7 @@ browserTest('project quality presets, modal notifications and Factory doctor', a
   assert.deepEqual(checks.map(check => check.name), ['custom', 'format', 'build', 'tests']);
   assert.ok(checks.find(check => check.name === 'build').arguments.includes('--warnaserror'));
   await editor.fill('{');
+  await form.getByLabel('Git repository root').fill(home);
   await form.getByRole('button', { name: 'Register project', exact: true }).click();
   await form.getByText('Invalid checks JSON').waitFor({ state: 'visible' });
   await form.getByRole('button', { name: 'Cancel' }).click();

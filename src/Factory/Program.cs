@@ -64,7 +64,7 @@ Factory | C# / .NET 10
   viewer grant-planner|revoke-planner --subject GUID --project NAME
   viewer grant-operator|revoke-operator --subject GUID --project NAME
   viewer grant-budget-reconciler|revoke-budget-reconciler --subject GUID --project NAME
-  usage | providers | install-skills [--overwrite]
+  usage | providers | install-skills [--provider codex|claude] [--overwrite]
 Environment: FACTORY_HOME overrides the local state directory.
 """);
             return 0;
@@ -267,7 +267,7 @@ Environment: FACTORY_HOME overrides the local state directory.
                 Console.WriteLine(WorkerAuthentication.CreateToken(settings.WorkerTokenKey, Required(args, "id")));
                 return 0;
             case "install-skills":
-                Skills.Install(Flag(args, "overwrite")); return 0;
+                Skills.Install(Flag(args, "provider") ? Required(args, "provider") : "codex", Flag(args, "overwrite")); return 0;
             default: throw new ArgumentException("Unknown command: " + args[0]);
         }
     }
@@ -343,6 +343,21 @@ public static class CheckLoader
 
 public static class Skills
 {
-    public static void Install(bool overwrite) =>
-        CodexAssets.Install(AppContext.BaseDirectory, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), overwrite);
+    public static void Install(bool overwrite) => Install("codex", overwrite);
+
+    internal static void Install(string provider, bool overwrite)
+    {
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        switch (provider)
+        {
+            case "codex":
+                CodexAssets.Install(AppContext.BaseDirectory, profile, overwrite);
+                break;
+            case "claude":
+                ClaudeAssets.Install(AppContext.BaseDirectory, profile, overwrite);
+                break;
+            default:
+                throw new ArgumentException("Unknown assets provider. Select codex or claude.", nameof(provider));
+        }
+    }
 }

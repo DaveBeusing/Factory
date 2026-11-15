@@ -2973,6 +2973,47 @@ await TestAsync("Local queue cannot claim or execute remote jobs", async () =>
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+await TestAsync("Runner honors durable interruption before the heartbeat observes it", async () =>
+{
+    var home = Directory.CreateTempSubdirectory("factory-runner-interruption-");
+    try
+    {
+        var repo = Directory.CreateDirectory(Path.Combine(home.FullName, "repo")).FullName;
+        GitOperations.Git(repo, "init", "-b", "master");
+        GitOperations.Git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+            "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "Fixture");
+        var store = new StateStore(Path.Combine(home.FullName, "state"));
+        var project = new ProjectInfo { Path = repo,
+            Checks = [new CheckCommand { Name = "git", Executable = "git", Arguments = ["rev-parse", "HEAD"] }] };
+        store.Change(s => s.Projects.Add(project));
+        foreach (var (request, outcome) in new[]
+        {
+            (LocalJobControl.ProjectPauseRequest, JobStates.Paused),
+            (LocalJobControl.ProjectStopRequest, JobStates.Stopped),
+            (LocalJobControl.ProjectCancelRequest, JobStates.Cancelled)
+        })
+        {
+            var job = store.AddJob(new FactoryJob
+            {
+                ProjectId = project.Id, Title = request, ExpectedPaths = ["src/"], MaxRounds = 1
+            });
+            var plugin = new BeforeJobFixture((current, token) =>
+            {
+                Assert(current.LeaseOwner.Length > 0);
+                Assert(!token.IsCancellationRequested);
+                store.UpdateJob(current.Id, j => j.RequestedState = request);
+            });
+            await new FactoryEngine(store, new FactorySettings { LeaseSeconds = 3600 },
+                plugins: [plugin], agent: new DeadlineAgent()).RunOneAsync(job.Id, CancellationToken.None);
+            var result = new StateStore(store.Home).Job(job.Id);
+            Assert(result.State == outcome && result.Stage == "interrupted",
+                $"{request} resulted in {result.State}/{result.Stage}: {result.Error}");
+            Assert(result.RequestedState.Length == 0 && result.LeaseOwner.Length == 0);
+        }
+    }
+    finally { try { home.Delete(true); } catch { } }
+});
+
 await TestAsync("Internal runtime cancellation in the last cycle blocks as transient", async () =>
 {
     var home = Directory.CreateTempSubdirectory("factory-runtime-deadline-");
@@ -5270,6 +5311,22 @@ internal sealed class ProviderCrashFixture : IAgentRuntime
         await Task.Delay(Timeout.Infinite, cancellation);
         throw new InvalidOperationException("Fixture must be stopped by its parent");
     }
+}
+
+internal sealed class BeforeJobFixture(Action<FactoryJob, CancellationToken> beforeJob) : IFactoryPlugin
+{
+    public string Name => nameof(BeforeJobFixture);
+
+    public Task BeforeJobAsync(ProjectInfo project, FactoryJob job, CancellationToken ct)
+    {
+        beforeJob(job, ct);
+        return Task.CompletedTask;
+    }
+
+    public Task AfterGateAsync(ProjectInfo project, FactoryJob job, QualityResult result, CancellationToken ct) =>
+        Task.CompletedTask;
+
+    public Task AfterJobAsync(ProjectInfo project, FactoryJob job, CancellationToken ct) => Task.CompletedTask;
 }
 
 internal sealed class DeadlineAgent : IAgentRuntime

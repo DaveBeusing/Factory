@@ -13,6 +13,18 @@ Factory has a provider-independent routing boundary with three currently impleme
 | Claude Code CLI | **Not supported** | Analysis, planning and reviews | CLI JSON, including cache input tokens when present | Unavailable |
 | Ollama local API | **Not supported** | Text-only analysis, planning and reviews | Final `prompt_eval_count` and `eval_count`, if supplied | Unavailable |
 
+## Controller agent roles
+
+Factory owns the versioned role policies for `builder`, `planner`, `analysis`, `review:code`, `review:architecture`, `review:security` and `review:ux`. Controller prompts separate fixed instructions from structured task and repository evidence. Only the builder route accepts write-enabled execution. Read-only routes require a fresh session. The general `review` assignment supplies a routing default for the four review specialties.
+
+Installed operator profiles support interactive workflows. Factory uses its bundled policy for controller turns. The packaged intake, diagnosis, specification, approval and integration profiles provide operator guidance. Approval and publication still use their controller and GitHub authorization paths. [Quality gates](quality.md#review-provenance-and-cycle-budget)
+
+### Codex execution and session continuity
+
+- **Exec** starts a fresh session for each turn, including rework in the existing job worktree. The adapter requires a coherent terminal result and keeps incomplete token observations distinct from final usage.
+- **App-server** can resume a builder session known to the same runtime instance and worktree. Before starting the turn, Factory checks the effective working directory, approval and sandbox policy. Resume also checks the thread, observed model and provider. A stored session ID without a matching runtime binding starts a fresh session. A mismatched effective policy prevents the turn from running.
+- App-server accounts for messages, completion and usage on the active thread and turn. Workspace-write and read-only execution use the corresponding sandbox modes with approval set to `never`.
+
 The Ollama adapter uses the native .NET HTTP client, does not invoke repository commands, and accepts only an unauthenticated HTTP loopback endpoint. It connects directly with redirects and proxies disabled. It receives the bounded context embedded in the prompt; it cannot browse the repository independently. A route that does not satisfy the role's capabilities fails closed, particularly for builder assignments.
 
 ## Provider evidence contract
@@ -23,7 +35,7 @@ This matrix describes the current remote worker claim protocol (`remote-provider
 | --- | --- | --- | --- | --- |
 | Codex `exec` (local) | No remote model verification | CLI turn completion usage | Unavailable | Controller account, via Codex app-server |
 | Codex `app-server` (local and remote) | Model in the thread response | App-server usage events | Unavailable | Controller account only |
-| Claude Code (local read-only) | No remote model verification | CLI result usage | CLI `total_cost_usd` when supplied. Live check pending in [#22](https://github.com/DaveBeusing/Factory/issues/22). | Unavailable |
+| Claude Code (local read-only) | Requested model recorded separately from models reported in terminal usage | CLI result usage | CLI `total_cost_usd` when supplied. Live check pending in [#22](https://github.com/DaveBeusing/Factory/issues/22). | Unavailable |
 | Ollama (local and remote review) | Model in the generation response | Completed generation with both counters | Unavailable | Unavailable |
 
 Mixed routing requires a v2 worker and matching executor configuration. The claim rejects a missing or different worker protocol version for a mixed job. The v2 worker claim version does not negotiate the controller–executor API version. Use the same Factory build on controller and executor for mixed execution. The current build can read older saved receipts that omit `reportedCostMicros`. Such receipts retain an unknown cost, while an explicit zero remains a reported amount. Replaying a completed or reconciled turn cannot replace its amount or debit it again.
@@ -44,7 +56,9 @@ From the test output directory, run `dotnet Factory.Tests.dll --verify-lt05` to 
 
 Install and authenticate the native Claude Code CLI, version 2.1.248 or newer. Factory checks the version and required headless options before admitting a turn and caches successful discovery for the current executable. It discovers the binary under the user profile's `.local/bin` or on an absolute `PATH` entry. Set `FACTORY_CLAUDE_EXECUTABLE` to an absolute executable path to override discovery. Use the provider's own authentication and configure a profile with `"kind": "claude"` and an optional `"model"` such as `"sonnet"`.
 
-Factory starts independent print-mode sessions, disables session persistence, and limits each session to 64 agentic turns. The adapter uses Plan mode and the Read, Glob and Grep tools with no MCP servers. Safe mode disables Claude Code customizations. Restricted mode confines the CLI file tools to the working directories. These are CLI controls rather than OS sandboxing. Prompts and files read by the CLI can be sent to its configured inference service. The runtime result keeps the requested model separate from the models in the terminal usage report and carries the reported session identifier when present. An empty observed-model list means unknown. Multiple reported models remain distinct. [CLI reference](https://code.claude.com/docs/en/cli-reference) · [Programmatic mode](https://code.claude.com/docs/en/headless)
+Factory starts independent print-mode sessions, disables session persistence, and limits each session to 64 agentic turns. The adapter uses Plan mode and the Read, Glob and Grep tools with no MCP servers. Safe mode disables Claude Code customizations. Restricted mode confines the CLI file tools to the working directories. These are CLI controls. Host isolation requires separate controls. Prompts and files read by the CLI can be sent to its configured inference service. The runtime result keeps the requested model separate from the models in the terminal usage report and carries the reported session identifier when present. An empty observed-model list means unknown. Multiple reported models remain distinct. [CLI reference](https://code.claude.com/docs/en/cli-reference) · [Programmatic mode](https://code.claude.com/docs/en/headless)
+
+Offline fixtures exercise capability admission, terminal result parsing, reported usage on failed turns and cancellation. The Windows package test exercises installation of operator assets in isolated profiles. Authenticated cost reconciliation and builder acceptance are tracked separately. [Live cost verification #22](https://github.com/DaveBeusing/Factory/issues/22) · [Claude builder #117](https://github.com/DaveBeusing/Factory/issues/117)
 
 ## Setup
 

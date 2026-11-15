@@ -41,7 +41,9 @@ On **Overview**, **Manage queue** and **Run queue** have distinct emphasis. The 
 | **Activity** | Inspect persisted lifecycle and audit events |
 | **Decisions** | Inspect project policy revisions, issue intake, draft plan revisions, durable review cycles, PR readiness and integration evidence with administrator access |
 | **Capacity** | Inspect provider, model and role usage, local allocations, held reservations, provider-reported costs and Codex account windows |
-| **Settings** | Adjust concurrency, review rounds, worker lease and other supported runtime controls |
+| **Settings** | Adjust concurrency, review rounds and worker leases. Refresh **Factory doctor** to inspect controller tool availability, versions and state paths. |
+
+In **Projects**, the plus beside **Quality checks** adds a .NET, strict .NET or CMake preset to the project form. Existing check entries are kept. Review the commands and paths before saving.
 
 ## Planning and capacity
 

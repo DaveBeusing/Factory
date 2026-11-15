@@ -18,8 +18,8 @@ Factory is a **local-first software engineering orchestrator** written in C# and
 | --- | --- | --- |
 | **Discover and plan** | Master-first preflight, policy-governed issue intake, versioned specifications and revision-bound plan adoption | [Planning preflight](docs/planning-preflight.md) |
 | **Coordinate** | Verified dependency commits, budgets, fenced leases and shared-resource checks | [Architecture](docs/architecture.md) |
-| **Execute** | Per-job Git branch and worktree; native Codex execution; scoped remote workers | [Remote workers](docs/remote-workers.md) |
-| **Validate** | Executable checks, scoped changes, durable review cycles and signed independent approval for guarded publication | [Quality gates](docs/quality.md) |
+| **Execute** | Per-job Git branch and worktree, versioned agent roles, native Codex builder and scoped remote workers | [Agent roles and runtimes](docs/providers.md#controller-agent-roles) |
+| **Validate** | Executable checks, committed review snapshots, durable review cycles and signed independent approval for guarded publication | [Quality gates](docs/quality.md) |
 | **Operate** | Mission Control workspaces for projects, jobs, plans, workers, recovery, capacity and policy decisions | [Mission Control](docs/mission-control.md) |
 | **Integrate** | Optional signed draft publication, PR readiness checks, manual merge and Git-history verification | [Guarded publication](docs/guarded-publication.md) |
 
@@ -46,6 +46,8 @@ Open **http://127.0.0.1:8787** and connect with the locally generated administra
 > Build from a **complete Git checkout** to derive a preview version. `Build.ps1` runs the .NET test application, publishes `dist/Factory.exe`, and writes source/checksum provenance to `dist/build-manifest.json`. The package is framework-dependent and requires a compatible .NET runtime.
 
 For installation alternatives, Codex CLI discovery, `PATH`, state configuration and troubleshooting, follow [Getting started](docs/getting-started.md).
+
+Claude Code is an optional local provider for read-only planning, analysis and reviews. Factory packages 11 Claude operator profiles and eight shared skills, which you can install without signing in. Headless provider turns require an authenticated native Claude Code CLI. [Claude Code setup](docs/getting-started.md#optional-claude-code-setup)
 
 ### First project
 

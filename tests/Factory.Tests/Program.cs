@@ -784,6 +784,8 @@ Test("Master-first preflight finds existing code and preserves adoption review",
     finally { try { Directory.Delete(root, true); } catch { } }
 });
 
+await TestAsync("CLI and dashboard intake validation and capability edits remain consistent", IntakeRegressionTests.RunAsync);
+
 Test("Direct job intake checks master before allowing new work", () =>
 {
     var root = Path.Combine(Path.GetTempPath(), "factory-direct-intake-" + Guid.NewGuid().ToString("N"));
@@ -1107,11 +1109,15 @@ await TestAsync("Plan adoption requires the reviewed plan and current goal revis
         store.Change((s, db, tx) =>
         {
             var predecessor = s.Jobs.Single(job => job.Id == pair[0].Id);
+            var proof = new IntegrationProof("fixture", GitOperations.Head(repo), new string('a', 40));
             StateStore.RecordLifecycle(db, tx, predecessor.ProjectId, "job", predecessor.Id, "fixture-verifier",
                 JobStates.PrReady, JobStates.Integrated, LifecycleReason.IntegrationVerified,
-                reference: new string('a', 40), state: s);
+                reference: proof.IntegratedCommit, state: s);
             predecessor.Integrated = true;
             predecessor.State = JobStates.Integrated;
+            predecessor.HeadSha = new string('b', 40);
+            StateStore.RecordIntegratedHead(db, tx, predecessor, proof);
+            StateStore.RecordIntegrationTarget(db, tx, predecessor, s.Projects.Single(), proof, s);
             return 0;
         });
         store.UpdateJob(pair[1].Id, job => { job.State = JobStates.Blocked; job.Stage = "scope"; job.Attempt = 1; });
@@ -1410,6 +1416,10 @@ Test("Issue intake deduplicates concurrent scans and re-evaluates policy and edi
     finally { try { Directory.Delete(home, true); } catch { } }
 });
 
+
+Test("Plan prerequisites require current verified integration", SpecificationRegressionTests.PrerequisitesRequireCurrentTarget);
+Test("Reviewed plan replacement retires eligible terminal jobs", SpecificationRegressionTests.ReplaceTerminalJobs);
+Test("Plan replacement requires current verification of retained predecessors", SpecificationRegressionTests.RetainedPredecessorsRequireCurrentTarget);
 
 Test("Versioned specifications require evidence and ordered ownership", () =>
 {
@@ -1759,6 +1769,12 @@ await TestAsync("Signed review approval survives restart and guards durable publ
         catch (ArgumentException) { }
         store.RecordTrustedReview(new(approval, signature));
         Assert(new StateStore(store.Home).IsReviewApproved(job.Id));
+        using (var evidence = System.Text.Json.JsonDocument.Parse(Json.Stringify(store.ReadDecisionEvidence(project.Id, new()))))
+        {
+            var decisionJob = evidence.RootElement.GetProperty("jobs")[0];
+            Assert(decisionJob.GetProperty("reviewApproved").GetBoolean());
+            Assert(decisionJob.GetProperty("reviewer").GetString() == "reviewer");
+        }
         var decision = new PullRequestDecision(project.Id, job.Id, ReviewPolicy.ProjectRevision(project),
             "example/repo", "master", new string('a', 40), head, "publisher", "draft", "pr-ci", 0,
             DateTimeOffset.UtcNow.AddMinutes(5), PullRequestCoordinator.ScopeRevision(job));
@@ -2335,6 +2351,10 @@ Test("Planning rejects cycle", () =>
     catch (ArgumentException) { }
 });
 Test("Unauthenticated worker blocked", () => Assert(!WorkerProtocol.Authorized("Bearer invalid", "secret")));
+await TestAsync("Dashboard queue restarts after startup failure and concurrent resume", DashboardFollowupTests.QueueRestartAsync);
+Test("Dashboard health projection preserves snapshot semantics", DashboardFollowupTests.HealthProjection);
+Test("Indexed workflow deliveries preserve and deduplicate retained receipts", AuditPerformanceTests.WorkflowDeliveryUpgrade);
+Test("Scheduler indexes preserve goal liabilities and blocker order", AuditPerformanceTests.SchedulerAvailabilityAndBlockerOrdering);
 Test("Authorized worker accepted", () => Assert(WorkerProtocol.Authorized("Bearer abc", "abc")));
 
 Test("Child processes inherit only explicitly assigned Factory credentials", () =>
@@ -3433,7 +3453,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 25, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 26, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -4053,7 +4073,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 25);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 26);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -4739,7 +4759,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 25);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 26);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

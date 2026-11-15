@@ -65,8 +65,9 @@ public sealed partial class StateStore
     }
 
     internal static Dictionary<int, FactoryJob> VerifySpecificationAdoption(SqliteConnection db, SqliteTransaction tx, FactoryGoal goal,
-        FactoryPlan plan, IReadOnlyList<FactoryJob> jobs)
+        FactoryPlan plan, FactoryState state)
     {
+        var jobs = state.Jobs;
         if (goal.State == "draft" && !jobs.Any(j => j.GoalId == goal.Id)) return [];
         if (goal.State != "active" || plan.ContractVersion != 1 || !SpecificationContracts.CanRevise(goal, jobs))
             throw new InvalidOperationException("Existing jobs prevent specification replacement.");
@@ -83,12 +84,8 @@ public sealed partial class StateStore
         var retained = new Dictionary<int, FactoryJob>();
         foreach (var job in jobs.Where(j => j.GoalId == goal.Id && SpecificationContracts.IsIntegrated(j)))
         {
-            using var proof = Command(db, tx, """
-                SELECT 1 FROM lifecycle_audit WHERE project_id=$project AND entity_id=$job
-                    AND entity_kind='job' AND reason_code='IntegrationVerified' LIMIT 1;
-                """, ("$project", goal.ProjectId), ("$job", job.Id));
-            if (proof.ExecuteScalar() is null)
-                throw new InvalidOperationException("An integrated predecessor has no durable integration proof.");
+            if (!state.VerifiedIntegrations.Contains(job.Id))
+                throw new InvalidOperationException("Reverify the retained predecessor against the current project integration target before adopting the specification.");
             var old = prior.Packages.SingleOrDefault(p => p.Title == job.Title);
             var index = plan.Packages.FindIndex(p => p.Title == job.Title);
             if (old is null || index < 0 || Json.Stringify(old) != Json.Stringify(plan.Packages[index]))
@@ -106,6 +103,9 @@ public sealed partial class StateStore
             !SpecificationContracts.IsIntegrated(job)).ToArray();
         foreach (var job in current)
         {
+            if (SpecificationContracts.RequiresExhaustionProof(job) &&
+                ReviewCyclesUsed(db, tx, job.Id) < Math.Clamp(job.MaxRounds, 1, ReviewPolicy.MaxCycles))
+                throw new InvalidOperationException("Existing jobs prevent specification replacement until their review cycles are exhausted.");
             RequireSettledJobProviderUsage(db, tx, job.Id);
             using var reservation = Command(db, tx, """
                 SELECT 1 FROM goal_budget_reservations WHERE job_id=$job AND state IN ('active','held') LIMIT 1;

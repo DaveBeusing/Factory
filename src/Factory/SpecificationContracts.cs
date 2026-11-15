@@ -22,11 +22,29 @@ internal static class SpecificationContracts
         if (goal.State != "active") return false;
         var current = jobs.Where(job => job.GoalId == goal.Id && !IsSuperseded(job)).ToArray();
         var remaining = current.Where(job => !IsIntegrated(job)).ToArray();
-        return remaining.Length > 0 && remaining.All(job => job.LeaseOwner.Length == 0 &&
-            (job.State == JobStates.Queued && job.Attempt == 0 ||
-             job.State == JobStates.Blocked && job.Stage == "scope")) &&
+        return remaining.Length > 0 && remaining.All(CanReplaceJob) &&
             !jobs.Any(job => job.GoalId != goal.Id && remaining.Any(old => job.DependsOn.Contains(old.Id)));
     }
+
+    private static bool CanReplaceJob(FactoryJob job)
+    {
+        if (job.LeaseOwner.Length != 0 || job.LeaseToken.Length != 0 || job.LeaseUntil is not null)
+            return false;
+        if (job.State == JobStates.Cancelled && job.Stage == "resources_released")
+            return true;
+        if (!string.IsNullOrWhiteSpace(job.PrUrl) || job.Stage is "reconcile" or "interrupted_git" or "commit" or "push" or "pr" or "merge")
+            return false;
+        return job.State switch
+        {
+            JobStates.Queued => job.Attempt == 0,
+            JobStates.Cancelled => job.Attempt == 0 || job.Stage == "interrupted",
+            JobStates.Blocked => job.Stage is "scope" or "quality" || RequiresExhaustionProof(job),
+            _ => false
+        };
+    }
+
+    internal static bool RequiresExhaustionProof(FactoryJob job) =>
+        job.State == JobStates.Blocked && job.Stage is "transient" or "deterministic" or "budget";
 
     internal static void ValidateNew(FactoryPlan plan)
     {

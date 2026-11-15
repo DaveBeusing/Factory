@@ -221,15 +221,23 @@ public sealed partial class StateStore
         using var tx = db.BeginTransaction(deferred: true);
         var job = ReadJob(db, tx, id);
         var project = job is null ? null : Load(db, tx).Projects.SingleOrDefault(p => p.Id == job.ProjectId);
-        return job is not null && project is not null && IsReviewApproved(db, tx, job, project);
+        var receipt = project is null ? null : ReadReviewApproval(db, tx, job!);
+        tx.Commit();
+        return receipt is not null && VerifyReviewApproval(job!, ReviewPolicy.ProjectRevision(project!), receipt) is not null;
     }
 
     internal static bool IsReviewApproved(SqliteConnection db, SqliteTransaction tx, FactoryJob job, ProjectInfo project)
     {
-        var key = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
-        if (string.IsNullOrWhiteSpace(key) || job.State != JobStates.CompletedLocal || job.LeaseOwner.Length != 0 ||
-            !HasCurrentReviewHead(job))
-            return false;
+        var receipt = ReadReviewApproval(db, tx, job);
+        return receipt is not null && VerifyReviewApproval(job, ReviewPolicy.ProjectRevision(project), receipt) is not null;
+    }
+
+    private sealed record StoredReviewApproval(string Payload, string Signature);
+
+    private static StoredReviewApproval? ReadReviewApproval(SqliteConnection db, SqliteTransaction tx, FactoryJob job)
+    {
+        if (job.State != JobStates.CompletedLocal || job.LeaseOwner.Length != 0 ||
+            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY"))) return null;
         using var query = Command(db, tx, """
             SELECT a.payload,a.signature FROM trusted_review_approvals a JOIN review_cycles c
                 ON c.job_id=a.job_id AND c.cycle=a.cycle
@@ -237,19 +245,23 @@ public sealed partial class StateStore
                 AND c.cycle=(SELECT MAX(cycle) FROM review_cycles WHERE job_id=$job);
             """, ("$job", job.Id), ("$generation", job.ExecutionGeneration), ("$head", job.HeadSha));
         using var row = query.ExecuteReader();
-        if (!row.Read()) return false;
-        var payload = row.GetString(0);
-        var signature = row.GetString(1);
-        row.Close();
-        var proof = JsonSerializer.Deserialize<ReviewApproval>(payload, Json.Options);
+        return row.Read() ? new(row.GetString(0), row.GetString(1)) : null;
+    }
+
+    private static ReviewApproval? VerifyReviewApproval(FactoryJob job, string projectRevision, StoredReviewApproval receipt)
+    {
+        var key = Environment.GetEnvironmentVariable("FACTORY_REVIEW_PUBLIC_KEY");
+        if (string.IsNullOrWhiteSpace(key) || job.State != JobStates.CompletedLocal || job.LeaseOwner.Length != 0)
+            return null;
+        var proof = JsonSerializer.Deserialize<ReviewApproval>(receipt.Payload, Json.Options);
         if (proof is null || proof.ExpiresAt <= DateTimeOffset.UtcNow || proof.PolicyRevision != ReviewPolicy.Revision ||
             proof.ProjectId != job.ProjectId || proof.JobId != job.Id || proof.Generation != job.ExecutionGeneration ||
             proof.Commit != job.HeadSha || proof.BuilderSession != job.SessionId ||
-            ReviewPolicy.ProjectRevision(project) != proof.ProjectContractRevision)
-            return false;
+            projectRevision != proof.ProjectContractRevision)
+            return null;
         using var signer = RSA.Create();
         signer.ImportFromPem(key);
-        return signer.VerifyData(Encoding.UTF8.GetBytes(payload), Convert.FromBase64String(signature),
-            HashAlgorithmName.SHA256, RSASignaturePadding.Pss);
+        return signer.VerifyData(Encoding.UTF8.GetBytes(receipt.Payload), Convert.FromBase64String(receipt.Signature),
+            HashAlgorithmName.SHA256, RSASignaturePadding.Pss) && HasCurrentReviewHead(job) ? proof : null;
     }
 }

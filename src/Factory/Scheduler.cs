@@ -76,6 +76,14 @@ public sealed class JobScheduler
         var chosen = new List<FactoryJob>();
         var capacity = Math.Max(0, limit - active.Count);
         var counts = active.GroupBy(j => j.ProjectId).ToDictionary(g => g.Key, g => g.Count());
+        var projects = state.Projects.ToLookup(p => p.Id);
+        var integrated = state.Jobs.Where(j => j.Integrated && j.State == JobStates.Integrated &&
+            state.VerifiedIntegrations.Contains(j.Id)).Select(j => (j.ProjectId, j.Id)).ToHashSet();
+        var blockers = state.Jobs.Where(j => j.LeaseOwner.Length != 0 ||
+                j.State == JobStates.Blocked && j.Stage is "reconcile" or "interrupted_git")
+            .OrderBy(j => j.Id).Concat(active).ToLookup(j => j.ProjectId);
+        var chosenByProject = new Dictionary<Guid, List<FactoryJob>>();
+        Func<FactoryJob, long>? budget = null;
         // Plan hypothetical reservations so selection cannot oversubscribe a goal
         // even before each selected job is atomically claimed in SQLite.
         var planned = new Dictionary<Guid, long>();
@@ -88,30 +96,32 @@ public sealed class JobScheduler
             if (chosen.Count >= capacity) { decisions?.Add(new(job.Id, "global_capacity")); if (decisions is null) break; continue; }
             if (job.LeaseOwner.Length != 0) { decisions?.Add(new(job.Id, "lease_owned")); continue; }
             if (eligibility is not null && !eligibility(job)) { decisions?.Add(new(job.Id, "worker_ineligible")); continue; }
-            if (!DependencyGraph.DependenciesSatisfied(job, state.Jobs) ||
-                !job.DependsOn.All(state.VerifiedIntegrations.Contains)) { decisions?.Add(new(job.Id, "dependency_not_integrated")); continue; }
-           long allocation = 0;
-           if (job.GoalId is { } goalId)
-           {
-               allocation = GoalBudgetLedger.Allocation(state, job, reservationTokens);
-               var available = allocation == 0 ? 0 :
-                   GoalBudgetLedger.Available(state, goalId) - planned.GetValueOrDefault(goalId);
-               allocation = Math.Min(allocation, Math.Max(0, available));
-               if (allocation < BudgetedAgentRuntime.MinimumTurnAllowance) { decisions?.Add(new(job.Id, "goal_budget")); continue; }
-           }
-            var project = state.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
-           if (project == null || project.Status != "active") { decisions?.Add(new(job.Id, "project_inactive")); continue; }
-           if (counts.GetValueOrDefault(job.ProjectId) >= project.MaxParallel) { decisions?.Add(new(job.Id, "project_capacity")); continue; }
-           var blocker = state.Jobs.Where(j => j.Id != job.Id &&
-                (j.LeaseOwner.Length != 0 || j.State == JobStates.Blocked && j.Stage is "reconcile" or "interrupted_git"))
-                .OrderBy(j => j.Id).Concat(active).Concat(chosen)
-                .FirstOrDefault(j => DependencyGraph.Conflict(job, j));
-           if (blocker is not null) { decisions?.Add(new(job.Id, "ownership_conflict", blocker.Id)); continue; }
-           chosen.Add(job);
-           decisions?.Add(new(job.Id, "eligible"));
-           if (job.GoalId is { } selectedGoal)
-               planned[selectedGoal] = checked(planned.GetValueOrDefault(selectedGoal) + allocation);
-           counts[job.ProjectId] = counts.GetValueOrDefault(job.ProjectId) + 1;
+            if (!job.DependsOn.All(id => integrated.Contains((job.ProjectId, id))))
+            { decisions?.Add(new(job.Id, "dependency_not_integrated")); continue; }
+            long allocation = 0;
+            if (job.GoalId is { } goalId)
+            {
+                budget ??= GoalBudgetLedger.CreateSchedulerAvailability(state);
+                var available = budget(job) - planned.GetValueOrDefault(goalId);
+                allocation = Math.Min(reservationTokens, Math.Max(0, available));
+                if (allocation < BudgetedAgentRuntime.MinimumTurnAllowance)
+                { decisions?.Add(new(job.Id, "goal_budget")); continue; }
+            }
+            var project = projects[job.ProjectId].FirstOrDefault();
+            if (project == null || project.Status != "active") { decisions?.Add(new(job.Id, "project_inactive")); continue; }
+            if (counts.GetValueOrDefault(job.ProjectId) >= project.MaxParallel)
+            { decisions?.Add(new(job.Id, "project_capacity")); continue; }
+            chosenByProject.TryGetValue(job.ProjectId, out var projectSelection);
+            var blocker = blockers[job.ProjectId].FirstOrDefault(j => j.Id != job.Id && DependencyGraph.Conflict(job, j))
+                ?? projectSelection?.Find(j => DependencyGraph.Conflict(job, j));
+            if (blocker is not null) { decisions?.Add(new(job.Id, "ownership_conflict", blocker.Id)); continue; }
+            chosen.Add(job);
+            if (projectSelection is null) chosenByProject.Add(job.ProjectId, projectSelection = []);
+            projectSelection.Add(job);
+            decisions?.Add(new(job.Id, "eligible"));
+            if (job.GoalId is { } selectedGoal)
+                planned[selectedGoal] = checked(planned.GetValueOrDefault(selectedGoal) + allocation);
+            counts[job.ProjectId] = counts.GetValueOrDefault(job.ProjectId) + 1;
         }
         return chosen;
     }

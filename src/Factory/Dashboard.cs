@@ -9,7 +9,6 @@ namespace Factory;
 
 public static class DashboardHost
 {
-    private static readonly SemaphoreSlim RunLock = new(1, 1);
     public static async Task RunAsync(StateStore store, FactorySettings settings, string listenUrl,
         CancellationToken cancellationToken)
     {
@@ -68,7 +67,7 @@ public static class DashboardHost
                 }
                 // Disabled workers cannot register, claim jobs or submit results.
                 if (WorkerAuthentication.IsWorkerNamespace(path) &&
-                    store.Read().Workers.Any(w => w.Id == workerId && !w.Enabled))
+                    store.IsWorkerDisabled(workerId))
                 {
                     ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return;
                 }
@@ -186,7 +185,7 @@ public static class DashboardHost
             var max = input.MaxJobReservationTokens ?? settings.MaxJobReservationTokens;
             if (max < initial)
                 return (IResult)Results.BadRequest(new { error = "Per-job reservation limit must be >= initial allocation" });
-            if (input.AutoMerge)
+            if (input.AutoMerge && !settings.AutoMerge)
                 return (IResult)Results.BadRequest(new { error = "Automatic merging is not supported; merge through a manually approved PR" });
             settings.MaxParallel = input.MaxParallel;
             settings.MaxAgentSessions = input.MaxAgentSessions;
@@ -202,7 +201,6 @@ public static class DashboardHost
             if (input.MaxJobReservationTokens.HasValue)
                 settings.MaxJobReservationTokens = input.MaxJobReservationTokens.Value;
             settings.AllowPush = input.AllowPush;
-            settings.AutoMerge = false;
             var destination = Path.Combine(store.Home, "settings.json");
             var temporary = destination + ".tmp";
             File.WriteAllText(temporary, Json.Stringify(settings));
@@ -371,37 +369,37 @@ public static class DashboardHost
         app.MapPost("/api/workers/{id}/action", (string id, ControlInput input) =>
         {
             if (input.Action == "start") { ManagedWorkers.Start(store, settings, listenUrl, id); return (IResult)Results.Accepted(); }
-            if (input.Action == "stop") { ManagedWorkers.Stop(store, id); return (IResult)Results.Ok(); }
+            if (input.Action == "stop") { ManagedWorkers.Stop(store, id); return (IResult)Results.NoContent(); }
             return Results.Ok(MissionControlManager.ControlWorker(store, id, input.Action));
         });
 
-        IResult LaunchQueue()
-        {
-            if (!RunLock.Wait(0)) return Results.Conflict(new { error = "Queue already running" });
-            store.Change(s => s.Paused = false);
-            _ = Task.Run(async () =>
+        var scheduler = new DashboardQueue(
+            () => store.SetQueuePaused(false),
+            async () =>
             {
-                try
-                {
-                    var plugins = FactoryPlugins.Load(Path.Combine(store.Home, "plugins.json"));
-                    await new FactoryEngine(store, settings, plugins).RunQueueAsync(CancellationToken.None);
-                }
-                catch (Exception ex) { store.Event(null, "queue_error", ex.Message); }
-                finally { RunLock.Release(); }
+                var plugins = FactoryPlugins.Load(Path.Combine(store.Home, "plugins.json"));
+                await new FactoryEngine(store, settings, plugins).RunQueueAsync(CancellationToken.None);
+            },
+            error =>
+            {
+                app.Logger.LogError(error, "Queue execution failed");
+                try { store.Event(null, "queue_error", error.Message); }
+                catch (Exception auditError) { app.Logger.LogError(auditError, "Could not record queue error"); }
             });
-            return Results.Accepted();
-        }
-        app.MapPost("/api/queue/run", LaunchQueue);
-        app.MapPost("/api/queue/pause", () => { store.Change(s => s.Paused = true); return Results.Ok(); });
+        app.MapPost("/api/queue/run", () =>
+        {
+            return scheduler.Start(resume: false) ? (IResult)Results.Accepted() :
+                Results.Conflict(new { error = "Queue already running" });
+        });
+        app.MapPost("/api/queue/pause", () => { store.SetQueuePaused(true); return Results.NoContent(); });
         app.MapPost("/api/queue/resume", () =>
         {
-            store.Change(s => s.Paused = false);
-            if (RunLock.CurrentCount > 0) return LaunchQueue();
-            return (IResult)Results.Ok(new { resumed = true, scheduler = "running" });
+            scheduler.Start(resume: true);
+            return Results.Accepted();
         });
         app.MapPost("/api/queue/stop", () =>
         {
-            store.Change(s => s.Paused = true);
+            store.SetQueuePaused(true);
             var jobs = store.Read().Jobs.Where(j => JobStates.Active.Contains(j.State) &&
                 !j.LeaseOwner.StartsWith("remote:", StringComparison.Ordinal)).ToArray();
             var requested = new List<Guid>();
@@ -494,18 +492,7 @@ public static class DashboardHost
 
     private static object Health(StateStore store)
     {
-        var s = store.Read();
-        var now = DateTimeOffset.UtcNow;
-        return new
-        {
-            serverTime = now,
-            queuePaused = s.Paused,
-            projects = s.Projects.Count(p => p.Status == "active"),
-            activeJobs = s.Jobs.Count(j => JobStates.Active.Contains(j.State) && j.LeaseUntil > now),
-            workersOnline = s.Workers.Count(w => (now - w.Heartbeat).TotalSeconds < 20),
-            workersTotal = s.Workers.Count,
-            lastEventAt = s.Events.LastOrDefault()?.At
-        };
+        return store.ReadDashboardHealth(DateTimeOffset.UtcNow);
     }
 }
 

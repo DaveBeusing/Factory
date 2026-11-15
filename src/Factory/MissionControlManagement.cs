@@ -10,7 +10,7 @@ public sealed class ProjectInput
     public string BaseBranch { get; set; } = "master";
     public int MaxParallel { get; set; } = 2;
     public List<CheckCommand> Checks { get; set; } = [];
-    public List<string> RequiredExecutionCapabilities { get; set; } = [];
+    public List<string>? RequiredExecutionCapabilities { get; set; }
     public List<string>? ProtectedPaths { get; set; }
 }
 public sealed class GoalInput
@@ -31,7 +31,7 @@ public sealed class JobInput
     public int Priority { get; set; } = 50;
     public List<Guid> DependsOn { get; set; } = [];
     public List<string> ExpectedPaths { get; set; } = [];
-    public List<string> RequiredExecutionCapabilities { get; set; } = [];
+    public List<string>? RequiredExecutionCapabilities { get; set; }
     public List<string>? SharedResources { get; set; }
     public bool ReviewedExistingWork { get; set; }
 }
@@ -101,10 +101,11 @@ public static class MissionControlManager
         var path = GitOperations.RepositoryRoot(input.Path);
         GitOperations.Git(path, "rev-parse", "--verify", "refs/heads/master");
         ValidateChecks(input.Checks);
-        ValidateExecutionCapabilities(input.RequiredExecutionCapabilities);
+        var capabilities = input.RequiredExecutionCapabilities ?? [];
+        ValidateExecutionCapabilities(capabilities);
         var p = new ProjectInfo { Name = input.Name.Trim(), Path = path, BaseBranch = input.BaseBranch,
             Origin = GitOperations.Origin(path) ?? "", MaxParallel = input.MaxParallel, Checks = input.Checks,
-            RequiredExecutionCapabilities = input.RequiredExecutionCapabilities };
+            RequiredExecutionCapabilities = capabilities };
         if (input.ProtectedPaths != null) p.ProtectedPaths = NormalizePaths(input.ProtectedPaths);
         store.Change(s =>
         {
@@ -121,14 +122,16 @@ public static class MissionControlManager
         var path = GitOperations.RepositoryRoot(input.Path);
         GitOperations.Git(path, "rev-parse", "--verify", "refs/heads/master");
         ValidateChecks(input.Checks);
-        ValidateExecutionCapabilities(input.RequiredExecutionCapabilities);
+        if (input.RequiredExecutionCapabilities is { } capabilities)
+            ValidateExecutionCapabilities(capabilities);
         return store.Change((s, db, tx) =>
         {
             var p = s.Projects.Single(x => x.Id == id);
             Require(p.Status != "archived", "Archived project is read-only");
             Require(!s.Jobs.Any(j => j.ProjectId == id && IsActive(j)), "Cannot change project configuration while jobs are active");
             var changesContract = Json.Stringify(p.Checks) != Json.Stringify(input.Checks) ||
-                !p.RequiredExecutionCapabilities.SequenceEqual(input.RequiredExecutionCapabilities) ||
+                (input.RequiredExecutionCapabilities is not null &&
+                    !p.RequiredExecutionCapabilities.SequenceEqual(input.RequiredExecutionCapabilities)) ||
                 (input.ProtectedPaths is not null && !p.ProtectedPaths.SequenceEqual(NormalizePaths(input.ProtectedPaths))) ||
                 !GitOperations.SamePath(p.Path, path) || p.Origin != (GitOperations.Origin(path) ?? "");
             if (changesContract)
@@ -139,7 +142,8 @@ public static class MissionControlManager
             p.Name = input.Name.Trim(); p.Path = path; p.BaseBranch = input.BaseBranch;
             p.Origin = GitOperations.Origin(path) ?? "";
             p.MaxParallel = input.MaxParallel; p.Checks = input.Checks;
-            p.RequiredExecutionCapabilities = input.RequiredExecutionCapabilities;
+            if (input.RequiredExecutionCapabilities is { } requestedCapabilities)
+                p.RequiredExecutionCapabilities = requestedCapabilities;
             if (input.ProtectedPaths != null) p.ProtectedPaths = NormalizePaths(input.ProtectedPaths);
             Log(s, null, "project_updated", p.Name); return p;
         });
@@ -152,11 +156,11 @@ public static class MissionControlManager
             capabilities.Distinct(StringComparer.Ordinal).Count() == capabilities.Count,
             "Execution capabilities must be distinct supported capability names");
     }
-    private static void ValidateChecks(List<CheckCommand>? checks)
+    internal static void ValidateChecks(List<CheckCommand>? checks)
     {
         Require(checks is { Count: <= 32 }, "Too many checks");
         foreach (var c in checks!)
-            Require(!string.IsNullOrWhiteSpace(c.Name) && !string.IsNullOrWhiteSpace(c.Executable) && c.TimeoutSeconds is >= 1 and <= 7200,
+            Require(c is not null && !string.IsNullOrWhiteSpace(c.Name) && !string.IsNullOrWhiteSpace(c.Executable) && c.TimeoutSeconds is >= 1 and <= 7200,
                 "Invalid check name, executable or timeout");
     }
     private static List<string> NormalizePaths(IEnumerable<string> values)
@@ -238,23 +242,26 @@ public static class MissionControlManager
             g.State = action switch { "activate" => "active", "pause" => "paused", "stop" => "stopped", "complete" => "completed", _ => "archived" };
             Log(s, null, "goal_status", g.Objective + ": " + g.State); return g;
         });
-    public static FactoryJob CreateJob(StateStore store, JobInput input, FactorySettings settings)
+    public static FactoryJob CreateJob(StateStore store, JobInput input, FactorySettings settings) =>
+        CreateJob(store, input, settings,
+            "Inspect existing master code and open work before direct job creation; acknowledge reviewedExistingWork");
+
+    internal static FactoryJob CreateJob(StateStore store, JobInput input, FactorySettings settings, string reviewRequiredMessage)
     {
         ValidateJob(input);
-        Require(store.Read().Projects.Any(p => p.Id == input.ProjectId && p.Status == "active"), "Project not active");
-        if (input.GoalId != null) Require(store.Read().Goals.Any(g => g.Id == input.GoalId && g.ProjectId == input.ProjectId && g.State == "active"), "Goal not active");
         var snapshot = store.Read();
+        Require(snapshot.Projects.Any(p => p.Id == input.ProjectId && p.Status == "active"), "Project not active");
+        if (input.GoalId != null) Require(snapshot.Goals.Any(g => g.Id == input.GoalId && g.ProjectId == input.ProjectId && g.State == "active"), "Goal not active");
         var project = snapshot.Projects.Single(p => p.Id == input.ProjectId);
         WorkPackagePreflight.RequireMaster(project);
         var preflight = WorkPackagePreflight.InspectDirectJob(snapshot, project, input.Title, input.Description);
         if (preflight is not null && !input.ReviewedExistingWork)
-            throw new InvalidOperationException(
-                "Inspect existing master code and open work before direct job creation; acknowledge reviewedExistingWork");
+            throw new InvalidOperationException(reviewRequiredMessage);
         var job = store.AddJob(new FactoryJob { ProjectId = input.ProjectId, GoalId = input.GoalId,
             Title = input.Title.Trim(), Description = input.Description.Trim(), Priority = input.Priority, Risk = input.Risk,
             Mode = input.Mode, MaxRounds = settings.MaxReviewRounds, DependsOn = input.DependsOn,
             ExpectedPaths = input.ExpectedPaths, SharedResources = input.SharedResources ?? ["unknown"],
-            RequiredExecutionCapabilities = input.RequiredExecutionCapabilities });
+            RequiredExecutionCapabilities = input.RequiredExecutionCapabilities ?? [] });
         if (preflight is not null)
             store.Event(job.Id, "job_preflight", "master " + preflight.BaseCommit +
                 "; remote master " + preflight.RemoteMasterStatus +
@@ -276,7 +283,8 @@ public static class MissionControlManager
                 Require(j.GoalId == input.GoalId && j.Title == input.Title.Trim() &&
                     j.Description == input.Description.Trim() && j.Risk == input.Risk && j.Mode == input.Mode &&
                     j.ExpectedPaths.SequenceEqual(input.ExpectedPaths) && j.DependsOn.SequenceEqual(input.DependsOn) &&
-                    j.RequiredExecutionCapabilities.SequenceEqual(input.RequiredExecutionCapabilities),
+                    (input.RequiredExecutionCapabilities is null ||
+                        j.RequiredExecutionCapabilities.SequenceEqual(input.RequiredExecutionCapabilities)),
                     "Adopted specifications require a separately reviewed replacement plan to change their contract.");
             if (input.GoalId.HasValue) Require(s.Goals.Any(g => g.Id == input.GoalId && g.ProjectId == j.ProjectId), "Goal not in project");
             if (input.GoalId is { } targetGoal)
@@ -294,7 +302,8 @@ public static class MissionControlManager
             j.Title = input.Title.Trim(); j.Description = input.Description.Trim(); j.Priority = input.Priority;
             j.Risk = input.Risk; j.Mode = input.Mode; j.GoalId = input.GoalId;
             j.DependsOn = input.DependsOn; j.ExpectedPaths = input.ExpectedPaths;
-            j.RequiredExecutionCapabilities = input.RequiredExecutionCapabilities;
+            if (input.RequiredExecutionCapabilities is { } requestedCapabilities)
+                j.RequiredExecutionCapabilities = requestedCapabilities;
             if (DependencyGraph.WouldCycle(s.Jobs))
             {
                 (j.Title, j.Description, j.Priority, j.Risk, j.Mode, j.GoalId, j.DependsOn, j.ExpectedPaths, j.RequiredExecutionCapabilities) = before;
@@ -314,7 +323,8 @@ public static class MissionControlManager
     }
     private static void ValidateJob(JobInput j)
     {
-        ValidateExecutionCapabilities(j.RequiredExecutionCapabilities);
+        if (j.RequiredExecutionCapabilities is { } capabilities)
+            ValidateExecutionCapabilities(capabilities);
         Require(!string.IsNullOrWhiteSpace(j.Title) && j.Title.Length <= 200 && !string.IsNullOrWhiteSpace(j.Description) && j.Description.Length <= 12000,
             "Title and description required");
         Require((j.Mode is "local" or "remote") && (j.Risk is "low" or "medium" or "high"), "Invalid mode or risk");

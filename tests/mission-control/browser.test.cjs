@@ -34,6 +34,50 @@ function dashboardUrl(child) {
 
 const root = path.resolve(__dirname, '../..');
 
+browserTest('same-token reconnect, settings preservation and queue pause', async ({ page, nav, connection, home, api, form }) => {
+  let requests = 0;
+  let releaseFirst;
+  const firstRequest = new Promise(resolve => { releaseFirst = resolve; });
+  await page.route('**/api/doctor', async route => {
+    const attempt = ++requests;
+    if (attempt === 1) await firstRequest;
+    await route.fulfill({ json: {
+      tools: [{ name: 'dotnet', version: attempt === 1 ? 'Old diagnosis' : 'Current diagnosis' }],
+      stateDirectory: home, settingsFile: path.join(home, 'settings.json')
+    } });
+  });
+  try {
+    await nav.getByRole('button', { name: 'Settings' }).click();
+    const doctor = page.locator('.doctor-panel');
+    await doctor.getByText('Checking tools…').waitFor();
+    await page.getByRole('button', { name: /Connection settings/ }).click();
+    await connection.getByRole('button', { name: 'Connect', exact: true }).click();
+    await doctor.getByText('Current diagnosis').waitFor();
+    releaseFirst();
+    assert.equal(await doctor.getByText('Old diagnosis').count(), 0);
+
+    await page.getByRole('button', { name: 'Edit configuration' }).click();
+    await form.getByLabel('Global concurrency').fill('4');
+    await form.getByRole('button', { name: 'Apply settings' }).click();
+    await form.waitFor({ state: 'hidden' });
+    const settings = await api('settings');
+    assert.equal(settings.maxParallel, 4);
+    assert.equal(settings.autoMerge, true);
+    assert.equal(JSON.parse(await readFile(path.join(home, 'settings.json'), 'utf8')).autoMerge, true);
+
+    await nav.getByRole('button', { name: 'Queue' }).click();
+    await page.getByRole('button', { name: 'Pause', exact: true }).click();
+    await page.getByRole('heading', { name: 'Queue paused' }).waitFor();
+    await page.getByRole('button', { name: 'Resume', exact: true }).click();
+    await page.getByRole('heading', { name: 'Scheduler ready' }).waitFor();
+    assert.equal(await page.locator('.toast.error').count(), 0);
+  } finally {
+    releaseFirst();
+  }
+}, async home => {
+  await writeFile(path.join(home, 'settings.json'), JSON.stringify({ autoMerge: true }));
+});
+
 browserTest('project quality presets, modal notifications and Factory doctor', async ({ page, nav, form, home }) => {
   const track = page.locator('.overview-allowance .progress-track');
   const fill = track.locator('.progress-fill');

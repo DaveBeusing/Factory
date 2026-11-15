@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 25;
+    private const int DatabaseVersion = 26;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -336,7 +336,12 @@ public sealed partial class StateStore
                 PRAGMA user_version=22;
                 """);
             if (schemaVersion < 23) UpgradeExecutionProfiles(db, tx);
-            UpgradeReviewCycles(db, tx);
+            if (schemaVersion < 25) UpgradeReviewCycles(db, tx);
+            if (schemaVersion < 26)
+            {
+                UpgradeWorkflowDeliveries(db, tx);
+                UpgradeDashboardHealthIndexes(db, tx);
+            }
         }
         tx.Commit();
     }
@@ -660,12 +665,14 @@ public sealed partial class StateStore
     }
 
     private static void LoadChecks(SqliteConnection db, SqliteTransaction tx,
-        Dictionary<string, object> projects)
+        Dictionary<string, object> projects, Guid? projectId = null)
     {
+        var where = projectId.HasValue ? "WHERE owner_id=$project " : "";
+        (string, object?)[] args = projectId.HasValue ? [("$project", projectId)] : [];
         var checks = new Dictionary<(string Owner, int Position), CheckCommand>();
         using (var cmd = Command(db, tx,
             "SELECT owner_id,position,name,executable,container_image,timeout_seconds " +
-            "FROM project_checks ORDER BY owner_id,position;"))
+            "FROM project_checks " + where + "ORDER BY owner_id,position;", args))
         using (var reader = cmd.ExecuteReader())
         {
             while (reader.Read())
@@ -685,7 +692,7 @@ public sealed partial class StateStore
         }
         using (var cmd = Command(db, tx,
             "SELECT owner_id,check_position,value FROM project_check_arguments " +
-            "ORDER BY owner_id,check_position,position;"))
+            where + "ORDER BY owner_id,check_position,position;", args))
         using (var reader = cmd.ExecuteReader())
             while (reader.Read())
                 checks[(reader.GetString(0), reader.GetInt32(1))].Arguments.Add(reader.GetString(2));
@@ -1086,6 +1093,13 @@ public sealed partial class StateStore
         requestedState = command.ExecuteScalar() as string;
         tx.Commit();
         return requestedState is not null;
+    }
+
+    internal bool IsWorkerDisabled(string workerId)
+    {
+        using var db = Open();
+        using var query = Command(db, null, "SELECT enabled FROM workers WHERE id=$id;", ("$id", workerId));
+        return query.ExecuteScalar() is long enabled && enabled == 0;
     }
 
     /// <summary>

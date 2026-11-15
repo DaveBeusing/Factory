@@ -204,7 +204,7 @@ public static class Planning
             var project = state.Projects.Single(p => p.Id == goal.ProjectId);
             VerifyAdoptionTarget(plan, StateStore.ReadStoredPlanRevision(db, tx, goalId),
                 requestedProject, project, goal);
-            var retained = StateStore.VerifySpecificationAdoption(db, tx, goal, plan, state.Jobs);
+            var retained = StateStore.VerifySpecificationAdoption(db, tx, goal, plan, state);
             StateStore.VerifySpecification(db, tx, plan, state);
             if (StateStore.DecidePlanAdoption(db, tx, plan, "local-operator") != PolicyOutcome.Allow)
                 return null;

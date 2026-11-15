@@ -26,6 +26,7 @@ public sealed class ProjectReviewSnapshot
     public string Advisory { get; set; } = "";
     public string AdvisoryProvider { get; set; } = "";
     public string AdvisoryModel { get; set; } = "";
+    public string AdvisoryRolePolicyRevision { get; set; } = "";
 }
 
 public sealed class ReviewGoalInput
@@ -80,17 +81,15 @@ public static class ProjectReviewer
                     profile, "analysis", choice.Model, settings.GoalReservationTokens);
                 var boundedIndex = Json.Stringify(index.Take(80));
                 if (boundedIndex.Length > 24000) boundedIndex = boundedIndex[..24000];
-                var prompt = "READ ONLY: Provide advisory repository review observations based ONLY on the bounded " +
-                    "index and verified deterministic findings provided below. Do not claim direct validation, " +
-                    "execution, security certification or exhaustive coverage. Cite paths where supplied. " +
-                    "State uncertainty plainly. No code changes or external side effects. " +
-                    "Repository index: " + boundedIndex + "\nDeterministic findings: " +
-                    Json.Stringify(review.Findings);
-                var response = await runtime.RunAsync(project.Path, prompt, "", ct, readOnly: true);
+                var policy = AgentPolicies.For("analysis");
+                var prompt = policy.Render("Provide advisory observations based on the bounded repository evidence.",
+                    new { Commit = commit, RepositoryIndex = boundedIndex, review.Findings });
+                var response = await runtime.RunAsync(project.Path, prompt, "", ct, readOnly: policy.ReadOnly);
                 if (!response.Success) throw new InvalidOperationException("Project analysis provider failed: " + response.Error);
                 review.Advisory = response.FinalText[..Math.Min(12000, response.FinalText.Length)];
                 review.AdvisoryProvider = choice.Id;
                 review.AdvisoryModel = choice.Model;
+                review.AdvisoryRolePolicyRevision = choice.RolePolicyRevision;
             }
             if (WorkPackagePreflight.MasterCommit(project) != commit)
                 throw new InvalidOperationException("Repository advanced during review; rerun against a stable commit");

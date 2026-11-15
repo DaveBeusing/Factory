@@ -248,8 +248,9 @@ public sealed class FactoryEngine
         }
         var runtime = RuntimeFor("builder");
         var qualityEngine = new QualityEngine(runtime,
-            _runtimeOverridden && _remoteProviderRuntime is null ? null : role => RuntimeFor("review:" + role));
-        var worktree = _git.Prepare(p, j);
+            _runtimeOverridden && _remoteProviderRuntime is null ? null : role => RuntimeFor("review:" + role))
+            { UsesRemotePolicyEvidence = _remoteProviderRuntime is not null };
+        var worktree = _git.Prepare(p, j, out var baseCommit);
         UpdateOwned(id, fence, x =>
         {
             x.Worktree = worktree; x.Branch = $"factory/{x.Id:N}";
@@ -266,12 +267,9 @@ public sealed class FactoryEngine
            var existing = _store.Job(id);
            var description = round == 1 ? existing.Description :
                 "Address these failed checks and reviews, and rerun necessary tests. Findings: " + string.Join("; ", report.Findings);
-           var prompt = "Implement only the requested work package. Work only in this Git worktree. " +
-                "Allowed paths: " + string.Join(", ", existing.ExpectedPaths) + ". " +
-                "Changes outside these paths require an approved contract amendment. " +
-                "Do not commit, push, merge, deploy or modify protected factory infrastructure. " +
-                "Respect AGENTS.md and the existing architecture. Acceptance evidence is required. " +
-                $"Work package: {existing.Title}\n{description}";
+           var prompt = AgentPolicies.For("builder").Render(
+                "Follow the approved path scope and repository conventions. Changes outside scope require an approved amendment.",
+                new { existing.Title, Description = description, AllowedPaths = existing.ExpectedPaths, BaseCommit = baseCommit });
            var run = await runtime.RunAsync(worktree, prompt, existing.SessionId, ct,
                 session => UpdateOwned(id, fence, x => x.SessionId = session));
             ct.ThrowIfCancellationRequested();
@@ -295,6 +293,7 @@ public sealed class FactoryEngine
            ct.ThrowIfCancellationRequested();
            Stage(id, fence,JobStates.Gating, "checks");
            report = await qualityEngine.GateAsync(p, _store.Job(id), ct);
+           report.BaseCommit = baseCommit;
             EnsureOwned(id, fence);
            if (report.Passed)
             {

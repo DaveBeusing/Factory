@@ -11,7 +11,7 @@ description: Run a deterministic or project-scoped agent evaluation suite in the
 
 1. Inspect the suite definition and confirm which cases are deterministic versus provider-backed.
 2. For deterministic checks, invoke `Factory eval --suite <suite-file>`.
-3. For `agent_answer_contains` cases that require a project, add `--project <name>` and use a permitted read-only agent context.
+3. For `agent_answer_contains` cases that require a provider, explicitly opt in with `--live --project <name>` and use a clean master checkout.
 4. Record the number of cases, actual passing/failing outcomes and any missing provider prerequisites.
 
 > [!CAUTION]

@@ -15,6 +15,8 @@
     <EmbeddedResource Include="ui/app.css" LogicalName="Factory.Ui.Style" />
     <EmbeddedResource Include="ui/app.js" LogicalName="Factory.Ui.Script" />
     <EmbeddedResource Include="../../examples/checks-*.json" LogicalName="Factory.Presets.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="Providers/ClaudeCode/Assets/agents/*.md"
+      LogicalName="Factory.AgentPolicies.%(Filename)%(Extension)" />
     <Content Include="Providers/Codex/Assets/**/*">
       <Link>providers/codex/%(RecursiveDir)%(Filename)%(Extension)</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

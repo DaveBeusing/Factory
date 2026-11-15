@@ -29,6 +29,7 @@ public sealed class BudgetedAgentRuntime(IAgentRuntime inner, StateStore store, 
         await TurnLock.WaitAsync(cancellation);
         try
         {
+            await IAgentRuntimeAdmission.VerifyAsync(inner, previousSession, readOnly, cancellation);
             // Remote workers may synchronize a larger local mirror only after receiving
             // an authenticated controller grant. A missing or failed grant does not
             // authorize the worker to lift its own reservation.

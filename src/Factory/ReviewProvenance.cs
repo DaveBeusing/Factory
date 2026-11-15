@@ -7,7 +7,14 @@ namespace Factory;
 
 public sealed record ReviewFinding(string Role, string Message);
 public sealed record ReviewRecord(string Role, string Commit, string PolicyRevision, string Adapter,
-    string Session, string Scope, string Verdict, string Assurance);
+    string Session, string Scope, string Verdict, string Assurance)
+{
+    public string RolePolicyRevision { get; init; } = "";
+    public string BaseCommit { get; init; } = "";
+    public string PatchSha256 { get; init; } = "";
+    public string RequestedModel { get; init; } = "";
+    public IReadOnlyList<string> ObservedModels { get; init; } = [];
+}
 public sealed record ReviewApproval(Guid ProjectId, Guid JobId, long Generation, int Cycle, string Commit,
     string PolicyRevision, string Reviewer, string ReviewerSession, string Builder, string BuilderSession,
     DateTimeOffset ExpiresAt, string Verdict, string ProjectContractRevision);

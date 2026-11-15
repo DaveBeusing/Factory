@@ -55,7 +55,7 @@ Factory | C# / .NET 10
   plan --goal GUID | adopt --goal GUID --plan-revision GUID --reviewed-existing-work [--mode local|remote]
   graph --project NAME | impact --project NAME --file RELATIVE_PATH
   knowledge --project NAME [--topic TOPIC --content TEXT]
-  analytics | eval --suite FILE | test-audit --project NAME [--enqueue --reviewed-existing-work]
+  analytics | eval --suite FILE [--live --project NAME] | test-audit --project NAME [--enqueue --reviewed-existing-work]
   release --project NAME --version X.Y.Z
   dashboard [--port 8787] | worker --server HTTPS_URL --workspace DIR --id WORKER_ID
   worker-token --id WORKER_ID
@@ -243,9 +243,12 @@ Environment: FACTORY_HOME overrides the local state directory.
             case "eval":
             {
                 var projectKey = Option(args, "project");
-                var project = string.IsNullOrEmpty(projectKey) ? null : store.Project(projectKey);
-                Print(await Evaluations.RunAsync(store, Required(args, "suite"),
-                    project == null ? null : AgentRuntimeFactory.Create(settings), project?.Path));
+                var live = Flag(args, "live");
+                if (live && string.IsNullOrEmpty(projectKey)) throw new ArgumentException("Live evaluations require --project NAME");
+                var suite = Required(args, "suite");
+                Print(live
+                    ? await Evaluations.RunLiveAsync(store, suite, store.Project(projectKey), settings)
+                    : await Evaluations.RunAsync(store, suite));
                 return 0;
             }
             case "test-audit":
@@ -264,7 +267,7 @@ Environment: FACTORY_HOME overrides the local state directory.
                 Console.WriteLine(WorkerAuthentication.CreateToken(settings.WorkerTokenKey, Required(args, "id")));
                 return 0;
             case "install-skills":
-                Skills.Install(Flag(args, "overwrite")); return 0;
+                Skills.Install(Flag(args, "provider") ? Required(args, "provider") : "codex", Flag(args, "overwrite")); return 0;
             default: throw new ArgumentException("Unknown command: " + args[0]);
         }
     }

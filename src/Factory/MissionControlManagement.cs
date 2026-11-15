@@ -517,6 +517,7 @@ public static class MissionControlManager
         });
     public static FactoryPlan SavePlan(StateStore store, FactoryPlan plan)
     {
+        plan.AgentPolicyRevision = "";
         Planning.Validate(plan);
         var s = store.Read();
         var goal = s.Goals.Single(g => g.Id == plan.GoalId);

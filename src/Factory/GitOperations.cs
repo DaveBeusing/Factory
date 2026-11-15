@@ -29,12 +29,16 @@ public sealed class GitOperations
         var r = Commands.Run("git", ["-C", root, "remote", "get-url", "origin"], Environment.CurrentDirectory);
         return r.Ok ? r.Output.Trim() : null;
     }
-    public string Prepare(ProjectInfo project, FactoryJob job, string? rootOverride = null)
+    public string Prepare(ProjectInfo project, FactoryJob job, string? rootOverride = null) =>
+        Prepare(project, job, out _, rootOverride);
+
+    internal string Prepare(ProjectInfo project, FactoryJob job, out string baseCommit, string? rootOverride = null)
     {
         WorkPackagePreflight.RequireMaster(project);
         var repo = rootOverride ?? project.Path;
         var masterCommit = WorkPackagePreflight.MasterCommit(
             new ProjectInfo { Path = repo, BaseBranch = "master" });
+        baseCommit = masterCommit;
         var origin = WorkPackagePreflight.ConfiguredOrigin(project, repo);
         var (_, remoteStatus) = WorkPackagePreflight.InspectRemoteMaster(repo, origin, masterCommit);
         WorkPackagePreflight.RequireCurrentMaster(remoteStatus);

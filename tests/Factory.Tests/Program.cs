@@ -2337,22 +2337,29 @@ Test("Planning rejects cycle", () =>
 Test("Unauthenticated worker blocked", () => Assert(!WorkerProtocol.Authorized("Bearer invalid", "secret")));
 Test("Authorized worker accepted", () => Assert(WorkerProtocol.Authorized("Bearer abc", "abc")));
 
-Test("Child processes do not inherit controller or worker API tokens", () =>
+Test("Child processes inherit only explicitly assigned Factory credentials", () =>
 {
-    var oldAdmin = Environment.GetEnvironmentVariable("FACTORY_TOKEN");
-    var oldWorker = Environment.GetEnvironmentVariable("FACTORY_WORKER_TOKEN");
+    string[] credentials = ["FACTORY_TOKEN", "FACTORY_WORKER_TOKEN", "FACTORY_REMOTE_EXECUTOR_TOKEN",
+        "FACTORY_GITHUB_WEBHOOK_SECRET", "FACTORY_WORKFLOW_EVENT_PRIVATE_KEY"];
+    var previous = credentials.ToDictionary(name => name, Environment.GetEnvironmentVariable);
     try
     {
-        Environment.SetEnvironmentVariable("FACTORY_TOKEN", "admin-test-secret");
-        Environment.SetEnvironmentVariable("FACTORY_WORKER_TOKEN", "worker-test-secret");
+        foreach (var name in credentials)
+            Environment.SetEnvironmentVariable(name, "inherited-test-value");
         var child = Commands.StartInfo("git", ["--version"], Environment.CurrentDirectory);
-        Assert(!child.Environment.ContainsKey("FACTORY_TOKEN"));
-        Assert(!child.Environment.ContainsKey("FACTORY_WORKER_TOKEN"));
+        Assert(credentials.All(name => !child.Environment.ContainsKey(name)));
+
+        var settings = new FactorySettings();
+        settings.EnsureCredentials();
+        var worker = ManagedWorkers.CreateStartInfo(Environment.CurrentDirectory, settings, "http://127.0.0.1:8787", "fixture");
+        Assert(credentials.Where(name => name != "FACTORY_WORKER_TOKEN")
+            .All(name => !worker.Environment.ContainsKey(name)));
+        Assert(worker.Environment["FACTORY_WORKER_TOKEN"] == WorkerAuthentication.CreateToken(settings.WorkerTokenKey, "fixture"));
     }
     finally
     {
-        Environment.SetEnvironmentVariable("FACTORY_TOKEN", oldAdmin);
-        Environment.SetEnvironmentVariable("FACTORY_WORKER_TOKEN", oldWorker);
+        foreach (var (name, value) in previous)
+            Environment.SetEnvironmentVariable(name, value);
     }
 });
 

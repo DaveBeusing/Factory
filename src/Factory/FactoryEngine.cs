@@ -89,7 +89,7 @@ public sealed class FactoryEngine
         var job = _store.Job(id);
         JobRecovery.Require(job, fence);
         if (_executionMode == JobExecutionModes.Local && LocalJobControl.IsProjectRequest(job.RequestedState))
-            throw new OperationCanceledException("Project operator requested interruption");
+            throw new RequestedJobInterruptionException();
     }
 
     private void Stage(Guid id, ExecutionFence fence, string state, string stage, string? error = null)
@@ -181,7 +181,7 @@ public sealed class FactoryEngine
         {
             // The previous generation may not publish an outcome.
         }
-        catch (OperationCanceledException) when (executionCancel.IsCancellationRequested)
+        catch (OperationCanceledException ex) when (ex is RequestedJobInterruptionException || executionCancel.IsCancellationRequested)
         {
             try { _store.InterruptFencedStage(id, fence); }
             catch (LostExecutionLeaseException) { }

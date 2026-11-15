@@ -936,7 +936,7 @@ public sealed partial class StateStore
             requestedState is JobStates.Paused or JobStates.Stopped;
         if (!interrupted && controlPending &&
             (JobStates.Active.Contains(nextState) || nextState is JobStates.PrReady or JobStates.CompletedLocal))
-            throw new OperationCanceledException("The current execution has an interruption request.");
+            throw new RequestedJobInterruptionException();
         if (nextState == JobStates.Cancelled && requestedState != LocalJobControl.ProjectCancelRequest)
             throw new InvalidOperationException("The current execution has no cancellation request.");
         if (previousState == nextState && previousStage == stage && (error is null || error == previousError))

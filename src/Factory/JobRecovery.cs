@@ -9,6 +9,9 @@ public readonly record struct ExecutionFence(long Generation, string Token, stri
 
 public sealed class LostExecutionLeaseException(string message) : InvalidOperationException(message);
 
+internal sealed class RequestedJobInterruptionException()
+    : OperationCanceledException("The current execution has an interruption request.");
+
 internal enum ExecutionFailureKind { Deterministic, Transient, Policy, Conflict, UncertainSideEffect }
 
 internal sealed record ExecutionFailure(ExecutionFailureKind Kind, string State, string Stage)

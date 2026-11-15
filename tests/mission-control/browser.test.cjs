@@ -1,6 +1,6 @@
 const assert = require('node:assert/strict');
 const { execFileSync, spawn } = require('node:child_process');
-const { mkdir, mkdtemp, readFile, rm, writeFile } = require('node:fs/promises');
+const { mkdir, mkdtemp, readFile, realpath, rm, writeFile } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { createServer } = require('node:http');
 const { once } = require('node:events');
@@ -126,8 +126,8 @@ browserTest('clones into explicit and Factory-managed destinations', async ({ ho
   const remoteUrl = 'git@fixture.invalid:project.git';
   const clone = await create({ name: 'Explicit clone', source: 'clone', path: checkout, remoteUrl });
   const managed = await create({ name: 'Managed clone', source: 'remote', remoteUrl });
-  assert.equal(path.relative(checkout, clone.path), '');
-  assert.equal(path.relative(path.join(home, 'repositories'), path.dirname(managed.path)), '');
+  assert.equal(path.relative(await realpath(checkout), await realpath(clone.path)), '');
+  assert.equal(path.relative(await realpath(path.join(home, 'repositories')), await realpath(path.dirname(managed.path))), '');
   for (const project of [clone, managed]) {
     assert.equal(project.origin, remoteUrl);
     assert.equal(execFileSync('git', ['rev-parse', 'master'], { cwd: project.path, encoding: 'utf8' }).trim(), fixture.head);

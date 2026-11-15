@@ -18,6 +18,7 @@
 | Command | Purpose |
 | --- | --- |
 | `init <repo> --name NAME [--base master] [--checks-json PATH]` | Register a repository; Factory enforces the `master` base |
+| `project create --name NAME --source new\|clone\|remote [--path PATH] [--remote-url URL] [--checks-json PATH]` | Create or clone a Git repository and register it with Factory |
 | `goal add --project NAME --objective TEXT [--criteria TEXT] [--budget TOKENS]` | Create a goal |
 | `plan --goal GUID` | Inspect master/open work and propose a plan |
 | `adopt --goal GUID --plan-revision GUID --reviewed-existing-work [--mode local\|remote]` | Adopt the reviewed revision |
@@ -26,6 +27,8 @@
 | `status` | Display current projects, goals, jobs and workers |
 
 Planning and execution are separate permissions and transitions. See [Master-first preflight](planning-preflight.md) and [Quality checks](quality.md). For direct jobs, `--mode local|remote`, priority, risk and dependencies may be specified where supported.
+
+For `project create`, `new` requires an absolute `--path` and initializes `master` with an empty first commit. `clone` requires `--path` and `--remote-url`. `remote` requires only `--remote-url` and creates a managed checkout under `FACTORY_HOME/repositories/`. Destinations must be new paths. Cloning accepts HTTPS or SSH and requires `master` on the remote.
 
 ## Execution and recovery
 

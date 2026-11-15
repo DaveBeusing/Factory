@@ -133,12 +133,23 @@
 :is(button, .button, .icon-button) {
   transition: background-color .24s var(--interaction-ease), border-color .24s var(--interaction-ease),
     color .24s var(--interaction-ease), box-shadow .28s var(--interaction-ease),
-    translate .24s var(--interaction-ease);
+    translate .32s var(--interaction-ease), scale .42s cubic-bezier(.2, 1.28, .35, 1),
+    rotate .36s var(--interaction-ease), border-radius .36s var(--interaction-ease);
 }
-:is(button, .button, .icon-button):not(:disabled):is(:hover, :focus-visible) {
-  translate: 0 -1px;
+@media (prefers-reduced-motion: no-preference) and (hover: hover) and (pointer: fine) {
+  :is(button, .button, .icon-button):not(:disabled, [aria-disabled="true"]):hover {
+    translate: 0 -2px;
+    scale: 1.018 1.045;
+    rotate: -.35deg;
+    border-radius: 15px 22px 17px 23px / 15px 17px 18px 16px;
+  }
 }
-:is(button, .button, .icon-button):not(:disabled):active { translate: 0 1px; }
+:is(button, .button, .icon-button):not(:disabled, [aria-disabled="true"]):active {
+  translate: 0 1px;
+  scale: .978 .925;
+  rotate: .2deg;
+  transition-duration: .12s;
+}
 .button-primary {
   background: linear-gradient(112deg, #a19bff, #bfabf6);
   box-shadow: inset 0 1px 0 #fff5, 0 4px 12px #8f7be728;
@@ -150,6 +161,13 @@
     box-shadow .3s var(--interaction-ease);
 }
 .entity-card:hover { box-shadow: 0 8px 24px #0d0c1e55; }
+
+.project-setup { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px 24px; margin-bottom: 18px; }
+.project-setup-copy { flex: 1 1 230px; }
+.project-setup h2 { margin: 0 0 5px; font-size: 16px; }
+.project-setup p, .project-source-note { margin: 0; color: var(--sub); }
+.project-source-note { margin: -4px 0 14px; }
+.project-setup .head-actions { flex-wrap: wrap; }
 
 .field-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .field-heading:has(.preset-picker) { margin-bottom: 8px; }
@@ -195,7 +213,10 @@
 @keyframes progress-flow { to { transform: translateX(100%); } }
 
 @media (prefers-reduced-motion: reduce) {
-  :is(button, .button, .icon-button):not(:disabled):is(:hover, :focus-visible, :active) { translate: none; }
+  :is(button, .button, .icon-button):not(:disabled, [aria-disabled="true"]):is(:hover, :focus-visible, :active) {
+    translate: none; scale: none; rotate: none;
+    transition-property: background-color, border-color, color, box-shadow;
+  }
   .toast, .progress-fill, .progress-track:hover .progress-fill::after,
   .pipeline-step.current::after, .spinner { animation: none; }
 }

@@ -35,6 +35,7 @@ const generatingPlans=new Map();
 const number=value=>Number(value||0).toLocaleString();
 let settings={}, usage=null, providerData=null, projectReview=null, analysisProject='', health=null, view='overview', search='', filter='all', streamController=null,lastHeartbeat=0, connected=false, lastStateUpdate=0, modalHandler=null, inspector=null, planDraft=null, planGoal=null;
 let connectionRevision=0, loadingStateRevision=null, apiRequests=new AbortController();
+let projectSetup=null;
 const projectAccess=()=>token.startsWith('factory-viewer-');
 let recoveryRequest=0, projectRecovery={projects:[],selected:'',loading:false};
 let scopedPlanning={projects:[],selected:''}, scopedPlanEditor=null, scopedPlanRequest=0;
@@ -121,6 +122,7 @@ async function connect(nextToken){
    apiRequests.abort();
    apiRequests=new AbortController();
    settings={};usage=null;providerData=null;managedWorkers=[];doctor=null;
+   projectSetup=null;
    projectReview=null;analysisProject='';reviewRequest++;reviewingProjects.clear();
    plansCache.clear();planGoals.clear();planProject='';planDraft=null;planGoal=null;planDraftGoal=null;
    generatingPlans.clear();
@@ -985,7 +987,7 @@ function render(){
   document.querySelectorAll('[data-count]').forEach(el=>el.textContent='');
   return;
  }
-const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals,analysis:renderAnalysis,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings,decisions:renderDecisions};const next=(renders[view]||renderOverview)();
+const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals,analysis:renderAnalysis,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings,decisions:renderDecisions};const next=renderProjectSetup()+(renders[view]||renderOverview)();
  const mainChanged=next!==renderedMain;
  if(mainChanged){$('main').innerHTML=next;setProgress($('main'));renderedMain=next;}
  for(const name of ['projects','goals','jobs','workers'])document.querySelectorAll(`[data-count="${name}"]`).forEach(el=>el.textContent=(state[name]||[]).length||'');
@@ -1038,9 +1040,77 @@ $('modal-fields').addEventListener('click',async event=>{
   if($('form-modal').open&&editor===$('field-checks'))notify(error.message,true);
  } finally {button.disabled=false;}
 });
-function formProject(id){const p=state.projects.find(p=>p.id===id),v=p||{name:'',path:'',baseBranch:'master',maxParallel:2,checks:[],protectedPaths:['.github/workflows/','.factory/','.agents/','factory/']};
- const html=field('name','Project name',v.name)+field('path','Git repository root',v.path)+field('baseBranch','Base branch',v.baseBranch)+field('maxParallel','Maximum parallel jobs',v.maxParallel,'number')+projectChecksField(v.checks)+field('protectedPaths','Protected paths, one per line',v.protectedPaths.join('\n'),'textarea');
- openForm(p?'Configure project':'Register project','Quality gates are required before jobs can execute.',html,async f=>{const x=values(f);let checks;try{checks=JSON.parse(x.checks)}catch{throw Error('Invalid checks JSON')};if(!Array.isArray(checks))throw Error('Checks must be a JSON array');await mutate(p?`projects/${p.id}`:'projects',p?'PUT':'POST',{name:x.name,path:x.path,baseBranch:x.baseBranch,maxParallel:Number(x.maxParallel),checks,protectedPaths:lines(x.protectedPaths)})},p?'Update project':'Register project')}
+const projectSources=[
+ ['existing','Register an existing Git repository'],
+ ['new','Create a local folder and Git repository'],
+ ['clone','Clone into a local folder'],
+ ['remote','Use a remote URL with a Factory-managed checkout']
+];
+const projectSourceNotes={
+ existing:'Use a repository on this controller with a local master branch.',
+ new:'Factory creates the folder and initializes master with an empty first commit.',
+ clone:'Factory clones the remote master into a folder you choose on the controller.',
+ remote:'Factory clones master under its state directory. Enter a URL and Factory chooses the local checkout path.'
+};
+
+function renderProjectSetup(){
+ if(!projectSetup)return '';
+ const project=state.projects.find(p=>p.id===projectSetup.projectId);
+ if(!project)return '';
+ const goal=state.goals.find(g=>g.id===projectSetup.goalId);
+ const reviewed=projectReview?.projectId===project.id;
+ return `<section class="project-setup card" aria-label="Project setup guide">
+  <div class="project-setup-copy"><h2>${esc(project.name)} setup</h2>
+  <p>${goal?'The draft goal is ready. Open the planner when you want to propose work.':reviewed?'Review the findings or create a draft goal of your own.':'Review the repository, create a draft goal or go directly to the planner.'}</p></div>
+  <div class="head-actions">
+   <button class="button button-muted" data-act="open-project-analysis" data-id="${esc(project.id)}">${ico('eye')} Review project</button>
+   <button class="button button-muted" data-act="setup-goal" data-id="${esc(project.id)}">${ico('target')} ${goal?'Add another goal':'Create draft goal'}</button>
+   <button class="button button-primary" data-act="project-plans" data-id="${esc(project.id)}">${ico('route')} Open goal planner</button>
+   <button class="button button-quiet" data-act="setup-exit">Exit guide</button>
+  </div>
+ </section>`;
+}
+
+function formProject(id){
+ const p=state.projects.find(p=>p.id===id),v=p||{name:'',path:'',baseBranch:'master',maxParallel:2,checks:[],protectedPaths:['.github/workflows/','.factory/','.agents/','factory/']};
+ const source=p?'':field('source','Repository source','existing','select',projectSources)+
+  '<p class="project-source-note" id="project-source-note" aria-live="polite"></p>';
+ const html=field('name','Project name',v.name)+source+field('path','Git repository root',v.path)+
+  (p?'':field('remoteUrl','Remote repository URL','')+
+   field('guided','Guide me through review and goal planning after registration',false,'checkbox'))+
+  field('baseBranch','Base branch',v.baseBranch)+field('maxParallel','Maximum parallel jobs',v.maxParallel,'number')+
+  projectChecksField(v.checks)+field('protectedPaths','Protected paths, one per line',v.protectedPaths.join('\n'),'textarea');
+ openForm(p?'Configure project':'Register project','Quality gates are required before jobs can execute.',html,async f=>{
+  const x=values(f);
+  let checks;
+  try{checks=JSON.parse(x.checks)}catch{throw Error('Invalid checks JSON')}
+  if(!Array.isArray(checks))throw Error('Checks must be a JSON array');
+  const guideOption=p?null:f.elements.guided;
+  const guided=guideOption?.checked;
+  const revision=connectionRevision;
+  const project=await mutate(p?`projects/${p.id}`:'projects',p?'PUT':'POST',{
+   name:x.name,path:x.path||'',baseBranch:x.baseBranch,maxParallel:Number(x.maxParallel),checks,
+   protectedPaths:lines(x.protectedPaths),source:x.source||'existing',remoteUrl:x.remoteUrl
+  });
+  if(guided&&revision===connectionRevision&&f.closest('dialog')?.open&&f.elements.guided===guideOption){
+   projectSetup={projectId:project.id,goalId:''};
+   nav('projects');
+  }
+ },p?'Update project':'Register project');
+ if(p)return;
+ const select=$('field-source'),path=$('field-path'),url=$('field-remoteUrl');
+ url.placeholder='https://host/owner/repo.git or git@host:owner/repo.git';
+ function updateSource(){
+  const mode=select.value;
+  const hasPath=mode!=='remote',hasUrl=mode==='clone'||mode==='remote';
+  path.closest('.field').hidden=!hasPath;path.disabled=!hasPath;path.required=hasPath;
+  url.closest('.field').hidden=!hasUrl;url.disabled=!hasUrl;url.required=hasUrl;
+  path.labels[0].textContent=mode==='existing'?'Git repository root':'Destination folder';
+  $('project-source-note').textContent=projectSourceNotes[mode];
+ }
+ select.addEventListener('change',updateSource);
+ updateSource();
+}
 function formProviderReconciliation(id){
  const reservation=(providerData?.heldReservations||[]).find(x=>x.id===id);
  if(!reservation)return;
@@ -1105,7 +1175,25 @@ function formProjectProviders(id){
    await fetchProviders();
   },'Save provider routing');
 }
-function formGoal(id){const g=state.goals.find(g=>g.id===id);if(!g&&!state.projects.length){notify('Register a project first',true);return}let v=g||{projectId:state.projects[0].id,objective:'',acceptanceCriteria:[],tokenBudget:100000};const html=field('projectId','Project',v.projectId,'select',projectOptions())+field('objective','Outcome / objective',v.objective,'textarea')+field('acceptanceCriteria','Acceptance criteria (one per line)',v.acceptanceCriteria.join('\n'),'textarea')+field('tokenBudget','Token budget',v.tokenBudget,'number');openForm(g?'Edit goal':'Create goal','Describe a measurable outcome and its success criteria.',html,async f=>{let x=values(f);await mutate(g?`goals/${g.id}`:'goals',g?'PUT':'POST',{projectId:x.projectId,objective:x.objective,acceptanceCriteria:lines(x.acceptanceCriteria),tokenBudget:Number(x.tokenBudget)})},g?'Update goal':'Create goal')}
+function formGoal(id,setupProjectId){
+ const g=state.goals.find(g=>g.id===id);
+ const project=setupProjectId?state.projects.find(p=>p.id===setupProjectId):state.projects[0];
+ if(!g&&!project){notify('Register a project first',true);return}
+ const setup=setupProjectId&&projectSetup?.projectId===setupProjectId?projectSetup:null;
+ const v=g||{projectId:project.id,objective:'',acceptanceCriteria:[],tokenBudget:100000};
+ const html=field('projectId','Project',v.projectId,'select',projectOptions())+
+  field('objective','Outcome / objective',v.objective,'textarea')+
+  field('acceptanceCriteria','Acceptance criteria (one per line)',v.acceptanceCriteria.join('\n'),'textarea')+
+  field('tokenBudget','Token budget',v.tokenBudget,'number');
+ const label=g?'Update goal':setup?'Create draft goal':'Create goal';
+ openForm(g?'Edit goal':label,'Describe a measurable outcome and its success criteria.',html,async f=>{
+  const x=values(f);
+  const result=await mutate(g?`goals/${g.id}`:'goals',g?'PUT':'POST',{
+   projectId:x.projectId,objective:x.objective,acceptanceCriteria:lines(x.acceptanceCriteria),tokenBudget:Number(x.tokenBudget)
+  });
+  if(setup&&setup===projectSetup&&x.projectId===setup.projectId){setup.goalId=result.id;render()}
+ },label);
+}
 function formJob(id){const j=state.jobs.find(j=>j.id===id);if(!j&&!state.projects.length){notify('Register a project first',true);return}const v=j||{projectId:state.projects[0].id,goalId:'',title:'',description:'',mode:'local',risk:'medium',priority:50,dependsOn:[],expectedPaths:[]};let html=field('projectId','Project',v.projectId,'select',projectOptions())+field('goalId','Linked goal (optional)',v.goalId||'','select',goalOptions())+field('title','Title',v.title)+field('description','Work package description',v.description,'textarea')+`<div class="field-row">${field('mode','Execution',v.mode,'select',[['local','Local'],['remote','Remote']])}${field('risk','Risk',v.risk,'select',[['low','Low'],['medium','Medium'],['high','High']])}</div>`+field('priority','Priority (0-100)',v.priority,'number')+field('expectedPaths','Expected paths (one per line)',v.expectedPaths.join('\n'),'textarea')+field('dependsOn','Dependencies (job IDs, one per line)',v.dependsOn.join('\n'),'textarea')
  +field('reviewedExistingWork','I reviewed existing master code and overlapping work before creating this package',false,'checkbox');
  openForm(j?'Edit job':'Create job','Execution starts only when dependencies and policies allow it.',html,async f=>{const x=values(f);await mutate(j?`jobs/${j.id}`:'jobs',j?'PUT':'POST',{projectId:x.projectId,goalId:x.goalId||null,title:x.title,description:x.description,mode:x.mode,risk:x.risk,priority:Number(x.priority),expectedPaths:lines(x.expectedPaths),dependsOn:lines(x.dependsOn),
@@ -1487,6 +1575,8 @@ async function act(action,id,index,revision){switch(action){case'open-connection
  }
  case'analysis-run':await startProjectReview();break;case'analysis-goal':createReviewGoal(id);break;case'provider-reconcile':formProviderReconciliation(id);break;
  case'provider-recover':formProviderHostRecovery(id);break;
+ case'setup-goal':formGoal(null,id);break;
+ case'setup-exit':projectSetup=null;render();break;
  case'linked-provider-usage':closeInspector();nav('usage');await fetchProviders();break;
  case'recover-provider-receipt':recoverProviderReceipt(id,index);break;
  case'project-plans':planProject=id;nav('plans');await loadPlans();break;

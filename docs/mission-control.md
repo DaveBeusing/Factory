@@ -30,7 +30,7 @@ On **Overview**, **Manage queue** and **Run queue** have distinct emphasis. The 
 | Workspace | Available operations |
 | --- | --- |
 | **Overview** | Health, primary queue actions, KPIs, pipeline, goals, workers, events and observed allowance |
-| **Projects** | Register, edit paths, checks and protected paths, activate, pause, disable or archive repositories |
+| **Projects** | Register or create repositories, edit paths and checks, activate, pause, disable or archive projects |
 | **Goals** | Edit objectives, acceptance criteria and token budgets. Activate, pause, stop, complete or archive goals. |
 | **Goal planner** | Filter by project, check master and open work, edit named dependencies, review budget and adopt a plan |
 | **Project review** | Inspect master and project health, then turn a reviewed finding into an editable draft goal |
@@ -43,7 +43,20 @@ On **Overview**, **Manage queue** and **Run queue** have distinct emphasis. The 
 | **Capacity** | Inspect provider, model and role usage, local allocations, held reservations, provider-reported costs and Codex account windows |
 | **Settings** | Adjust concurrency, review rounds and worker leases. Refresh **Factory doctor** to inspect controller tool availability, versions and state paths. |
 
-In **Projects**, the plus beside **Quality checks** adds a .NET, strict .NET or CMake preset to the project form. Existing check entries are kept. Review the commands and paths before saving.
+## Set up a project
+
+Open **Projects → Add project** with administrator access and choose a repository source.
+
+| Source | What Factory does |
+| --- | --- |
+| **Existing local repository** | Registers an existing checkout on the Factory controller. |
+| **New local repository** | Creates a new folder, initializes `master`, and makes an empty initial commit. |
+| **Clone into a local folder** | Clones `master` from an HTTPS or SSH Git URL into a new folder you choose. |
+| **Remote repository URL only** | Clones `master` into a Factory-managed checkout under `FACTORY_HOME/repositories/`. |
+
+For a new or cloned repository, enter an absolute destination path on the controller that does not yet exist. Cloning uses the controller's Git credentials and requires the remote to have a `master` branch. Use the plus beside **Quality checks** to add a .NET, strict .NET or CMake preset and review the commands and paths before saving. Jobs require configured quality checks before execution.
+
+Select **Guide me through review and goal planning after registration** to show shortcuts for reviewing the repository, creating a draft goal, and opening its Goal planner. Use **Exit guide** at any point. The project and any saved goals remain available from their workspaces. Plan adoption and execution still require explicit operator actions.
 
 ## Planning and capacity
 

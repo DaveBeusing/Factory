@@ -12,6 +12,8 @@ public sealed class ProjectInput
     public List<CheckCommand> Checks { get; set; } = [];
     public List<string>? RequiredExecutionCapabilities { get; set; }
     public List<string>? ProtectedPaths { get; set; }
+    public string Source { get; set; } = "existing";
+    public string? RemoteUrl { get; set; }
 }
 public sealed class GoalInput
 {
@@ -95,17 +97,12 @@ public static class MissionControlManager
         s.Events.Add(new FactoryEvent { JobId = job, Type = action, Message = value });
     public static ProjectInfo CreateProject(StateStore store, ProjectInput input)
     {
-        Require(!string.IsNullOrWhiteSpace(input.Name) && input.Name.Length <= 120, "Project name is required (max 120 characters)");
-        Require(input.MaxParallel is >= 1 and <= 64, "Project parallel limit must be 1-64");
-        Require(input.BaseBranch == "master", "Factory work packages must target master");
+        ValidateProjectInput(input);
         var path = GitOperations.RepositoryRoot(input.Path);
         GitOperations.Git(path, "rev-parse", "--verify", "refs/heads/master");
-        ValidateChecks(input.Checks);
-        var capabilities = input.RequiredExecutionCapabilities ?? [];
-        ValidateExecutionCapabilities(capabilities);
         var p = new ProjectInfo { Name = input.Name.Trim(), Path = path, BaseBranch = input.BaseBranch,
             Origin = GitOperations.Origin(path) ?? "", MaxParallel = input.MaxParallel, Checks = input.Checks,
-            RequiredExecutionCapabilities = capabilities };
+            RequiredExecutionCapabilities = input.RequiredExecutionCapabilities ?? [] };
         if (input.ProtectedPaths != null) p.ProtectedPaths = NormalizePaths(input.ProtectedPaths);
         store.Change(s =>
         {
@@ -113,6 +110,16 @@ public static class MissionControlManager
             s.Projects.Add(p); Log(s, null, "project_created", p.Name);
         });
         return p;
+    }
+
+    internal static void ValidateProjectInput(ProjectInput input)
+    {
+        Require(!string.IsNullOrWhiteSpace(input.Name) && input.Name.Length <= 120, "Project name is required (max 120 characters)");
+        Require(input.MaxParallel is >= 1 and <= 64, "Project parallel limit must be 1-64");
+        Require(input.BaseBranch == "master", "Factory work packages must target master");
+        ValidateChecks(input.Checks);
+        ValidateExecutionCapabilities(input.RequiredExecutionCapabilities ?? []);
+        if (input.ProtectedPaths is not null) _ = NormalizePaths(input.ProtectedPaths);
     }
     public static ProjectInfo UpdateProject(StateStore store, Guid id, ProjectInput input)
     {

@@ -189,6 +189,7 @@ public static class DashboardHost
                 return (IResult)Results.BadRequest(new { error = "Automatic merging is not supported; merge through a manually approved PR" });
             settings.MaxParallel = input.MaxParallel;
             settings.MaxAgentSessions = input.MaxAgentSessions;
+            SlottedAgentRuntime.NotifyLimitChanged(settings);
             settings.MaxReviewRounds = input.MaxReviewRounds;
             settings.LeaseSeconds = input.LeaseSeconds;
             settings.PollSeconds = input.PollSeconds;

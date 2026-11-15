@@ -59,6 +59,7 @@ internal sealed class RemoteProviderAgent(Uri server, string token, WorkerClaim 
             return new AgentRunResult
             {
                 SessionId = session,
+                RolePolicyRevision = result.RolePolicyRevision ?? "",
                 Success = result.Success, Error = result.Success ? "" : "Trusted provider turn failed",
                 ObservedModel = result.ObservedModel, FinalText = result.FinalText,
                 FinalTextIsFallback = result.FinalTextIsFallback, InputTokens = result.InputTokens,

@@ -28,6 +28,7 @@ public sealed class FactoryPlan
     public Guid? PreviousRevision { get; set; }
     public List<SpecificationChange> Changes { get; set; } = [];
     public string ProjectContractRevision { get; set; } = "";
+    public string AgentPolicyRevision { get; set; } = "";
     public List<PlannedPackage> Packages { get; set; } = [];
     // Source/PR evidence used when drafting the work packages. Never interpreted as completeness proof.
     public WorkPackagePreflightReport? Preflight { get; set; }
@@ -82,7 +83,7 @@ public static class Planning
         WorkPackagePreflightReport preflight, IAgentRuntime agent, CancellationToken ct, Guid? existingRevision)
     {
         var goalRevision = GoalRevision(goal);
-        var context = Json.Stringify(new
+        var context = new
         {
             preflight.BaseBranch, preflight.BaseCommit, preflight.RemoteMasterCommit, preflight.RemoteMasterStatus,
             preflight.GitHubRepository, preflight.SearchTerms,
@@ -90,8 +91,8 @@ public static class Planning
             preflight.PullRequestsChecked, preflight.PullRequestCheckNote,
             preflight.OpenIssues, preflight.IssuesChecked, preflight.IssueCheckNote,
             preflight.MasterFiles
-        });
-        var prompt = "READ ONLY: Do not modify source files. Plan exclusively against the verified master commit. " +
+        };
+        var task = "Plan exclusively against the verified master commit. " +
             "Inspect existing source, tests, active work, open issues and open pull requests BEFORE proposing packages. " +
             "When functionality already exists or is partially implemented, FIRST propose to finish, " +
             "repair, validate, or integrate that implementation, rather than recreate it. " +
@@ -104,17 +105,28 @@ public static class Planning
             "Declare sharedResources as kind:name keys (interface, schema, ci, config, generated), " +
             "an empty array when none are shared, or [\"unknown\"] when ownership is uncertain. " +
             "Set contractVersion to 1 and include acceptanceEvidence " +
-            "(objects with criterion and check) using these configured check names: " +
-            Json.Stringify(p.Checks.Select(c => c.Name).ToArray()) + ". " +
+            "(objects with criterion and check) using configuredCheckNames from the evidence. " +
             "Describe existing code evidence, completion gaps and relevant PRs in each description. " +
-            "Any assumption must be stated in description. Goal: " + goal.Objective +
-            "\nAcceptance criteria:\n" + string.Join("\n", goal.AcceptanceCriteria) +
-            "\nVerified master preflight context (candidate evidence; inspect before changing): " + context;
+            "Any assumption must be stated in description.";
+        var prompt = AgentPolicies.For("planner").Render(task, new
+        {
+            goal.Objective,
+            goal.AcceptanceCriteria,
+            configuredCheckNames = p.Checks.Select(c => c.Name).ToArray(),
+            preflight = context
+        });
         var result = await agent.RunAsync(p.Path, prompt, "", ct, readOnly: true);
-        if (!result.Success) throw new InvalidOperationException("Planner failed: " + result.Error);
-        var content = ExtractJson(result.FinalText);
-        var plan = JsonSerializer.Deserialize<FactoryPlan>(content, Json.Options) ?? throw new InvalidOperationException("Empty plan");
+        if (!result.Success || result.FinalTextIsFallback)
+            throw new InvalidOperationException("Planner returned no successful structured result: " + result.Error);
+        FactoryPlan plan;
+        try
+        {
+            plan = JsonSerializer.Deserialize<FactoryPlan>(result.FinalText, Json.Options) ??
+                throw new InvalidOperationException("Empty plan");
+        }
+        catch (JsonException ex) { throw new InvalidOperationException("Planner did not return valid plan JSON", ex); }
         plan.ProjectId = p.Id; plan.GoalId = goal.Id;
+        plan.AgentPolicyRevision = AgentPolicies.Revision;
         plan.BaseCommit = preflight.BaseCommit;
         plan.Preflight = preflight;
         SpecificationContracts.ValidateNew(plan);
@@ -144,12 +156,6 @@ public static class Planning
         });
     }
 
-    private static string ExtractJson(string raw)
-    {
-        var start = raw.IndexOf('{'); var end = raw.LastIndexOf('}');
-        if (start < 0 || end <= start) throw new InvalidOperationException("Planner did not return JSON");
-        return raw[start..(end + 1)];
-    }
     public static void Validate(FactoryPlan plan)
     {
         if (plan.Packages is not { Count: > 0 and <= 50 }) throw new ArgumentException("Plan requires 1-50 packages");

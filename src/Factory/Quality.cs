@@ -12,6 +12,8 @@ public sealed class QualityResult
     public List<ReviewFinding> ReviewFindings { get; set; } = [];
     public bool HasIndependentApproval => Passed && ReviewPolicy.HasIndependentApproval(this);
     public string HeadSha { get; set; } = "";
+    public string BaseCommit { get; set; } = "";
+    public string PatchSha256 { get; set; } = "";
     public string TreeSha { get; set; } = "";
     public string ProjectContractRevision { get; set; } = "";
     public List<CheckReport> Checks { get; set; } = [];
@@ -32,6 +34,7 @@ public sealed class QualityEngine
 {
     private readonly IAgentRuntime _agent;
     private readonly Func<string, IAgentRuntime>? _reviewRuntime;
+    internal bool UsesRemotePolicyEvidence { get; init; }
     public QualityEngine(IAgentRuntime agent, Func<string, IAgentRuntime>? reviewRuntime = null)
     {
         _agent = agent;
@@ -120,19 +123,32 @@ public sealed class QualityEngine
             return report;
         }
 
-        var reviewers = new Dictionary<string, string>
+        if (string.IsNullOrEmpty(report.BaseCommit))
         {
-            ["code"] = "Correctness, tests, edge cases, maintainability",
-            ["architecture"] = "Dependencies, modularity, interface and scope violations",
-            ["security"] = "Secrets, untrusted input, access control, unsafe execution",
-            ["ux"] = "User-visible behavior, discoverability and usability when applicable"
-        };
+            var mergeBase = await Commands.RunAsync("git",
+                ["merge-base", $"refs/heads/{project.BaseBranch}", report.HeadSha], job.Worktree, cancellationToken: ct);
+            if (mergeBase.Ok) report.BaseCommit = mergeBase.Output.Trim();
+        }
+        if (!IntegrationVerifier.IsCommitSha(report.BaseCommit))
+        {
+            report.Findings.Add("Unable to obtain review diff: review base is unavailable");
+            report.Passed = false;
+            return report;
+        }
+        var ancestor = await Commands.RunAsync("git", ["merge-base", "--is-ancestor", report.BaseCommit, report.HeadSha],
+            job.Worktree, cancellationToken: ct);
+        if (!ancestor.Ok)
+        {
+            report.Findings.Add("Unable to obtain review diff: captured base is not an ancestor of checked HEAD");
+            report.Passed = false;
+            return report;
+        }
         // Review the immutable checked commit with display filters disabled.
         // Ask Git to identify binary changes with its machine-readable patch marker.
         var diff = await Commands.RunAsync("git",
             ["-C", job.Worktree, "diff", "--no-ext-diff", "--no-textconv", "--no-color",
                 "--no-relative", "--ignore-submodules=none", "--submodule=short", "--unified=3", "--binary",
-                $"refs/heads/{project.BaseBranch}...{report.HeadSha}", "--"],
+                report.BaseCommit, report.HeadSha, "--"],
             job.Worktree, cancellationToken: ct);
         // Commands retains more output than the review limit, so a truncated capture
         // also exceeds this limit and is never sent to reviewers.
@@ -151,47 +167,113 @@ public sealed class QualityEngine
             report.Passed = false;
             return report;
         }
-        var completed = await Task.WhenAll(reviewers.Select(async pair =>
+        report.PatchSha256 = Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(diff.Output)));
+        var snapshot = Directory.CreateTempSubdirectory("factory-review-").FullName;
+        var snapshotCreated = false;
+        try
         {
-            var (role, checklist) = pair;
-            var instruction = "Review only; DO NOT edit files, commit, push or merge. " + checklist +
-                ". Review this branch against " + project.BaseBranch + ". Return first line exactly VERDICT: PASS or VERDICT: CHANGES. " +
-                "Second line onward provide evidence with file paths. Task: " + job.Description + "\nComplete source patch (review the changed code, not just file names):\n" + diff.Output;
-            try
+            var checkout = await Commands.RunAsync("git", ["worktree", "add", "--detach", snapshot, report.HeadSha],
+                job.Worktree, cancellationToken: ct);
+            if (!checkout.Ok)
             {
-                var runtime = _reviewRuntime?.Invoke(role) ?? _agent;
-                var result = await runtime
-                    .RunAsync(job.Worktree, instruction, "", ct, readOnly: true);
-                using var response = new StringReader(result.FinalText);
-                var verdict = result.Success && !result.FinalTextIsFallback && response.ReadLine() == "VERDICT: PASS"
-                    ? "PASS" : "CHANGES";
-                return (Role: role, Verdict: verdict, Message: result.FinalText[..Math.Min(3000, result.FinalText.Length)],
-                    Session: result.SessionId, Adapter: runtime.GetType().Name);
+                report.Findings.Add("Unable to prepare committed review source");
+                report.Passed = false;
+                return report;
             }
-            catch (Exception ex) when (ex is not OperationCanceledException and not TokenBudgetExceededException and not TimeoutException)
-            {
-                return (Role: role, Verdict: "CHANGES", Message: "Reviewer exception: " + ex.Message, Session: "", Adapter: "unknown");
-            }
-        }));
-        foreach (var (role, verdict, message, session, adapter) in completed)
-        {
-            report.Reviews[role] = verdict + "\n" + message;
-            report.ReviewRecords.Add(new(role, report.HeadSha, ReviewPolicy.Revision, adapter, session, "read-only", verdict, "UNKNOWN"));
-            if (verdict != "PASS")
-            {
-                report.Findings.Add("Review requested changes: " + role);
-                report.ReviewFindings.Add(new(role, message));
-            }
+            snapshotCreated = true;
+            await RunReviewersAsync();
         }
-        if (!await CheckedHeadStillCurrentAsync(job, report.HeadSha, ct))
-            report.Findings.Add("Worktree HEAD changed while the review was running");
-        report.Passed = report.Findings.Count == 0 && completed.All(review => review.Verdict == "PASS");
+        finally
+        {
+            if (snapshotCreated)
+            {
+                try
+                {
+                    var remove = Commands.Run("git", ["worktree", "remove", snapshot], job.Worktree, timeout: 30);
+                    if (!remove.Ok) MarkCleanupFailure();
+                }
+                catch (Exception ex) when (ex is not OutOfMemoryException) { MarkCleanupFailure(); }
+            }
+            else if (Directory.Exists(snapshot) && !Directory.EnumerateFileSystemEntries(snapshot).Any())
+                Directory.Delete(snapshot);
+        }
         return report;
+
+        async Task RunReviewersAsync()
+        {
+            var completed = await Task.WhenAll(ReviewPolicy.Roles.Select(async role =>
+            {
+                var instruction = AgentPolicies.For("review:" + role).Render(
+                    "Return the first line exactly as VERDICT: PASS or VERDICT: CHANGES, then cite evidence with file paths. " +
+                    "Review the complete committed patch and use the committed source view for additional context.",
+                    new { job.Description, report.BaseCommit, report.HeadSha, report.PatchSha256, Patch = diff.Output });
+                try
+                {
+                    var runtime = _reviewRuntime?.Invoke(role) ?? _agent;
+                    var result = await runtime
+                        .RunAsync(snapshot, instruction, "", ct, readOnly: true);
+                    var verdict = ReviewVerdict(result);
+                    return (Role: role, Verdict: verdict, Message: result.FinalText[..Math.Min(3000, result.FinalText.Length)],
+                    Session: result.SessionId, Adapter: runtime.GetType().Name,
+                    RoleRevision: UsesRemotePolicyEvidence ? result.RolePolicyRevision : AgentPolicies.Revision,
+                    result.RequestedModel, ObservedModels: ObservedModels(result));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException and not TokenBudgetExceededException and not TimeoutException)
+                {
+                return (Role: role, Verdict: "CHANGES", Message: "Reviewer exception: " + ex.Message,
+                    Session: "", Adapter: "unknown", RoleRevision: "", RequestedModel: "",
+                    ObservedModels: (IReadOnlyList<string>)Array.Empty<string>());
+                }
+            }));
+            foreach (var (role, verdict, message, session, adapter, roleRevision, requestedModel, observedModels) in completed)
+            {
+                report.Reviews[role] = verdict + "\n" + message;
+                report.ReviewRecords.Add(new(role, report.HeadSha, ReviewPolicy.Revision, adapter, session, "read-only", verdict, "UNKNOWN")
+                    {
+                        BaseCommit = UsesRemotePolicyEvidence ? "" : report.BaseCommit,
+                        PatchSha256 = UsesRemotePolicyEvidence ? "" : report.PatchSha256,
+                        RolePolicyRevision = roleRevision,
+                        RequestedModel = requestedModel, ObservedModels = observedModels
+                    });
+                if (verdict != "PASS")
+                {
+                    report.Findings.Add("Review requested changes: " + role);
+                    report.ReviewFindings.Add(new(role, message));
+                }
+            }
+            if (!await CheckedHeadStillCurrentAsync(job, report.HeadSha, ct))
+                report.Findings.Add("Worktree HEAD changed while the review was running");
+            var snapshotStatus = await Commands.RunAsync("git", ["status", "--porcelain", "--ignored=matching"],
+                snapshot, cancellationToken: ct);
+            if (!snapshotStatus.Ok || !string.IsNullOrWhiteSpace(snapshotStatus.Output) ||
+                !await CheckedHeadStillCurrentAsync(snapshot, report.HeadSha, ct))
+                report.Findings.Add("Committed review source changed while the review was running");
+            report.Passed = report.Findings.Count == 0 && completed.All(review => review.Verdict == "PASS");
+        }
+
+        void MarkCleanupFailure()
+        {
+            report.Findings.Add("Review snapshot could not be removed cleanly: " + snapshot);
+            report.Passed = false;
+        }
     }
-    private static async Task<bool> CheckedHeadStillCurrentAsync(FactoryJob job, string checkedHead, CancellationToken ct)
+
+    internal static string ReviewVerdict(AgentRunResult result)
     {
-        var head = await Commands.RunAsync("git", ["-C", job.Worktree, "rev-parse", "--verify", "HEAD"],
-            job.Worktree, cancellationToken: ct);
+        using var response = new StringReader(result.FinalText);
+        return result.Success && !result.FinalTextIsFallback && response.ReadLine() == "VERDICT: PASS"
+            ? "PASS" : "CHANGES";
+    }
+
+    private static IReadOnlyList<string> ObservedModels(AgentRunResult result) =>
+        result.ObservedModels.Count != 0 || string.IsNullOrEmpty(result.ObservedModel) ?
+            result.ObservedModels : [result.ObservedModel];
+    private static Task<bool> CheckedHeadStillCurrentAsync(FactoryJob job, string checkedHead, CancellationToken ct) =>
+        CheckedHeadStillCurrentAsync(job.Worktree, checkedHead, ct);
+
+    private static async Task<bool> CheckedHeadStillCurrentAsync(string directory, string checkedHead, CancellationToken ct)
+    {
+        var head = await Commands.RunAsync("git", ["rev-parse", "--verify", "HEAD"], directory, cancellationToken: ct);
         return head.Ok && string.Equals(head.Output.Trim(), checkedHead, StringComparison.OrdinalIgnoreCase);
     }
 

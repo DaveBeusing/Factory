@@ -503,7 +503,12 @@ internal static class RemoteProviderLeaseTests
         {
             Calls++;
             Check(readOnly == expectReadOnly, "Executor did not enforce the role");
-            if (readOnly) Check(prompt.Contains("+changed by executor"), "Review prompt omitted the independently read diff");
+            if (readOnly)
+            {
+                using var context = System.Text.Json.JsonDocument.Parse(prompt[prompt.IndexOf('{')..]);
+                Check(context.RootElement.GetProperty("patch").GetString()?.Contains("+changed by executor") == true,
+                    "Review prompt omitted the independently read diff");
+            }
             else await File.WriteAllTextAsync(Path.Combine(directory, "fixture.txt"), "changed by executor\n", cancellation);
             return new AgentRunResult { ObservedModel = model, InputTokens = 30, OutputTokens = 10,
                 UsageReported = true, Success = true, FinalText = "VERDICT: PASS", ProviderReportedCostMicros = 1234 };

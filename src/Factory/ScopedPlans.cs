@@ -38,6 +38,7 @@ public sealed partial class StateStore
 
     internal FactoryPlan SaveScopedPlan(string authorization, Guid projectId, Guid goalId, FactoryPlan draft)
     {
+        draft.AgentPolicyRevision = "";
         var verifier = RequirePlanVerifier(authorization);
         using var db = Open();
         var (scope, snapshot) = ReadPlanPreflight(db, verifier, projectId, goalId,

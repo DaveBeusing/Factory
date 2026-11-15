@@ -51,7 +51,7 @@ Stop and recovery actions may leave worktrees and provider holds to reconcile. S
 | `graph --project NAME` | Build heuristic source relationship index |
 | `impact --project NAME --file RELATIVE_PATH` | Inspect likely affected symbols/imports |
 | `knowledge --project NAME [--topic TOPIC --content TEXT]` | Read/store project knowledge |
-| `eval --suite FILE` | Run evaluation cases; project context may be selected for supported agent cases |
+| `eval --suite FILE [--live --project NAME]` | Run offline policy and contract evaluations. Explicit live mode runs supported agent cases in a clean master checkout. Case evidence is stored under `evaluation-evidence/` in Factory state. |
 | `test-audit --project NAME [--enqueue --reviewed-existing-work]` | Evaluate test gaps; reviewed flag is required for queued actions |
 | `install-skills [--overwrite]` | Install bundled Codex assets into its native locations |
 

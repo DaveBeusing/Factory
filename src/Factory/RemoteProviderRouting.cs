@@ -53,7 +53,11 @@ public sealed record RemoteExecutorGrant(Guid TurnId, Guid LeaseId, Guid JobId, 
 public sealed record RemoteExecutorReceipt(Guid TurnId, Guid LeaseId, string ProviderId, string Role,
     string InputCommit, string ObservedModel, long InputTokens, long OutputTokens, bool FinalUsage,
     bool Success, string FinalText, bool FinalTextIsFallback, string OutputTree, byte[] Patch,
-    long? ReportedCostMicros = null);
+    long? ReportedCostMicros = null)
+{
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? RolePolicyRevision { get; init; }
+}
 
 public sealed record RemoteReceiptRecoveryInput(bool Reviewed, string Reason, bool ConfirmOverrun);
 

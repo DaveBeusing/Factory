@@ -66,14 +66,14 @@ public sealed class ProviderBudgetReservation
     public string State { get; set; } = "active";
 }
 
-public readonly record struct ProviderSelection(string Id, string Model, string Role, IAgentRuntime Runtime);
+public readonly record struct ProviderSelection(string Id, string Model, string Role, IAgentRuntime Runtime)
+{
+    internal string RolePolicyRevision => AgentPolicies.IsControllerRole(Role) ? AgentPolicies.Revision : "";
+}
 
 public static class ProviderRouter
 {
-    private static readonly HashSet<string> Roles = new(StringComparer.Ordinal)
-    { "analysis", "planner", "builder", "review", "review:code", "review:architecture",
-      "review:security", "review:ux" };
-    public static bool ValidRole(string role) => Roles.Contains(role);
+    public static bool ValidRole(string role) => role == "review" || AgentPolicies.IsControllerRole(role);
 
     public static ProviderProfile Resolve(FactorySettings settings, FactoryState state,
         Guid projectId, string role)
@@ -151,9 +151,10 @@ public static class ProviderRouter
             "claude" => new ClaudeReadOnlyAgentRuntime(model),
             _ => throw new InvalidOperationException("Unknown provider adapter")
         };
+        var policy = AgentPolicies.For(role == "review" ? "review:code" : role);
         return new(profile.Id, model, role,
-            new SlottedAgentRuntime(decorate?.Invoke(profile, model, adapter) ?? adapter,
-                Math.Max(1, settings.MaxAgentSessions)));
+            new SlottedAgentRuntime(new PolicyBoundAgentRuntime(
+                decorate?.Invoke(profile, model, adapter) ?? adapter, policy), settings));
     }
 }
 
@@ -541,6 +542,7 @@ public sealed class ProjectScopedAgentRuntime(IAgentRuntime inner, StateStore st
             throw new InvalidOperationException("Project-scoped analysis and planning must be read-only");
         cancellation.ThrowIfCancellationRequested();
         beforeReserve?.Invoke();
+        await IAgentRuntimeAdmission.VerifyAsync(inner, previousSession, readOnly: true, cancellation);
         if (authorize is null) store.Change(ProviderBudgetLedger.HoldOrphans);
         var usageId = store.Change((state, db, tx) =>
         {

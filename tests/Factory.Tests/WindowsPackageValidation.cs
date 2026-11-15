@@ -41,6 +41,7 @@ internal static class WindowsPackageValidation
             File.WriteAllText(installedAgent, "local customization");
             CodexAssets.Install(installed, profile, overwrite: false);
             Require(File.ReadAllText(installedAgent) == "local customization", "Codex installer overwrote a local customization");
+            VerifyClaudeAssets(installed, Directory.CreateDirectory(Path.Combine(scratch.FullName, "claude-profile")).FullName);
 
             var repository = Directory.CreateDirectory(Path.Combine(scratch.FullName, "repository")).FullName;
             GitOperations.Git(repository, "init", "-b", "master");
@@ -197,6 +198,49 @@ internal static class WindowsPackageValidation
             Require(response.StatusCode == expected, $"{route} returned {response.StatusCode} instead of {expected}");
             return await response.Content.ReadAsStringAsync(ct);
         }
+    }
+
+    private static void VerifyClaudeAssets(string package, string profile)
+    {
+        var root = Path.Combine(package, "providers", "claude");
+        var agents = Directory.GetFiles(Path.Combine(root, "agents"), "factory-*.md");
+        Require(agents.Length == 11 && agents.All(file => !Path.GetFileName(file).Equals("factory-builder.md", StringComparison.Ordinal)),
+            "Claude package must include only the defined read-only agent equivalents");
+        foreach (var file in agents)
+        {
+            var descriptor = File.ReadAllLines(file);
+            Require(descriptor.First() == "---" && descriptor.Contains("name: " + Path.GetFileNameWithoutExtension(file)) &&
+                descriptor.Contains("tools: Read, Glob, Grep") && descriptor.Contains("permissionMode: plan") &&
+                descriptor.Skip(1).Contains("---"), "Invalid Claude agent frontmatter");
+        }
+        var skills = Directory.GetDirectories(Path.Combine(root, "skills"));
+        var codexSkills = Directory.GetDirectories(Path.Combine(package, "providers", "codex", "skills"));
+        Require(skills.Select(Path.GetFileName).ToHashSet().SetEquals(codexSkills.Select(Path.GetFileName)),
+            "Claude and Codex packages must contain the same operator workflows");
+        foreach (var folder in skills)
+        {
+            var name = Path.GetFileName(folder);
+            var bundled = File.ReadAllLines(Path.Combine(folder, "SKILL.md"));
+            Require(bundled.First() == "---" && bundled.Contains("name: " + name) && bundled.Skip(1).Contains("---"),
+                "Invalid Claude skill frontmatter");
+            Require(bundled.SequenceEqual(File.ReadAllLines(Path.Combine(package, "providers", "codex", "skills", name, "SKILL.md"))),
+                "Provider skill copies differ");
+        }
+        ClaudeAssets.Install(package, profile, overwrite: false);
+        var agent = Path.Combine(profile, ".claude", "agents", "factory-reviewer-security.md");
+        var skill = Path.Combine(profile, ".claude", "skills", "factory-plan", "SKILL.md");
+        Require(File.Exists(agent) && File.Exists(skill), "Claude installer did not find packaged assets");
+        File.WriteAllText(agent, "local agent");
+        File.WriteAllText(skill, "local skill");
+        var notes = Path.Combine(Path.GetDirectoryName(skill)!, "notes.txt");
+        File.WriteAllText(notes, "keep");
+        ClaudeAssets.Install(package, profile, overwrite: false);
+        Require(File.ReadAllText(agent) == "local agent" && File.ReadAllText(skill) == "local skill",
+            "Claude installer overwrote a local customization");
+        ClaudeAssets.Install(package, profile, overwrite: true);
+        Require(File.ReadAllText(agent) == File.ReadAllText(Path.Combine(root, "agents", Path.GetFileName(agent))) &&
+            File.ReadAllText(skill) == File.ReadAllText(Path.Combine(root, "skills", "factory-plan", "SKILL.md")) &&
+            File.ReadAllText(notes) == "keep", "Claude overwrite must replace only bundled files");
     }
 
     private static void VerifyUpgradedState(string directory, Guid projectId, byte[] settings)

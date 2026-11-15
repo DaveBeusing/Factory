@@ -53,7 +53,7 @@ Stop and recovery actions may leave worktrees and provider holds to reconcile. S
 | `knowledge --project NAME [--topic TOPIC --content TEXT]` | Read/store project knowledge |
 | `eval --suite FILE [--live --project NAME]` | Run offline policy and contract evaluations. Explicit live mode runs supported agent cases in a clean master checkout. Case evidence is stored under `evaluation-evidence/` in Factory state. |
 | `test-audit --project NAME [--enqueue --reviewed-existing-work]` | Evaluate test gaps; reviewed flag is required for queued actions |
-| `install-skills [--overwrite]` | Install bundled Codex assets into its native locations |
+| `install-skills [--provider codex\|claude] [--overwrite]` | Install bundled operator skills and profiles. Defaults to Codex. |
 
 Account allowance should not be inferred from local token consumption. Graph/impact analysis is heuristic. See [Providers](providers.md).
 

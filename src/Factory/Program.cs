@@ -267,7 +267,7 @@ Environment: FACTORY_HOME overrides the local state directory.
                 Console.WriteLine(WorkerAuthentication.CreateToken(settings.WorkerTokenKey, Required(args, "id")));
                 return 0;
             case "install-skills":
-                Skills.Install(Flag(args, "overwrite")); return 0;
+                Skills.Install(Flag(args, "provider") ? Required(args, "provider") : "codex", Flag(args, "overwrite")); return 0;
             default: throw new ArgumentException("Unknown command: " + args[0]);
         }
     }

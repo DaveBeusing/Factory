@@ -27,10 +27,11 @@ $env:FACTORY_HOME = 'C:\FactoryState'
 
 ## SQLite and upgrade policy
 
-The inspected `master` code sets `StateStore.DatabaseVersion = 25`. This is the **SQLite schema version**; it is separate from product SemVer and from the serialized `FactoryState.Schema` property.
+The inspected `master` code sets `StateStore.DatabaseVersion = 26`. This is the **SQLite schema version**; it is separate from product SemVer and from the serialized `FactoryState.Schema` property.
 
 - Current storage uses relational tables with foreign keys, WAL, indexes and transactional mutations, not the former single JSON row.
-- The code provides upgrade steps for supported earlier **relational** schema versions (including 2–24). Upgrade coverage differs by historical schema; test the exact source/target pair you operate.
+- The code provides upgrade steps for supported earlier **relational** schema versions (including 2–25). Upgrade coverage differs by historical schema; test the exact source/target pair you operate.
+- Schema 26 indexes authenticated workflow delivery receipts by their full event identity and project. The upgrade imports structured receipts from the lifecycle audit and preserves the original audit rows.
 - **Legacy single-row `factory_state` JSON databases are not imported.** A nonempty unsupported database is rejected instead of silently overwritten.
 - Downgrading a binary is not an inverse migration. Restore a verified backup created for the previous version.
 

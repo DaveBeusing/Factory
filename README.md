@@ -94,7 +94,7 @@ The diagram describes the normal flow, not an authorization bypass. Unsupported 
 | Area | Supported now | Not implied |
 | --- | --- | --- |
 | **Platform** | .NET 10 with a validated Windows x64 build/package path | Certified cross-platform distribution |
-| **Storage** | Relational SQLite, **schema 25**, with transactional upgrades from supported relational schemas | Automatic migration of legacy single-JSON-row state |
+| **Storage** | Relational SQLite, **schema 26**, with transactional upgrades from supported relational schemas | Automatic migration of legacy single-JSON-row state |
 | **Providers** | Codex builder; Claude Code and Ollama read-only roles | Arbitrary provider execution or equivalent isolation |
 | **Access** | Controller administrator, project-scoped human credentials, separately scoped worker and executor credentials | Finished enterprise IAM/RBAC or OS sandbox |
 | **Usage** | Recorded tokens, local provider budgets, provider-reported allowance when available | Inferred or fabricated account quota |

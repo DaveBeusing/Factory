@@ -10,17 +10,56 @@ public static class GoalBudgetLedger
     public const string Active = "active", Held = "held", Released = "released";
 
     private static long Spent(FactoryState state, Guid goalId)
-        => checked(state.Jobs.Where(j => j.GoalId == goalId)
-            .Aggregate(0L, (sum, job) => checked(sum + job.TokensIn + job.TokensOut)) +
-            state.ProviderUsages.Where(u => u.GoalId == goalId && !u.JobId.HasValue)
-                .Aggregate(0L, (sum, usage) => checked(sum + usage.InputTokens + usage.OutputTokens)));
+        => Spent(state.Jobs.Where(j => j.GoalId == goalId),
+            state.ProviderUsages.Where(u => u.GoalId == goalId && !u.JobId.HasValue));
+
+    private static long Spent(IEnumerable<FactoryJob> jobs, IEnumerable<ProviderUsageEntry> planningUsages)
+        => checked(jobs.Aggregate(0L, (sum, job) => checked(sum + job.TokensIn + job.TokensOut)) +
+            planningUsages.Aggregate(0L, (sum, usage) => checked(sum + usage.InputTokens + usage.OutputTokens)));
 
     private static long Outstanding(FactoryState state, Guid goalId)
-        => checked(state.BudgetReservations.Where(r => r.GoalId == goalId && r.State is Active or Held)
-            .Aggregate(0L, (sum, r) => checked(sum + Math.Max(0, r.Reserved - r.Consumed))) +
-            state.ProviderBudgetReservations.Where(r => r.State is Active or Held &&
-                state.ProviderUsages.Any(u => u.Id == r.UsageId && !u.JobId.HasValue && u.GoalId == goalId))
-                .Aggregate(0L, (sum, r) => checked(sum + Math.Max(0, r.Reserved - r.Consumed))));
+    {
+        var planningIds = state.ProviderUsages.Where(u => u.GoalId == goalId && !u.JobId.HasValue)
+            .Select(u => u.Id).ToHashSet();
+        return Outstanding(state.BudgetReservations.Where(r => r.GoalId == goalId),
+            state.ProviderBudgetReservations.Where(r => planningIds.Contains(r.UsageId)));
+    }
+
+    private static long Outstanding(IEnumerable<GoalBudgetReservation> reservations,
+        IEnumerable<ProviderBudgetReservation> planningReservations)
+        => checked(reservations.Where(r => r.State is Active or Held).Sum(r => Math.Max(0, r.Reserved - r.Consumed)) +
+            planningReservations.Where(r => r.State is Active or Held).Sum(r => Math.Max(0, r.Reserved - r.Consumed)));
+
+    internal static Func<FactoryJob, long> CreateSchedulerAvailability(FactoryState state)
+    {
+        var goals = state.Goals.ToLookup(g => g.Id);
+        var jobs = state.Jobs.ToLookup(j => j.GoalId);
+        var reservations = state.BudgetReservations.ToLookup(r => r.GoalId);
+        var active = state.BudgetReservations.Where(r => r.State == Active)
+            .Select(r => (r.JobId, r.ExecutionGeneration)).ToHashSet();
+        var held = state.BudgetReservations.Where(r => r.State == Held).Select(r => r.JobId).ToHashSet();
+        var planningUsages = state.ProviderUsages.Where(u => !u.JobId.HasValue && u.GoalId.HasValue).ToLookup(u => u.GoalId);
+        var providerReservations = state.ProviderBudgetReservations.ToLookup(r => r.UsageId);
+        var totals = new Dictionary<Guid, long>();
+        return job =>
+        {
+            if (job.GoalId is not { } id || held.Contains(job.Id) ||
+                goals[id].FirstOrDefault()?.State != "active") return 0;
+            if (totals.TryGetValue(id, out var available)) return available;
+            var goal = goals[id].Single();
+            // Only queued jobs are candidates. Any active runner without a current
+            // reservation still makes the goal's outstanding liability unknown.
+            var goalJobs = jobs[id];
+            available = goalJobs.Any(j => JobStates.Active.Contains(j.State) && !string.IsNullOrWhiteSpace(j.LeaseOwner) &&
+                !active.Contains((j.Id, j.ExecutionGeneration)))
+                ? 0
+                : Math.Max(0, checked(goal.TokenBudget - Spent(goalJobs, planningUsages[id]) -
+                    Outstanding(reservations[id], planningUsages[id].Select(u => u.Id).Distinct()
+                        .SelectMany(usageId => providerReservations[usageId]))));
+            totals.Add(id, available);
+            return available;
+        };
+    }
 
     public static long Available(FactoryState state, Guid goalId, Guid? claimingJobId = null)
     {

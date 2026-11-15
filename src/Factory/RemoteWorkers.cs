@@ -201,6 +201,7 @@ public static class WorkerProtocol
     {
         // Idle heartbeat updates are independent from job authorization and usage.
         if (req.JobId == Guid.Empty) return store.TouchWorkerHeartbeat(req.WorkerId);
+        if (store.TryRefreshRemoteHeartbeat(req, settings) is { } renewed) return renewed;
         return store.Change((s, db, tx) =>
         {
             var worker = s.Workers.FirstOrDefault(w => w.Id == req.WorkerId);

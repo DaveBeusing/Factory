@@ -137,9 +137,9 @@ public sealed partial class StateStore
         VerifyPlanSave(current, draft);
         verify?.Invoke(db, tx, current);
         VerifyPlanCheckout(scope.Project, current.Project, draft.BaseCommit);
-        if (!SpecificationContracts.CanRevise(current.Goal, Load(db, tx).Jobs))
-            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Existing jobs prevent specification replacement.");
         var currentState = Load(db, tx);
+        if (!SpecificationContracts.CanRevise(current.Goal, currentState.Jobs))
+            throw new ScopedProjectRejected(DraftGoalStatus.Conflict, "Existing jobs prevent specification replacement.");
         draft.ProjectContractRevision = SpecificationContracts.ProjectRevision(
             currentState.Projects.Single(p => p.Id == draft.ProjectId));
         VerifySpecification(db, tx, draft, currentState);
@@ -170,7 +170,7 @@ public sealed partial class StateStore
         RequireDraftPlanTarget(current);
         Planning.VerifyAdoptionTarget(plan, current.StoredPlan, scope.Project, current.Project, current.Goal);
         var currentState = Load(db, tx);
-        var retained = VerifySpecificationAdoption(db, tx, current.Goal, plan, currentState.Jobs);
+        var retained = VerifySpecificationAdoption(db, tx, current.Goal, plan, currentState);
         var jobs = Planning.BuildAdoptedJobs(plan, current.Goal, input.Mode, retained);
         VerifySpecification(db, tx, plan, currentState);
         if (DecidePlanAdoption(db, tx, plan, current.SubjectId.ToString()) != PolicyOutcome.Allow)
@@ -214,12 +214,15 @@ public sealed partial class StateStore
         SpecificationContracts.Verify(plan, project, state.Jobs);
         foreach (var dependency in plan.Packages.SelectMany(p => p.IntegratedPrerequisites).Distinct())
         {
+            if (!state.VerifiedIntegrations.Contains(dependency.JobId))
+                throw new InvalidOperationException("Reverify the prerequisite against the current project integration target before saving or adopting the specification.");
             using var proof = Command(db, tx, """
-                SELECT 1 FROM lifecycle_audit WHERE project_id=$project AND entity_kind='job' AND entity_id=$job
-                    AND reason_code='IntegrationVerified' AND lower(reference)=lower($commit) LIMIT 1;
-                """, ("$project", plan.ProjectId), ("$job", dependency.JobId), ("$commit", dependency.IntegratedCommit));
+                SELECT 1 FROM scheduling_integrations WHERE project_id=$project AND job_id=$job
+                    AND lower(head_sha)=lower($head) AND lower(integrated_sha)=lower($commit);
+                """, ("$project", plan.ProjectId), ("$job", dependency.JobId), ("$head", dependency.HeadCommit),
+                ("$commit", dependency.IntegratedCommit));
             if (proof.ExecuteScalar() is null)
-                throw new InvalidOperationException("The prerequisite has no durable integration proof.");
+                throw new InvalidOperationException("The declared prerequisite commits do not match the current verified integration.");
         }
     }
 

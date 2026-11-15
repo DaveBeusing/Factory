@@ -89,9 +89,11 @@ Run `issue-intake --project NAME` from the local operator CLI. It uses the regis
 
 ## Versioned specifications
 
-Plan save endpoints accept `contractVersion: 1`. Each package declares owned files, package dependencies, and an `acceptanceEvidence` array with a criterion and the name of a configured project check. An optional `integratedPrerequisites` array identifies a same-project job, its `headCommit`, and the verified `integratedCommit`. The controller checks these references at save and adoption. Overlapping package paths require explicit dependency ordering.
+Plan save endpoints accept `contractVersion: 1`. Each package declares owned files, package dependencies, and an `acceptanceEvidence` array with a criterion and the name of a configured project check. An optional `integratedPrerequisites` array identifies a same-project job, its `headCommit`, and the verified `integratedCommit`. Save and adoption require proof for both commits against the current project integration target. If the target changes, reverify the affected jobs before using them as prerequisites or retaining them in a replacement plan. Overlapping package paths require explicit dependency ordering.
 
 Each saved revision returns its previous revision and package changes. Edit scope, risk, security requirements, or ownership by submitting a new draft revision, then obtain the policy-required approval for that revision. Existing unversioned plans remain readable and can be converted by filling in the contract fields and saving as version 1. Historical records are retained. Adopted version 1 contracts require a separately reviewed replacement plan for contract changes.
+
+A reviewed replacement can retire untouched queued packages, eligible cancelled packages, packages blocked on scope or quality, and packages with a supported execution failure that exhausted the recorded review cycles. Settle provider and goal budget holds before adoption. Jobs awaiting reconciliation for uncertain Git effects require a reviewed scheduling resource release before replacement. Retained integrated packages keep their original contracts and require current integration verification.
 
 ## Shared scheduling resources
 

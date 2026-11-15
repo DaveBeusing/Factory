@@ -36,7 +36,7 @@ Arrows indicate conceptual flow, not separate network services or guaranteed tru
 | CLI and commands | [`Program.cs`](../src/Factory/Program.cs) | Command parsing and orchestration entry points |
 | Dashboard and scoped APIs | [`Dashboard.cs`](../src/Factory/Dashboard.cs), [`ProjectViewerEndpoint.cs`](../src/Factory/ProjectViewerEndpoint.cs) | Authenticated HTTP, embedded UI and project routes |
 | Frontend | [`src/Factory/ui/`](../src/Factory/ui/index.html) | Navigation, rendering, forms and live connection state |
-| Domain and persistence | [`Models.cs`](../src/Factory/Models.cs), [`StateStore.cs`](../src/Factory/StateStore.cs) | Jobs, goals, budgets, relational SQLite schema 25 |
+| Domain and persistence | [`Models.cs`](../src/Factory/Models.cs), [`StateStore.cs`](../src/Factory/StateStore.cs) | Jobs, goals, budgets, relational SQLite schema 26 |
 | Planning | [`GoalsAndPlanning.cs`](../src/Factory/GoalsAndPlanning.cs), [`WorkPackagePreflight.cs`](../src/Factory/WorkPackagePreflight.cs) | Goal proposals, master-first checks and policy-controlled revision adoption |
 | Scheduling | [`Scheduler.cs`](../src/Factory/Scheduler.cs), [`FactoryEngine.cs`](../src/Factory/FactoryEngine.cs) | Eligibility, budgets, capacity and fenced execution |
 | Quality / Git | [`Quality.cs`](../src/Factory/Quality.cs), [`GitOperations.cs`](../src/Factory/GitOperations.cs) | Checks, independent review, worktrees and scope |
@@ -63,7 +63,7 @@ See [preflight](planning-preflight.md), [quality](quality.md) and [recovery](rec
 | Capability | Current state | Boundary or next proof |
 | --- | --- | --- |
 | Native runtime | .NET 10; validated Windows x64 packaging | No blanket Linux/macOS support claim |
-| Persistence | Relational SQLite schema 25, transactional upgrade code | Real-world backups, multi-writer and rollback verification |
+| Persistence | Relational SQLite schema 26, transactional upgrade code | Real-world backups, multi-writer and rollback verification |
 | Provider adapters | Codex writes; Claude Code and Ollama for read-only roles | No automatic interchangeability or general model capability negotiation |
 | Operator access | Administrative and project-scoped human credentials/grants | Not a complete organizational identity/RBAC stack |
 | Worker access | Worker-specific tokens, project grants and controller-reviewed capability evidence | Attestation is not a cryptographic OS measurement |

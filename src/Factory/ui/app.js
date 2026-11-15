@@ -47,7 +47,11 @@ async function api(path,method='GET',body){
  const res=await fetch('/api/'+path,{method,headers:{'Authorization':'Bearer '+token,...(body!==undefined?{'Content-Type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body),cache:'no-store',signal});
  let result=null;
  if(res.status!==204&&res.status!==202){
-  if(res.ok)result=await res.json();
+  if(res.ok){
+   const payload=await res.text();
+   const contentType=res.headers.get('content-type')||'';
+   if(payload||/[/+]json(?:;|$)/i.test(contentType))result=JSON.parse(payload);
+  }
   else try{result=await res.json()}catch{}
  }
  signal.throwIfAborted();
@@ -110,6 +114,7 @@ async function refreshState(){
 async function refreshUsage(){if(!token||projectAccess())return;const revision=connectionRevision;try{const u=await api('usage');usage=(!Number.isFinite(u?.weekly?.usedPercent)&&!Number.isFinite(u?.shortWindow?.usedPercent))?null:{...u,weekly:Number.isFinite(u?.weekly?.usedPercent)&&Number.isFinite(u?.weekly?.remainingPercent)?u.weekly:null,shortWindow:Number.isFinite(u?.shortWindow?.usedPercent)&&Number.isFinite(u?.shortWindow?.remainingPercent)?u.shortWindow:null}}catch{if(revision!==connectionRevision)return;usage=null}condition('#usage-nav',!!usage||!!providerData);if(view==='usage'&&!usage&&!providerData)nav('overview');else render();refreshInspectorProviderCapacity()}
 async function connect(nextToken){
  const revision=++connectionRevision;
+ if(doctor?.loading)doctor=null;
  const credentialChanged=nextToken!==undefined&&nextToken!==token;
  if(nextToken!==undefined){
   if(nextToken!==token){
@@ -169,6 +174,7 @@ async function connect(nextToken){
  }
  $('connection-modal').close();
  startStream();refreshUsage();fetchSettings();fetchManagedWorkers();fetchProviders();
+ if(view==='settings'&&!doctor)loadDoctor();
 }
 async function fetchSettings(){try{settings=await api('settings')}catch{}}
 async function fetchProviders(){const revision=connectionRevision;try{providerData=await api('providers')}catch{if(revision!==connectionRevision)return;providerData=null}condition('#usage-nav',!!usage||!!providerData);render();refreshInspectorProviderCapacity()}
@@ -580,7 +586,7 @@ function renderDoctor(){
  return card('Factory doctor','Controller tools and local state',content,null,
   `<button class="button button-muted" data-act="doctor-refresh" ${doctor?.loading?'disabled':''}>${ico('refresh')} Refresh</button>`);
 }
-function renderSettings(){return header('Settings & policies','Review and configure execution limits and publication guardrails.')+`<div class="content-grid">${card('Runtime policy','Changes are stored in ~/.factory/settings.json',`<div class="job-info-grid">${[['Global concurrency',settings.maxParallel],['Agent sessions',settings.maxAgentSessions],['Review rounds',settings.maxReviewRounds],['Lease seconds',settings.leaseSeconds],['Push enabled',settings.allowPush?'Yes':'No'],['Auto-merge',settings.autoMerge?'Yes':'No']].map(([a,b])=>`<div class="kv"><small>${esc(a)}</small><strong>${esc(b)}</strong></div>`).join('')}</div><button class="button button-muted settings-edit-button" data-act="edit-settings">${ico('edit')} Edit configuration</button>`)}${card('Operational safety','Safeguards for reliable execution',`<div class="list-stack">${[['shield','Human-controlled integration','Merging and publishing remain permission-gated'],['route','Dependency-aware execution','Jobs do not start before integrated dependencies'],['activity','Event history','Actions are recorded in persistent state'],['cpu','Worker isolation','Separate Git worktrees; not OS sandboxes']].map(([i,t,d])=>`<div class="list-item"><span class="list-icon">${ico(i)}</span><div class="list-text"><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div>`)}</div><div class="doctor-panel">${renderDoctor()}</div>`}
+function renderSettings(){return header('Settings & policies','Review and configure execution limits and publication guardrails.')+`<div class="content-grid">${card('Runtime policy','Changes are stored in ~/.factory/settings.json',`<div class="job-info-grid">${[['Global concurrency',settings.maxParallel],['Agent sessions',settings.maxAgentSessions],['Review rounds',settings.maxReviewRounds],['Lease seconds',settings.leaseSeconds],['Push enabled',settings.allowPush?'Yes':'No'],['Hosted merge verification',settings.autoMerge?'Yes':'No']].map(([a,b])=>`<div class="kv"><small>${esc(a)}</small><strong>${esc(b)}</strong></div>`).join('')}</div><button class="button button-muted settings-edit-button" data-act="edit-settings">${ico('edit')} Edit configuration</button>`)}${card('Operational safety','Safeguards for reliable execution',`<div class="list-stack">${[['shield','Human-controlled integration','Merging and publishing remain permission-gated'],['route','Dependency-aware execution','Jobs do not start before integrated dependencies'],['activity','Event history','Actions are recorded in persistent state'],['cpu','Worker isolation','Separate Git worktrees; not OS sandboxes']].map(([i,t,d])=>`<div class="list-item"><span class="list-icon">${ico(i)}</span><div class="list-text"><strong>${t}</strong><small>${d}</small></div></div>`).join('')}</div>`)}</div><div class="doctor-panel">${renderDoctor()}</div>`}
 
 function recoveryCandidates(){
  const held=new Set((state.budgetReservations||[]).filter(r=>r.state==='held').map(r=>r.jobId));
@@ -1122,15 +1128,13 @@ function formSettings(){
    ${field('goalExtensionThresholdTokens','Low-water threshold (tokens)',settings.goalExtensionThresholdTokens,'number')}
    ${field('maxJobReservationTokens','Maximum per-job allocation (tokens)',settings.maxJobReservationTokens,'number')}
    </div><p class="subtext">Controller-approved goal reservations, not provider account allowances.</p>`;
- html+=field('allowPush','Allow remote pushes',settings.allowPush,'checkbox')+
-  field('autoMerge','Allow automatic merging',settings.autoMerge,'checkbox');
+ html+=field('allowPush','Allow remote pushes',settings.allowPush,'checkbox');
  openForm('Execution settings','Changes affect future scheduling. Push and merge remain sensitive actions.',
   html,async f=>{
    const x=values(f);
    const body={maxParallel:Number(x.maxParallel),maxAgentSessions:Number(x.maxAgentSessions),
     maxReviewRounds:Number(x.maxReviewRounds),leaseSeconds:Number(x.leaseSeconds),
-    pollSeconds:Number(x.pollSeconds),allowPush:f.elements.allowPush.checked,
-    autoMerge:f.elements.autoMerge.checked};
+    pollSeconds:Number(x.pollSeconds),allowPush:f.elements.allowPush.checked};
    for(const key of ['goalReservationTokens','goalExtensionIncrementTokens',
     'goalExtensionThresholdTokens','maxJobReservationTokens'])
     if(Object.hasOwn(x,key)){
@@ -1141,8 +1145,8 @@ function formSettings(){
    if(body.maxJobReservationTokens!==undefined && body.goalReservationTokens!==undefined &&
       body.maxJobReservationTokens<body.goalReservationTokens)
     throw Error('Per-job allocation limit must be at least the initial reservation');
-   if((body.allowPush&&!settings.allowPush)||(body.autoMerge&&!settings.autoMerge)){
-    if(!confirm('Enable publishing or automatic merging? Ensure repository policies and approvals are configured.'))return;
+   if(body.allowPush&&!settings.allowPush){
+    if(!confirm('Enable publishing? Ensure repository policies and approvals are configured.'))return;
    }
    await mutate('settings','PUT',body);
    await fetchSettings();

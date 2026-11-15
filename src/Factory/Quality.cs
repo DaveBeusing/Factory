@@ -230,7 +230,9 @@ public sealed class QualityEngine
                 report.Reviews[role] = verdict + "\n" + message;
                 report.ReviewRecords.Add(new(role, report.HeadSha, ReviewPolicy.Revision, adapter, session, "read-only", verdict, "UNKNOWN")
                     {
-                        BaseCommit = report.BaseCommit, PatchSha256 = report.PatchSha256, RolePolicyRevision = roleRevision,
+                        BaseCommit = UsesRemotePolicyEvidence ? "" : report.BaseCommit,
+                        PatchSha256 = UsesRemotePolicyEvidence ? "" : report.PatchSha256,
+                        RolePolicyRevision = roleRevision,
                         RequestedModel = requestedModel, ObservedModels = observedModels
                     });
                 if (verdict != "PASS")

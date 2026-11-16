@@ -149,6 +149,42 @@ browserTest('clones into explicit and Factory-managed destinations', async ({ ho
   } };
 });
 
+browserTest('keeps keyboard focus in Mission Control overlays and restores it by layer', async ({ page, nav, form, home, api }) => {
+  await api('projects', { method: 'POST', data: { name: 'Keyboard project', source: 'new', path: path.join(home, 'keyboard') } });
+  await nav.getByRole('button', { name: 'Projects' }).click();
+  const inspect = page.getByRole('button', { name: 'Inspect', exact: true });
+  await inspect.press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'Keyboard project' });
+  const close = dialog.getByRole('button', { name: 'Close inspector' });
+  const configure = dialog.getByRole('button', { name: 'Configure', exact: true });
+  assert.ok(await close.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Tab');
+  assert.ok(await configure.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Enter');
+  await page.getByRole('dialog', { name: 'Configure project' }).waitFor();
+  await page.keyboard.press('Escape');
+  await form.waitFor({ state: 'hidden' });
+  assert.ok(await configure.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'hidden' });
+  assert.ok(await inspect.evaluate(el => el === document.activeElement));
+
+  await page.setViewportSize({ width: 390, height: 800 });
+  const openNavigation = page.getByRole('button', { name: 'Open navigation' });
+  await openNavigation.press('Enter');
+  const drawer = page.getByRole('dialog', { name: 'Navigation' });
+  const first = drawer.getByRole('button', { name: /Connection settings/ });
+  const last = drawer.getByRole('button', { name: 'Settings', exact: true });
+  await first.focus();
+  await page.keyboard.press('Shift+Tab');
+  assert.ok(await last.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Tab');
+  assert.ok(await first.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Escape');
+  await drawer.waitFor({ state: 'hidden' });
+  assert.ok(await openNavigation.evaluate(el => el === document.activeElement));
+});
+
 browserTest('project quality presets, modal notifications and Factory doctor', async ({ page, nav, form, home }) => {
   const track = page.locator('.overview-allowance .progress-track');
   const fill = track.locator('.progress-fill');
@@ -470,6 +506,7 @@ browserTest('creates a goal from project findings and rejects adoption of a stal
   await form.getByLabel('Acceptance checks (criterion | check name)').fill('Verify the fixture | fixture');
   await form.getByRole('button', { name: 'Save changes' }).click();
   await form.waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => document.querySelector('#inspector-dialog').contains(document.activeElement));
   await inspector.getByRole('button', { name: 'Save plan' }).click();
   const adopt = inspector.getByRole('button', { name: 'Adopt reviewed plan' });
   await adopt.waitFor();

@@ -751,6 +751,8 @@ await TestAsync("Claude CLI uses independent read-only turns and persists report
     }
 });
 
+await TestAsync("Project advisory uses an immutable source snapshot and cleans it up", ProjectAdvisorySnapshotTests.RunAsync);
+
 Test("Project review yields commit-bound findings and draft goals", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-project-review-" + Guid.NewGuid().ToString("N"));

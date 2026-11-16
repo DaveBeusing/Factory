@@ -13,6 +13,14 @@ if (args is ["--measure-queue-load"])
     return 0;
 }
 
+if (args is ["--verify-protected-check-source"])
+{
+    ProtectedQualityChecksTests.VerifyPolicy();
+    await ProtectedQualityChecksTests.VerifyArchiveAsync();
+    Console.WriteLine("PASS protected-check policy and committed archive");
+    return 0;
+}
+
 if (args is ["--verify-protected-checks", var checkImageId])
 {
     await ProtectedQualityChecksTests.VerifyDockerAsync(checkImageId);

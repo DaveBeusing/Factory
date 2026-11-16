@@ -61,7 +61,7 @@ internal static class ProtectedQualityChecksTests
                 "-c", "commit.gpgsign=false", "commit", "-m", "Add test gitlink");
             await Reject("submodules");
         }
-        finally { repo.Delete(recursive: true); }
+        finally { DeleteFixture(repo); }
 
         string Git(params string[] args) => Commands.Require(Commands.Run("git", args, repo.FullName), "Fixture Git");
         void Commit()
@@ -122,10 +122,21 @@ internal static class ProtectedQualityChecksTests
         finally
         {
             Environment.SetEnvironmentVariable(envKey, previous);
-            working.Delete(recursive: true);
+            DeleteFixture(working);
         }
 
         string Git(params string[] args) => Commands.Require(Commands.Run("git", args, repo.FullName), "Fixture Git");
+    }
+
+    private static void DeleteFixture(DirectoryInfo directory)
+    {
+        // Git for Windows marks newly written loose objects read-only.
+        if (OperatingSystem.IsWindows())
+        {
+            foreach (var file in directory.EnumerateFiles("*", SearchOption.AllDirectories))
+                if (file.IsReadOnly) file.IsReadOnly = false;
+        }
+        directory.Delete(recursive: true);
     }
 
     private static void Require(bool condition, string message)

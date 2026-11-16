@@ -5,15 +5,32 @@ namespace Factory;
 
 public sealed record CommandResult(int Code, string Output, string Error)
 {
-    public bool Ok => Code == 0;
+    public bool OutputTruncated { get; init; }
+    public bool ErrorTruncated { get; init; }
+    internal bool CallbackLineTruncated { get; init; }
+    public bool Ok => Code == 0 && !OutputTruncated;
 }
 
 public static class Commands
 {
-    public static async Task<CommandResult> RunAsync(string executable, IEnumerable<string> arguments,
+    private const int MaxCaptureChars = 2_000_000;
+
+    public static Task<CommandResult> RunAsync(string executable, IEnumerable<string> arguments,
         string workingDirectory, int timeoutSeconds = 120, string? stdin = null,
         Action<string>? lineCallback = null, CancellationToken cancellationToken = default,
         Action<ProcessStartInfo>? configure = null)
+        => RunCoreAsync(executable, arguments, workingDirectory, timeoutSeconds, stdin, lineCallback,
+            cancellationToken, configure, MaxCaptureChars, false);
+
+    internal static Task<CommandResult> RunForDiagnosticsAsync(string executable, IEnumerable<string> arguments,
+        string workingDirectory, int timeoutSeconds, CancellationToken cancellationToken,
+        Action<ProcessStartInfo>? configure = null)
+        => RunCoreAsync(executable, arguments, workingDirectory, timeoutSeconds, null, null,
+            cancellationToken, configure, 4_000, true);
+
+    private static async Task<CommandResult> RunCoreAsync(string executable, IEnumerable<string> arguments,
+        string workingDirectory, int timeoutSeconds, string? stdin, Action<string>? lineCallback,
+        CancellationToken cancellationToken, Action<ProcessStartInfo>? configure, int captureLimit, bool keepTail)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, timeoutSeconds)));
@@ -21,19 +38,8 @@ public static class Commands
         proc.StartInfo = StartInfo(executable, arguments, workingDirectory);
         configure?.Invoke(proc.StartInfo);
         proc.Start();
-        var output = new StringBuilder();
-        var error = new StringBuilder();
-        async Task DrainAsync(StreamReader reader, StringBuilder into, bool notify)
-        {
-            string? line;
-            while ((line = await reader.ReadLineAsync(timeout.Token)) != null)
-            {
-                if (into.Length < 2_000_000) into.AppendLine(line);
-                if (notify) lineCallback?.Invoke(line);
-            }
-        }
-        var stdout = DrainAsync(proc.StandardOutput, output, true);
-        var stderr = DrainAsync(proc.StandardError, error, false);
+        var stdout = DrainAsync(proc.StandardOutput, captureLimit, keepTail, lineCallback, timeout.Token);
+        var stderr = DrainAsync(proc.StandardError, captureLimit, keepTail, null, timeout.Token);
         try
         {
             IOException? inputError = null;
@@ -59,7 +65,77 @@ public static class Commands
                 throw new TimeoutException($"Command exceeded its {Math.Max(1, timeoutSeconds)} second timeout.", ex);
             throw;
         }
-        return new CommandResult(proc.ExitCode, output.ToString(), error.ToString());
+        return new CommandResult(proc.ExitCode, stdout.Result.Text, stderr.Result.Text)
+        {
+            OutputTruncated = stdout.Result.Truncated,
+            ErrorTruncated = stderr.Result.Truncated,
+            CallbackLineTruncated = stdout.Result.OversizeLine
+        };
+    }
+
+    private static async Task<(string Text, bool Truncated, bool OversizeLine)> DrainAsync(StreamReader reader,
+        int limit, bool keepTail, Action<string>? callback, CancellationToken ct)
+    {
+        var buffer = new char[8192];
+        var capture = new StringBuilder();
+        var pending = callback is null ? null : new StringBuilder();
+        var truncated = false;
+        var oversizeLine = false;
+        var skipRecord = false;
+        var previousCr = false;
+        var pendingNewline = false;
+
+        void Capture(ReadOnlySpan<char> text)
+        {
+            var overflow = capture.Length + text.Length - limit;
+            if (overflow > 0) truncated = true;
+            if (overflow > 0 && keepTail)
+            {
+                var discard = Math.Min(overflow, capture.Length);
+                capture.Remove(0, discard);
+                text = text[(overflow - discard)..];
+            }
+            capture.Append(text[..Math.Min(text.Length, limit - capture.Length)]);
+        }
+
+        void AddLinePart(ReadOnlySpan<char> text)
+        {
+            if (text.IsEmpty) return;
+            Capture(text);
+            pendingNewline = true;
+            if (pending is null || skipRecord) return;
+            if (text.Length <= MaxCaptureChars - pending.Length) pending.Append(text);
+            else { skipRecord = true; oversizeLine = true; pending.Clear(); }
+        }
+
+        void EndLine()
+        {
+            Capture(Environment.NewLine);
+            if (pending is not null && !skipRecord) callback!(pending.ToString());
+            pending?.Clear();
+            skipRecord = false;
+            pendingNewline = false;
+        }
+
+        int length;
+        while ((length = await reader.ReadAsync(buffer.AsMemory(), ct)) != 0)
+        {
+            var start = 0;
+            for (var i = 0; i < length; i++)
+            {
+                var ch = buffer[i];
+                if (ch is '\r' or '\n')
+                {
+                    AddLinePart(buffer.AsSpan(start, i - start));
+                    if (ch == '\r' || !previousCr) EndLine();
+                    start = i + 1;
+                }
+                previousCr = ch == '\r';
+            }
+            AddLinePart(buffer.AsSpan(start, length - start));
+        }
+        if (pendingNewline) EndLine();
+        return (capture.ToString(), truncated, oversizeLine);
     }
     // Resolve the native CLI once for all Factory code paths (usage, planning,
     // builds, and reviews). ProcessStartInfo with UseShellExecute=false cannot
@@ -125,6 +201,8 @@ public static class Commands
         => RunAsync(file, args, cwd, timeout).GetAwaiter().GetResult();
     public static string Require(CommandResult result, string command)
     {
+        if (result.Code == 0 && result.OutputTruncated)
+            throw new InvalidOperationException($"{command} produced incomplete output (capture limit reached)");
         if (!result.Ok) throw new InvalidOperationException($"{command} failed: {result.Error.Trim()}");
         return result.Output.Trim();
     }

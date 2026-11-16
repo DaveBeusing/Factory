@@ -93,6 +93,7 @@ browserTest('creates a local project and can leave guided setup with a draft goa
   await source.selectOption('new');
   assert.equal(await form.getByLabel('Remote repository URL').isVisible(), false);
   await form.getByLabel('Project name').fill('Guided project');
+  await form.getByLabel('Quality check execution').selectOption('protected-container');
   await form.getByLabel('Destination folder').fill(repo);
   await guideOption.check();
   await form.getByRole('button', { name: 'Register project', exact: true }).click();
@@ -100,6 +101,7 @@ browserTest('creates a local project and can leave guided setup with a draft goa
   const setup = page.getByRole('region', { name: 'Project setup guide' });
   await setup.getByText('Configure quality checks before running jobs.').waitFor();
   await setup.getByRole('button', { name: 'Configure quality checks' }).click();
+  assert.equal(await form.getByLabel('Quality check execution').inputValue(), 'protected-container');
   await form.getByLabel('Quality checks (JSON array)').waitFor();
   await form.getByRole('button', { name: 'Cancel' }).click();
   await setup.getByRole('button', { name: 'Review project' }).click();
@@ -118,6 +120,7 @@ browserTest('creates a local project and can leave guided setup with a draft goa
   assert.equal(state.projects.length, 1);
   assert.equal(state.goals.length, 1);
   assert.equal(state.goals[0].projectId, state.projects[0].id);
+  assert.equal(state.projects[0].checkExecutionPolicy, 'protected-container');
   assert.equal(state.goals[0].state, 'draft');
   assert.equal(state.jobs.length, 0);
   assert.equal(execFileSync('git', ['branch', '--show-current'], { cwd: repo, encoding: 'utf8' }).trim(), 'master');

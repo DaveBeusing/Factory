@@ -54,8 +54,13 @@ public static class ProjectReviewer
             : null;
     }
 
-    public static async Task<ProjectReviewSnapshot> AnalyzeAsync(StateStore store, Guid projectId,
-        CancellationToken ct, FactorySettings? settings = null)
+    public static Task<ProjectReviewSnapshot> AnalyzeAsync(StateStore store, Guid projectId,
+        CancellationToken ct, FactorySettings? settings = null) =>
+        AnalyzeAsync(store, projectId, ct, settings, null);
+
+    internal static async Task<ProjectReviewSnapshot> AnalyzeAsync(StateStore store, Guid projectId,
+        CancellationToken ct, FactorySettings? settings,
+        Func<ProviderProfile, string, IAgentRuntime, IAgentRuntime>? decorate)
     {
         var gate = Locks.GetOrAdd(projectId, _ => new SemaphoreSlim(1, 1));
         await gate.WaitAsync(ct);
@@ -68,23 +73,20 @@ public static class ProjectReviewer
                 j.State is JobStates.Blocked or JobStates.Failed);
             var (review, index) = Inspect(project, project.Checks.Count != 0, blockedCount, ct);
             var commit = review.Commit;
-            var root = project.Path;
             if (settings != null && state.ProviderAssignments.Any(x =>
                 x.ProjectId == projectId && x.Role == "analysis"))
             {
-                if (GitOperations.Head(root) != commit ||
-                    !string.IsNullOrWhiteSpace(GitOperations.Git(root, "status", "--porcelain")))
-                    throw new InvalidOperationException("Provider advisory requires a clean checkout at master");
-                var choice = ProviderRouter.Select(settings, state, projectId, "analysis", "medium");
+                var choice = ProviderRouter.Select(settings, state, projectId, "analysis", "medium", decorate);
                 var profile = ProviderRouter.Resolve(settings, state, projectId, "analysis");
                 var runtime = new ProjectScopedAgentRuntime(choice.Runtime, store, projectId, null,
                     profile, "analysis", choice.Model, settings.GoalReservationTokens);
                 var boundedIndex = Json.Stringify(index.Take(80));
                 if (boundedIndex.Length > 24000) boundedIndex = boundedIndex[..24000];
                 var policy = AgentPolicies.For("analysis");
-                var prompt = policy.Render("Provide advisory observations based on the bounded repository evidence.",
+                var prompt = policy.Render("Provide advisory observations based on the bounded repository evidence. " +
+                    "Use the provided committed checkout as the source for file inspection.",
                     new { Commit = commit, RepositoryIndex = boundedIndex, review.Findings });
-                var response = await runtime.RunAsync(project.Path, prompt, "", ct, readOnly: policy.ReadOnly);
+                var response = await RunAdvisoryAsync(project.Path, commit, runtime, prompt, policy.ReadOnly, ct);
                 if (!response.Success) throw new InvalidOperationException("Project analysis provider failed: " + response.Error);
                 review.Advisory = response.FinalText[..Math.Min(12000, response.FinalText.Length)];
                 review.AdvisoryProvider = choice.Id;
@@ -107,6 +109,48 @@ public static class ProjectReviewer
             return review;
         }
         finally { gate.Release(); }
+    }
+
+    private static async Task<AgentRunResult> RunAdvisoryAsync(string root, string commit,
+        IAgentRuntime runtime, string prompt, bool readOnly, CancellationToken ct)
+    {
+        var temporary = Directory.CreateTempSubdirectory("factory-project-review-");
+        var snapshot = Path.Combine(temporary.FullName, "source");
+        var created = false;
+        try
+        {
+            // Keep worktree creation from invoking the registering repository's post-checkout hook.
+            var hooks = Path.Combine(temporary.FullName, "disabled-hooks");
+            var checkout = await Commands.RunAsync("git",
+                ["-c", "core.hooksPath=" + hooks, "worktree", "add", "--detach", "--", snapshot, commit],
+                root, cancellationToken: ct);
+            Commands.Require(checkout, "Prepare committed project review source");
+            created = true;
+            await RequireSnapshotAsync();
+            var result = await runtime.RunAsync(snapshot, prompt, "", ct, readOnly: readOnly);
+            await RequireSnapshotAsync();
+            return result;
+        }
+        finally
+        {
+            // Cleanup must run even when the advisory request was cancelled.
+            var remove = await Commands.RunAsync("git", ["worktree", "remove", "--force", "--", snapshot],
+                root, timeoutSeconds: 30);
+            if (created || Directory.Exists(snapshot))
+                Commands.Require(remove, "Remove project review source at " + snapshot);
+            temporary.Delete();
+        }
+
+        async Task RequireSnapshotAsync()
+        {
+            var status = await Commands.RunAsync("git",
+                ["status", "--porcelain=v2", "--branch", "--ignore-submodules=none", "--untracked-files=all",
+                    "--ignored=matching"], snapshot, cancellationToken: ct);
+            var lines = status.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (!status.Ok || lines.Length != 2 || lines[0] != "# branch.oid " + commit ||
+                lines[1] != "# branch.head (detached)")
+                throw new InvalidOperationException("Committed project review source changed or became unavailable");
+        }
     }
 
     internal static (ProjectReviewSnapshot Review, string[] Index) Inspect(ProjectInfo project, bool hasChecks,

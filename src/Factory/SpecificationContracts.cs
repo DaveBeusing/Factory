@@ -9,7 +9,10 @@ internal static class SpecificationContracts
 {
     internal static string ProjectRevision(ProjectInfo project) =>
         Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
-            Json.Stringify(new { project.Checks, project.ProtectedPaths, project.RequiredExecutionCapabilities }))));
+            project.CheckExecutionPolicy == QualityCheckPolicy.TrustedHost
+                ? Json.Stringify(new { project.Checks, project.ProtectedPaths, project.RequiredExecutionCapabilities })
+                : Json.Stringify(new { project.Checks, project.ProtectedPaths, project.RequiredExecutionCapabilities,
+                    project.CheckExecutionPolicy }))));
 
     internal static bool IsSuperseded(FactoryJob job) =>
         job.State == JobStates.Cancelled && job.Stage == "specification_superseded";

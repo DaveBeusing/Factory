@@ -108,3 +108,19 @@ jobs:
       - name: Validate Windows package installation, upgrade and restore
         shell: pwsh
         run: dotnet ./tests/Factory.Tests/bin/Release/net10.0/Factory.Tests.dll --verify-windows-package ./dist
+
+  protected-quality-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Verify isolation with a synthetic credential fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull busybox:1.37.0
+          image_id="$(docker image inspect --format '{{.Id}}' busybox:1.37.0)"
+          dotnet run --project tests/Factory.Tests/Factory.Tests.csproj -c Release -- --verify-protected-checks "$image_id"

@@ -69,12 +69,13 @@ public static class WorkerProtocol
         JobRecovery.QuarantineExpired(store, JobExecutionModes.Remote);
         return store.Change((s, db, tx) =>
         {
-            if (s.Paused || !settings.AllowPush) return null;
+            var runtimeSettings = settings.RuntimeRevision;
+            if (s.Paused || !runtimeSettings.AllowPush) return null;
            var registered = s.Workers.FirstOrDefault(w => w.Id == workerId);
            // Worker credentials can only be used with a registered, enabled identity.
             if (registered is null || !registered.Enabled || registered.Draining) return null;
             // Apply the same mode, dependency, budget, capacity and conflict gates as local runners.
-            var selected = JobScheduler.Select(s, settings.MaxParallel, JobExecutionModes.Remote,
+            var selected = JobScheduler.Select(s, runtimeSettings.MaxParallel, JobExecutionModes.Remote,
                 job =>
                 {
                     var project = s.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
@@ -82,17 +83,17 @@ public static class WorkerProtocol
                     if (project is null || string.IsNullOrWhiteSpace(project.Origin) ||
                         !WorkerAuthorization.CanExecute(s, registered, project, job, settings)) return false;
                     return RemoteProviderRouting.Required(project, job)
-                        ? protocolVersion == RemoteProviderRouting.ProtocolVersion && RemoteProviderRouting.Plan(s, settings, job) is not null
+                        ? protocolVersion == RemoteProviderRouting.ProtocolVersion && RemoteProviderRouting.Plan(s, settings, job, runtimeSettings) is not null
                         : !s.ProviderAssignments.Any(a => a.ProjectId == project.Id) &&
                           !s.ProviderBudgetLimits.Any(b => b.ProjectId == project.Id) &&
                           !settings.Providers.Any(p => p.TokenLimit > 0);
                 },
-                reservationTokens: settings.GoalReservationTokens);
+                reservationTokens: runtimeSettings.GoalReservationTokens);
             foreach (var job in selected)
             {
                 var project = s.Projects.Single(p => p.Id == job.ProjectId);
                 if (job.GoalId is not null &&
-                    GoalBudgetLedger.Allocation(s, job, settings.GoalReservationTokens) == 0)
+                    GoalBudgetLedger.Allocation(s, job, runtimeSettings.GoalReservationTokens) == 0)
                     continue;
                 var requiresProviderLease = RemoteProviderRouting.Required(project, job);
                 if (StateStore.ReviewCyclesUsed(db, tx, job.Id) >= Math.Clamp(job.MaxRounds, 1, ReviewPolicy.MaxCycles))
@@ -100,10 +101,10 @@ public static class WorkerProtocol
                     StateStore.BlockExhaustedReviews(db, tx, job, s);
                     continue;
                 }
-                var routes = requiresProviderLease ? RemoteProviderRouting.Plan(s, settings, job) : null;
+                var routes = requiresProviderLease ? RemoteProviderRouting.Plan(s, settings, job, runtimeSettings) : null;
                 if (requiresProviderLease && routes is null) continue;
-                JobRecovery.Assign(job, "remote:" + workerId, settings.LeaseSeconds, local: false,
-                    state: s, reservationTokens: settings.GoalReservationTokens);
+                JobRecovery.Assign(job, "remote:" + workerId, runtimeSettings.LeaseSeconds, local: false,
+                    state: s, reservationTokens: runtimeSettings.GoalReservationTokens);
                 StateStore.RecordExecutionProvenance(db, tx, project, job,
                     routes?.Single(route => route.Role == "builder").Runtime ?? settings.Runtime,
                     s.WorkerCapabilityProofs.Where(proof => proof.WorkerId == workerId &&
@@ -118,7 +119,7 @@ public static class WorkerProtocol
                     {
                         JobId = job.Id, ExecutionGeneration = job.ExecutionGeneration, WorkerId = workerId,
                         ExecutorUrl = settings.RemoteProviderExecutorUrl, TurnTokens = settings.RemoteProviderTurnTokens,
-                        MaxJobTokens = settings.MaxJobReservationTokens,
+                        MaxJobTokens = runtimeSettings.MaxJobReservationTokens,
                         RouteJson = Json.Stringify(routes)
                     };
                     s.RemoteProviderLeases.Add(providerLease);
@@ -149,13 +150,13 @@ public static class WorkerProtocol
                     {
                     Runtime = routes?.Single(route => route.Role == "builder").Runtime ?? settings.Runtime, Model = settings.Model,
                         MaxReviewRounds = 1, AllowPush = true,
-                        LeaseSeconds = settings.LeaseSeconds, MaxParallel = 1,
+                        LeaseSeconds = runtimeSettings.LeaseSeconds, MaxParallel = 1,
                         GoalReservationTokens = job.GoalId is null
-                            ? settings.GoalReservationTokens
+                            ? runtimeSettings.GoalReservationTokens
                             : checked((int)Math.Min(int.MaxValue, GoalBudgetLedger.Current(s, job).Reserved)),
-                        GoalExtensionIncrementTokens = settings.GoalExtensionIncrementTokens,
-                        GoalExtensionThresholdTokens = settings.GoalExtensionThresholdTokens,
-                        MaxJobReservationTokens = settings.MaxJobReservationTokens
+                        GoalExtensionIncrementTokens = runtimeSettings.GoalExtensionIncrementTokens,
+                        GoalExtensionThresholdTokens = runtimeSettings.GoalExtensionThresholdTokens,
+                        MaxJobReservationTokens = runtimeSettings.MaxJobReservationTokens
                     }
                 };
            }
@@ -172,6 +173,7 @@ public static class WorkerProtocol
             return null;
         return store.Change(state =>
         {
+            var runtimeSettings = settings.RuntimeRevision;
             var worker = state.Workers.FirstOrDefault(w => w.Id == request.WorkerId);
             var job = state.Jobs.FirstOrDefault(j => j.Id == request.JobId);
             var project = job is null ? null : state.Projects.FirstOrDefault(p => p.Id == job.ProjectId);
@@ -183,11 +185,11 @@ public static class WorkerProtocol
                 job.Mode != JobExecutionModes.Remote || job.GoalId is null)
                 return null;
             var providerLease = RemoteProviderRouting.Current(state, job);
-            if (providerLease is not null && !RemoteProviderRouting.CanContinue(state, settings, job, providerLease))
+            if (providerLease is not null && !RemoteProviderRouting.CanContinue(state, settings, job, providerLease, runtimeSettings))
                 return null;
             var extension = GoalBudgetLedger.ExtendRemote(state, job, fence,
-                request.RequestId, request.RequestedTokens, settings.GoalExtensionIncrementTokens,
-                settings.MaxJobReservationTokens);
+                request.RequestId, request.RequestedTokens, runtimeSettings.GoalExtensionIncrementTokens,
+                runtimeSettings.MaxJobReservationTokens);
             return new WorkerBudgetExtensionGrant
             {
                 RequestId = request.RequestId, Granted = extension.Granted,

@@ -1008,7 +1008,7 @@ else control=`<input name="${key}" id="field-${key}" type="${type}" value="${esc
 return type==='checkbox'?control:`<div class="field"><div class="field-heading"><label for="field-${key}">${esc(label)}</label>${action}</div>${control}${hint?`<small>${esc(hint)}</small>`:''}</div>`};
 const projectOptions=()=>state.projects.filter(p=>p.status!=='archived').map(p=>[p.id,p.name]);
 const goalOptions=()=>[['','No linked goal'],...state.goals.filter(g=>g.state==='active').map(g=>[g.id,shorten(g.objective,70)])];
-function openForm(title,subtitle,html,handler,submit='Save changes'){$('modal-title').textContent=title;$('modal-subtitle').textContent=subtitle;$('modal-fields').innerHTML=html;$('modal-submit').textContent=submit;modalHandler=handler;if(!$('form-modal').open)$('form-modal').showModal();}
+function openForm(title,subtitle,html,handler,submit='Save changes'){$('modal-title').textContent=title;$('modal-subtitle').textContent=subtitle;$('modal-fields').innerHTML=html;$('modal-submit').textContent=submit;$('modal-submit').disabled=false;modalHandler=handler;if(!$('form-modal').open)$('form-modal').showModal();}
 function values(form){return Object.fromEntries([...new FormData(form).entries()].map(([k,v])=>[k,v.toString()]))}
 const lines=s=>String(s||'').split(/\r?\n|;/).map(x=>x.trim()).filter(Boolean);
 const checksJson=x=>JSON.stringify(x||[],null,2);
@@ -1061,8 +1061,10 @@ function renderProjectSetup(){
  const reviewed=projectReview?.projectId===project.id;
  return `<section class="project-setup card" aria-label="Project setup guide">
   <div class="project-setup-copy"><h2>${esc(project.name)} setup</h2>
-  <p>${goal?'The draft goal is ready. Open the planner when you want to propose work.':reviewed?'Review the findings or create a draft goal of your own.':'Review the repository, create a draft goal or go directly to the planner.'}</p></div>
+  <p>${goal?'The draft goal is ready. Open the planner when you want to propose work.':reviewed?'Review the findings or create a draft goal of your own.':'Review the repository, create a draft goal or go directly to the planner.'}</p>
+  <p class="setup-checks">${project.checks.length?'Quality checks configured.':'Configure quality checks before running jobs.'}</p></div>
   <div class="head-actions">
+   ${project.checks.length?'':`<button class="button button-muted" data-edit="project:${esc(project.id)}">Configure quality checks</button>`}
    <button class="button button-muted" data-act="open-project-analysis" data-id="${esc(project.id)}">${ico('eye')} Review project</button>
    <button class="button button-muted" data-act="setup-goal" data-id="${esc(project.id)}">${ico('target')} ${goal?'Add another goal':'Create draft goal'}</button>
    <button class="button button-primary" data-act="project-plans" data-id="${esc(project.id)}">${ico('route')} Open goal planner</button>
@@ -1079,7 +1081,8 @@ function formProject(id){
   (p?'':field('remoteUrl','Remote repository URL','')+
    field('guided','Guide me through review and goal planning after registration',false,'checkbox'))+
   field('baseBranch','Base branch',v.baseBranch)+field('maxParallel','Maximum parallel jobs',v.maxParallel,'number')+
-  projectChecksField(v.checks)+field('protectedPaths','Protected paths, one per line',v.protectedPaths.join('\n'),'textarea');
+  projectChecksField(v.checks)+field('protectedPaths','Protected paths, one per line',v.protectedPaths.join('\n'),'textarea')+
+  (p?'':'<p id="project-provisioning-status" class="project-source-note" role="status"></p>');
  openForm(p?'Configure project':'Register project','Quality gates are required before jobs can execute.',html,async f=>{
   const x=values(f);
   let checks;
@@ -1088,10 +1091,25 @@ function formProject(id){
   const guideOption=p?null:f.elements.guided;
   const guided=guideOption?.checked;
   const revision=connectionRevision;
-  const project=await mutate(p?`projects/${p.id}`:'projects',p?'PUT':'POST',{
+  const data={
    name:x.name,path:x.path||'',baseBranch:x.baseBranch,maxParallel:Number(x.maxParallel),checks,
    protectedPaths:lines(x.protectedPaths),source:x.source||'existing',remoteUrl:x.remoteUrl
-  });
+  };
+  if(p){await mutate(`projects/${p.id}`,'PUT',data);return}
+  const status=$('project-provisioning-status');
+  status.textContent={existing:'Registering project…',new:'Creating local repository…',clone:'Cloning repository…',remote:'Cloning into a Factory-managed checkout…'}[data.source];
+  let project;
+  try{project=await api('projects','POST',data)}catch(error){
+   if(revision!==connectionRevision)return;
+   if(status.isConnected)status.textContent='';
+   if($('project-provisioning-status')===status&&f.closest('dialog')?.open)throw error;
+   notify(error.message,true);
+   return;
+  }
+  if(revision!==connectionRevision)return;
+  await refreshState();
+  if(revision!==connectionRevision)return;
+  notify(`Project ${project.name} is registered.`);
   if(guided&&revision===connectionRevision&&f.closest('dialog')?.open&&f.elements.guided===guideOption){
    projectSetup={projectId:project.id,goalId:''};
    nav('projects');
@@ -1667,7 +1685,7 @@ document.addEventListener('click',async e=>{const btn=e.target.closest('[data-vi
  if(btn.dataset.control){const bits=btn.dataset.control.split(':');await confirmControl(bits[0],decodeURIComponent(bits[1]),bits[2]);return}
  if(btn.dataset.act)await act(btn.dataset.act,btn.dataset.id,btn.dataset.index,btn.dataset.revision)
  }catch(error){notify(error.message,true)}});
-$('modal-form').addEventListener('submit',async e=>{e.preventDefault();const btn=$('modal-submit'),handler=modalHandler;btn.disabled=true;try{if(handler)await handler(e.target);if(handler===modalHandler)$('form-modal').close()}catch(error){if(handler===modalHandler)notify(error.message,true)}finally{btn.disabled=false}});
+$('modal-form').addEventListener('submit',async e=>{e.preventDefault();const btn=$('modal-submit'),handler=modalHandler;if(btn.disabled)return;btn.disabled=true;try{if(handler)await handler(e.target);if(handler===modalHandler)$('form-modal').close()}catch(error){if(handler===modalHandler)notify(error.message,true)}finally{if(handler===modalHandler)btn.disabled=false}});
 $('modal-close').addEventListener('click',()=>{$('form-modal').close()});$('modal-cancel').addEventListener('click',()=>$('form-modal').close());
 $('connection-form').addEventListener('submit',async e=>{e.preventDefault();await connect($('api-token').value.trim())});
 $('disconnect').addEventListener('click',()=>{$('connection-modal').close();connect('')});

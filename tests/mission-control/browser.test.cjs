@@ -98,6 +98,10 @@ browserTest('creates a local project and can leave guided setup with a draft goa
   await form.getByRole('button', { name: 'Register project', exact: true }).click();
   await form.waitFor({ state: 'hidden' });
   const setup = page.getByRole('region', { name: 'Project setup guide' });
+  await setup.getByText('Configure quality checks before running jobs.').waitFor();
+  await setup.getByRole('button', { name: 'Configure quality checks' }).click();
+  await form.getByLabel('Quality checks (JSON array)').waitFor();
+  await form.getByRole('button', { name: 'Cancel' }).click();
   await setup.getByRole('button', { name: 'Review project' }).click();
   await page.getByRole('button', { name: 'Analyze project' }).click();
   await page.getByRole('heading', { name: 'Review findings' }).waitFor();
@@ -118,6 +122,34 @@ browserTest('creates a local project and can leave guided setup with a draft goa
   assert.equal(state.jobs.length, 0);
   assert.equal(execFileSync('git', ['branch', '--show-current'], { cwd: repo, encoding: 'utf8' }).trim(), 'master');
   assert.equal(execFileSync('git', ['rev-list', '--count', 'master'], { cwd: repo, encoding: 'utf8' }).trim(), '1');
+});
+
+browserTest('announces clone progress and the result after the form is dismissed', async ({ page, nav, form }) => {
+  let releaseClone;
+  const clonePending = new Promise(resolve => { releaseClone = resolve; });
+  await page.route('**/api/projects', async route => {
+    await clonePending;
+    await route.fulfill({ status: 400, json: { error: 'The fixture clone could not complete.' } });
+  });
+  try {
+    await nav.getByRole('button', { name: 'Projects' }).click();
+    const add = page.getByRole('button', { name: 'Add project', exact: true }).first();
+    await add.click();
+    await form.getByLabel('Repository source').selectOption('remote');
+    await form.getByLabel('Project name').fill('Pending clone');
+    await form.getByLabel('Remote repository URL').fill('https://fixture.invalid/project.git');
+    await form.getByRole('button', { name: 'Register project' }).click();
+    await form.getByRole('status').filter({ hasText: 'Cloning into a Factory-managed checkout' }).waitFor();
+    await form.getByRole('button', { name: 'Cancel' }).click();
+    await add.click();
+    await form.getByLabel('Project name').fill('Another project');
+    releaseClone();
+    await form.getByText('The fixture clone could not complete.').waitFor();
+    assert.equal(await form.getByLabel('Project name').inputValue(), 'Another project');
+    assert.equal(await form.getByRole('button', { name: 'Register project' }).isEnabled(), true);
+  } finally {
+    releaseClone();
+  }
 });
 
 browserTest('clones into explicit and Factory-managed destinations', async ({ home, api, fixture }) => {

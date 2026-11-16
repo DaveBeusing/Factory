@@ -166,6 +166,8 @@
 .project-setup-copy { flex: 1 1 230px; }
 .project-setup h2 { margin: 0 0 5px; font-size: 16px; }
 .project-setup p, .project-source-note { margin: 0; color: var(--sub); }
+.project-setup .setup-checks { margin-top: 4px; }
+#project-provisioning-status:not(:empty) { margin-top: 12px; color: var(--text); }
 .project-source-note { margin: -4px 0 14px; }
 .project-setup .head-actions { flex-wrap: wrap; }
 

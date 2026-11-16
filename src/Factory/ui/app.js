@@ -1239,8 +1239,9 @@ function formSettings(){
    if(body.allowPush&&!settings.allowPush){
     if(!confirm('Enable publishing? Ensure repository policies and approvals are configured.'))return;
    }
-   await mutate('settings','PUT',body);
-   await fetchSettings();
+   settings=await api('settings','PUT',body);
+   notify(settings.auditWarning||'Changes applied',!!settings.auditWarning);
+   render();
   },'Apply settings');
 }
 async function confirmControl(type,id,action){const controlRevision=type==='job'?state.jobs.find(j=>j.id===id)?.controlRevision:undefined;const label={activate:'Activate',pause:'Pause',disable:'Disable',archive:'Archive',stop:'Stop',resume:'Resume',retry:'Retry',complete:'Complete',drain:'Drain',enable:'Enable'}[action]||action;

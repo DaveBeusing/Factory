@@ -791,6 +791,8 @@ await TestAsync("Claude CLI uses independent read-only turns and persists report
     }
 });
 
+await TestAsync("Project advisory uses an immutable source snapshot and cleans it up", ProjectAdvisorySnapshotTests.RunAsync);
+
 Test("Project review yields commit-bound findings and draft goals", () =>
 {
     var home = Path.Combine(Path.GetTempPath(), "factory-project-review-" + Guid.NewGuid().ToString("N"));
@@ -2533,6 +2535,7 @@ Test("Planning rejects cycle", () =>
 });
 Test("Unauthenticated worker blocked", () => Assert(!WorkerProtocol.Authorized("Bearer invalid", "secret")));
 await TestAsync("Dashboard queue restarts after startup failure and concurrent resume", DashboardFollowupTests.QueueRestartAsync);
+await TestAsync("Runtime settings persist before publication and serialize concurrent saves", DashboardSettingsTests.CommitAsync);
 Test("Dashboard health projection preserves snapshot semantics", DashboardFollowupTests.HealthProjection);
 Test("Indexed workflow deliveries preserve and deduplicate retained receipts", AuditPerformanceTests.WorkflowDeliveryUpgrade);
 Test("Scheduler indexes preserve goal liabilities and blocker order", AuditPerformanceTests.SchedulerAvailabilityAndBlockerOrdering);

@@ -47,20 +47,21 @@ public sealed class FactoryEngine
     {
         return _store.Change((s, db, tx) =>
         {
+            var runtimeSettings = _settings.RuntimeRevision;
             var j = s.Jobs.Single(x => x.Id == id);
            if (!JobExecutionModes.Matches(j, _executionMode) || j.State != JobStates.Queued ||
                 !DependencyGraph.DependenciesSatisfied(j, s.Jobs) || s.Paused) return false;
-           var selected = JobScheduler.Select(s, _settings.MaxParallel, _executionMode,
+           var selected = JobScheduler.Select(s, runtimeSettings.MaxParallel, _executionMode,
                 candidate => ProfileAllows(s, s.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
-                reservationTokens: _settings.GoalReservationTokens);
+                reservationTokens: runtimeSettings.GoalReservationTokens);
            if (!selected.Any(x => x.Id == id)) return false;
            if (StateStore.ReviewCyclesUsed(db, tx, id) >= Math.Clamp(j.MaxRounds, 1, ReviewPolicy.MaxCycles))
            {
                StateStore.BlockExhaustedReviews(db, tx, j, s);
                return false;
            }
-           JobRecovery.Assign(j, _workerId, _settings.LeaseSeconds, local: true,
-                state: s, reservationTokens: _settings.GoalReservationTokens);
+           JobRecovery.Assign(j, _workerId, runtimeSettings.LeaseSeconds, local: true,
+                state: s, reservationTokens: runtimeSettings.GoalReservationTokens);
            var runtime = _runtimeOverridden ? "custom" :
                 _executionMode == JobExecutionModes.Local
                     ? ProviderRouter.EffectiveCodexRuntime(_settings, ProviderRouter.Resolve(_settings, s, j.ProjectId, "builder"))
@@ -110,9 +111,10 @@ public sealed class FactoryEngine
                 running.Remove(id);
            }
             var snapshot = _store.Read();
-            var selected = JobScheduler.Select(snapshot, _settings.MaxParallel, _executionMode,
+            var runtimeSettings = _settings.RuntimeRevision;
+            var selected = JobScheduler.Select(snapshot, runtimeSettings.MaxParallel, _executionMode,
                 candidate => ProfileAllows(snapshot, snapshot.Projects.Single(p => p.Id == candidate.ProjectId), candidate),
-                reservationTokens: _settings.GoalReservationTokens);
+                reservationTokens: runtimeSettings.GoalReservationTokens);
            foreach (var j in selected)
             {
                 if (running.ContainsKey(j.Id) || !Claim(j.Id)) continue;
@@ -224,11 +226,12 @@ public sealed class FactoryEngine
         var p = _store.Read().Projects.Single(x => x.Id == j.ProjectId);
         if (p.Checks.Count == 0) throw new InvalidOperationException("Project checks missing; configure gates before execution");
         WorkPackageScope.ValidateDeclaration(j.ExpectedPaths);
+        var runtimeSettings = _settings.RuntimeRevision;
         // Only the controller-local runner may allocate additional goal capacity.
         // Remote workers must receive an explicit controller grant before their cap changes.
         GoalBudgetExtensionPolicy? extensionPolicy = _executionMode == JobExecutionModes.Local
-            ? new(_settings.GoalExtensionIncrementTokens, _settings.GoalExtensionThresholdTokens,
-                _settings.MaxJobReservationTokens)
+            ? new(runtimeSettings.GoalExtensionIncrementTokens, runtimeSettings.GoalExtensionThresholdTokens,
+                runtimeSettings.MaxJobReservationTokens)
             : null;
         IAgentRuntime RuntimeFor(string role)
         {
@@ -240,11 +243,11 @@ public sealed class FactoryEngine
                 ProviderRouter.Select(_settings, snapshot, p.Id, role, j.Risk);
             var meter = selected is { } choice
                 ? new JobProviderMeter(ProviderRouter.Resolve(_settings, snapshot, p.Id, role),
-                    role, choice.Model, _settings.GoalReservationTokens)
+                    role, choice.Model, runtimeSettings.GoalReservationTokens)
                 : null;
             return new BudgetedAgentRuntime(_remoteProviderRuntime?.Invoke(role) ?? selected?.Runtime ?? _agent, _store, id, fence, extensionPolicy,
                 _remoteBudgetExtension is null ? null : token => _remoteBudgetExtension(id, token),
-                _settings.GoalExtensionThresholdTokens, meter);
+                runtimeSettings.GoalExtensionThresholdTokens, meter);
         }
         var runtime = RuntimeFor("builder");
         var qualityEngine = new QualityEngine(runtime,

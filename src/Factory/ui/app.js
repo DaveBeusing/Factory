@@ -1722,7 +1722,9 @@ function setMobileNavigation(open,restoreFocus=false){
 $('mobile-open').addEventListener('click',()=>setMobileNavigation(true));
 $('mobile-close').addEventListener('click',()=>setMobileNavigation(false,true));
 $('sidebar-backdrop').addEventListener('click',()=>setMobileNavigation(false,true));
-mobileLayout.addEventListener('change',()=>setMobileNavigation(false));
+mobileLayout.addEventListener('change',()=>{
+ if(!mobileLayout.matches||!sidebar.classList.contains('open'))setMobileNavigation(false);
+});
 setMobileNavigation(false);
 $('top-create').addEventListener('click',()=>{const actions=[['Project','create-project'],['Goal','create-goal'],['Job','create-job'],['Worker','create-worker']];openForm('Create new','Choose the object to add to your Factory workspace.',`<div class="list-stack">${actions.map(([name,action])=>`<button type="button" class="palette-entry" data-act="${action}">${ico('plus')} New ${name}</button>`).join('')}</div>`,async()=>{},'Done')});
 $('open-search').addEventListener('click',()=>{if(projectAccess())return;$('palette-input').value='';showPalette();$('palette').showModal();$('palette-input').focus()});

@@ -10,6 +10,7 @@ public sealed class ProjectInput
     public string BaseBranch { get; set; } = "master";
     public int MaxParallel { get; set; } = 2;
     public List<CheckCommand> Checks { get; set; } = [];
+    public string? CheckExecutionPolicy { get; set; }
     public List<string>? RequiredExecutionCapabilities { get; set; }
     public List<string>? ProtectedPaths { get; set; }
     public string Source { get; set; } = "existing";
@@ -102,7 +103,8 @@ public static class MissionControlManager
         GitOperations.Git(path, "rev-parse", "--verify", "refs/heads/master");
         var p = new ProjectInfo { Name = input.Name.Trim(), Path = path, BaseBranch = input.BaseBranch,
             Origin = GitOperations.Origin(path) ?? "", MaxParallel = input.MaxParallel, Checks = input.Checks,
-            RequiredExecutionCapabilities = input.RequiredExecutionCapabilities ?? [] };
+            RequiredExecutionCapabilities = input.RequiredExecutionCapabilities ?? [],
+            CheckExecutionPolicy = input.CheckExecutionPolicy ?? QualityCheckPolicy.TrustedHost };
         if (input.ProtectedPaths != null) p.ProtectedPaths = NormalizePaths(input.ProtectedPaths);
         store.Change(s =>
         {
@@ -119,6 +121,7 @@ public static class MissionControlManager
         Require(input.BaseBranch == "master", "Factory work packages must target master");
         ValidateChecks(input.Checks);
         ValidateExecutionCapabilities(input.RequiredExecutionCapabilities ?? []);
+        QualityCheckPolicy.Validate(input.CheckExecutionPolicy ?? QualityCheckPolicy.TrustedHost, input.Checks);
         if (input.ProtectedPaths is not null) _ = NormalizePaths(input.ProtectedPaths);
     }
     public static ProjectInfo UpdateProject(StateStore store, Guid id, ProjectInput input)
@@ -136,7 +139,10 @@ public static class MissionControlManager
             var p = s.Projects.Single(x => x.Id == id);
             Require(p.Status != "archived", "Archived project is read-only");
             Require(!s.Jobs.Any(j => j.ProjectId == id && IsActive(j)), "Cannot change project configuration while jobs are active");
+            var checkPolicy = input.CheckExecutionPolicy ?? p.CheckExecutionPolicy;
+            QualityCheckPolicy.Validate(checkPolicy, input.Checks);
             var changesContract = Json.Stringify(p.Checks) != Json.Stringify(input.Checks) ||
+                p.CheckExecutionPolicy != checkPolicy ||
                 (input.RequiredExecutionCapabilities is not null &&
                     !p.RequiredExecutionCapabilities.SequenceEqual(input.RequiredExecutionCapabilities)) ||
                 (input.ProtectedPaths is not null && !p.ProtectedPaths.SequenceEqual(NormalizePaths(input.ProtectedPaths))) ||
@@ -148,7 +154,7 @@ public static class MissionControlManager
             Require(!s.Projects.Any(x => x.Id != id && (x.Name.Equals(input.Name, StringComparison.OrdinalIgnoreCase) || GitOperations.SamePath(x.Path, path))), "Project name or path already registered");
             p.Name = input.Name.Trim(); p.Path = path; p.BaseBranch = input.BaseBranch;
             p.Origin = GitOperations.Origin(path) ?? "";
-            p.MaxParallel = input.MaxParallel; p.Checks = input.Checks;
+            p.MaxParallel = input.MaxParallel; p.Checks = input.Checks; p.CheckExecutionPolicy = checkPolicy;
             if (input.RequiredExecutionCapabilities is { } requestedCapabilities)
                 p.RequiredExecutionCapabilities = requestedCapabilities;
             if (input.ProtectedPaths != null) p.ProtectedPaths = NormalizePaths(input.ProtectedPaths);

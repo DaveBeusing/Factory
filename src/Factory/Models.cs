@@ -117,6 +117,7 @@ public sealed class ProjectInfo
     public int MaxParallel { get; set; } = 2;
     public string Status { get; set; } = "active";
     public List<CheckCommand> Checks { get; set; } = [];
+    public string CheckExecutionPolicy { get; set; } = QualityCheckPolicy.TrustedHost;
     // Additional execution requirements are controller-owned, never supplied by a worker.
     public List<string> RequiredExecutionCapabilities { get; set; } = [];
     public List<string> ProtectedPaths { get; set; } = [".github/workflows/", ".factory/", ".agents/", "factory/"];
@@ -303,18 +304,99 @@ public sealed class WorkerCapabilityProof
     public DateTimeOffset VerifiedAt { get; set; }
 }
 
+internal sealed record RuntimeSettingsRevision
+{
+    public int MaxParallel { get; init; } = 3;
+    public int GoalReservationTokens { get; init; } = GoalBudgetLedger.DefaultReservationTokens;
+    public int GoalExtensionIncrementTokens { get; init; } = 4096;
+    public int GoalExtensionThresholdTokens { get; init; } = 1024;
+    public int MaxJobReservationTokens { get; init; } = 65536;
+    public int MaxAgentSessions { get; init; } = 6;
+    public int LeaseSeconds { get; init; } = 120;
+    public int MaxReviewRounds { get; init; } = 3;
+    public bool AllowPush { get; init; }
+    public int PollSeconds { get; init; } = 3;
+}
+
 public sealed class FactorySettings
 {
-    public int MaxParallel { get; set; } = 3;
-    // Initial per-job reservation; total goal capacity remains authoritative.
-    public int GoalReservationTokens { get; set; } = GoalBudgetLedger.DefaultReservationTokens;
-    // Extensions are controller-local only until remote authorization is implemented.
-    public int GoalExtensionIncrementTokens { get; set; } = 4096;
-    public int GoalExtensionThresholdTokens { get; set; } = 1024;
-    public int MaxJobReservationTokens { get; set; } = 65536;
-    public int MaxAgentSessions { get; set; } = 6;
-    public int LeaseSeconds { get; set; } = 120;
-    public int MaxReviewRounds { get; set; } = 3;
+    private readonly object _runtimeWriteGate = new();
+    private RuntimeSettingsRevision _runtimeRevision = new();
+
+    internal RuntimeSettingsRevision RuntimeRevision => Volatile.Read(ref _runtimeRevision);
+
+    public int MaxParallel
+    {
+        get => RuntimeRevision.MaxParallel;
+        set => UpdateRuntime(revision => revision with { MaxParallel = value });
+    }
+    public int GoalReservationTokens
+    {
+        get => RuntimeRevision.GoalReservationTokens;
+        set => UpdateRuntime(revision => revision with { GoalReservationTokens = value });
+    }
+    public int GoalExtensionIncrementTokens
+    {
+        get => RuntimeRevision.GoalExtensionIncrementTokens;
+        set => UpdateRuntime(revision => revision with { GoalExtensionIncrementTokens = value });
+    }
+    public int GoalExtensionThresholdTokens
+    {
+        get => RuntimeRevision.GoalExtensionThresholdTokens;
+        set => UpdateRuntime(revision => revision with { GoalExtensionThresholdTokens = value });
+    }
+    public int MaxJobReservationTokens
+    {
+        get => RuntimeRevision.MaxJobReservationTokens;
+        set => UpdateRuntime(revision => revision with { MaxJobReservationTokens = value });
+    }
+    public int MaxAgentSessions
+    {
+        get => RuntimeRevision.MaxAgentSessions;
+        set => UpdateRuntime(revision => revision with { MaxAgentSessions = value });
+    }
+    public int LeaseSeconds
+    {
+        get => RuntimeRevision.LeaseSeconds;
+        set => UpdateRuntime(revision => revision with { LeaseSeconds = value });
+    }
+    public int MaxReviewRounds
+    {
+        get => RuntimeRevision.MaxReviewRounds;
+        set => UpdateRuntime(revision => revision with { MaxReviewRounds = value });
+    }
+    public bool AllowPush
+    {
+        get => RuntimeRevision.AllowPush;
+        set => UpdateRuntime(revision => revision with { AllowPush = value });
+    }
+    public int PollSeconds
+    {
+        get => RuntimeRevision.PollSeconds;
+        set => UpdateRuntime(revision => revision with { PollSeconds = value });
+    }
+
+    private void UpdateRuntime(Func<RuntimeSettingsRevision, RuntimeSettingsRevision> change)
+    {
+        lock (_runtimeWriteGate)
+            Volatile.Write(ref _runtimeRevision, change(_runtimeRevision));
+    }
+
+    internal RuntimeSettingsRevision CommitRuntime(
+        Func<RuntimeSettingsRevision, RuntimeSettingsRevision> change, Action<FactorySettings> persist,
+        Action<RuntimeSettingsRevision> onCommitted)
+    {
+        lock (_runtimeWriteGate)
+        {
+            var candidate = (FactorySettings)MemberwiseClone();
+            candidate._runtimeRevision = change(_runtimeRevision);
+            persist(candidate);
+            Volatile.Write(ref _runtimeRevision, candidate._runtimeRevision);
+            onCommitted(candidate._runtimeRevision);
+            return candidate._runtimeRevision;
+        }
+    }
+
     public string Runtime { get; set; } = "exec";
     // Explicit provider profiles. Only Codex is enabled by default.
     public List<ProviderProfile> Providers { get; set; } = [new()];
@@ -327,7 +409,6 @@ public sealed class FactorySettings
     public string RemoteProviderExecutorUrl { get; set; } = "";
     public bool EnableRemoteProviderExecutor { get; set; }
     public int RemoteProviderTurnTokens { get; set; } = 1024;
-    public bool AllowPush { get; set; }
     public bool AutoMerge { get; set; }
     // Administrator credential. Never pass it to worker processes or API responses.
     public string ApiToken { get; set; } = "";
@@ -350,7 +431,6 @@ public sealed class FactorySettings
         return changed;
     }
     public string WorkspaceRoot { get; set; } = "";
-    public int PollSeconds { get; set; } = 3;
     public static FactorySettings Load(string path) => File.Exists(path)
         ? System.Text.Json.JsonSerializer.Deserialize<FactorySettings>(File.ReadAllText(path), Json.Options) ?? new()
         : new();

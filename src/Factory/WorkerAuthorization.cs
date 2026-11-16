@@ -26,7 +26,9 @@ public static class WorkerAuthorization
 
     private static HashSet<string>? RequiredCapabilitiesForRuntime(ProjectInfo project, FactoryJob job, string runtime)
     {
-        if (!BuilderExecutionProfile.Allows(project, job) ||
+        // Remote workers cannot establish the controller's protected check boundary.
+        if (project.CheckExecutionPolicy != QualityCheckPolicy.TrustedHost ||
+            !BuilderExecutionProfile.Allows(project, job) ||
             !BuilderExecutionProfile.MatchesRuntime(project, job, runtime)) return null;
         var required = new HashSet<string>(StringComparer.Ordinal)
         {

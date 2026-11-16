@@ -4,6 +4,14 @@
 
 [← Documentation](README.md) · [First project](getting-started.md#configure-a-target-repository) · [Preflight](planning-preflight.md)
 
+## Protected checks
+
+In Mission Control, set **Quality check execution** to **Protected container** to apply the protected boundary to every local check in the project. CLI registration accepts `--check-execution-policy protected-container`. Each check must use a Linux Docker image already installed on the controller. Set `containerImage` to the full ID reported by `docker image inspect --format '{{.Id}}' YOUR_IMAGE`.
+
+Protected checks receive a fresh writable copy of committed source extracted from a Git archive verified against the committed tree. The protected mode rejects submodules and archive attributes that omit or rewrite committed files. Git metadata, untracked worktree files, controller state, host environment secrets and network access are outside the check boundary. The image must provide `/bin/sh`, `tar` and the check tools. Supply build dependencies in the image or committed source. The default local Docker socket is required and images are never pulled automatically. The check uses an unprivileged numeric user and temporary writable storage. Container isolation relies on the trusted host and Docker daemon. It applies to checks only. Protected projects use local jobs because remote execution cannot yet enforce this boundary.
+
+Existing projects use **Trusted host**. Native checks keep their existing controller process privileges. Checks configured with a container image in this compatibility mode keep the existing read-only worktree mount. Mission Control records the execution boundary for new check results.
+
 ## Configure executable checks
 
 Each project needs executable checks that actually validate its technology stack. Choose a template and tailor it to the repository:

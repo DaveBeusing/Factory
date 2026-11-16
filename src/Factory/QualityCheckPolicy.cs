@@ -40,7 +40,8 @@ internal sealed class ProtectedCheckSource : IDisposable
         {
             var tree = await ReadTreeAsync(worktree, commit, ct);
             var result = await Commands.RunAsync("git",
-                ["--no-replace-objects", "archive", "--format=tar", "--output=" + source.Archive, commit],
+                ["--no-replace-objects", "-c", "core.autocrlf=false", "-c", "core.eol=lf",
+                    "archive", "--format=tar", "--output=" + source.Archive, commit],
                 worktree, cancellationToken: ct);
             Commands.Require(result, "Export committed source for protected checks");
             await source.VerifyArchiveAsync(tree, ct);

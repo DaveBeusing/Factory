@@ -68,7 +68,7 @@ public static class JobEvidenceReader
         {
             available = true, current, commit, status,
             verifiedAt = report.At,
-            checks = report.Checks.Select(c => new { c.Name, c.ExitCode,
+            checks = report.Checks.Select(c => new { c.Name, c.ExitCode, c.ExecutionBoundary,
                 passed = c.ExitCode == 0 }).ToArray(),
             reviews = report.Reviews.Select(pair => new
             {

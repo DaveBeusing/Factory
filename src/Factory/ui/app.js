@@ -1079,6 +1079,9 @@ function formProject(id){
   (p?'':field('remoteUrl','Remote repository URL','')+
    field('guided','Guide me through review and goal planning after registration',false,'checkbox'))+
   field('baseBranch','Base branch',v.baseBranch)+field('maxParallel','Maximum parallel jobs',v.maxParallel,'number')+
+  field('checkExecutionPolicy','Quality check execution',v.checkExecutionPolicy||'trusted-host','select',[
+   ['trusted-host','Trusted host (configured container checks stay available)'],['protected-container','Protected container (all checks, local jobs only)']
+  ],'Protected mode requires an installed Linux container image ID for each check.')+
   projectChecksField(v.checks)+field('protectedPaths','Protected paths, one per line',v.protectedPaths.join('\n'),'textarea');
  openForm(p?'Configure project':'Register project','Quality gates are required before jobs can execute.',html,async f=>{
   const x=values(f);
@@ -1089,7 +1092,7 @@ function formProject(id){
   const guided=guideOption?.checked;
   const revision=connectionRevision;
   const project=await mutate(p?`projects/${p.id}`:'projects',p?'PUT':'POST',{
-   name:x.name,path:x.path||'',baseBranch:x.baseBranch,maxParallel:Number(x.maxParallel),checks,
+   name:x.name,path:x.path||'',baseBranch:x.baseBranch,maxParallel:Number(x.maxParallel),checks,checkExecutionPolicy:x.checkExecutionPolicy,
    protectedPaths:lines(x.protectedPaths),source:x.source||'existing',remoteUrl:x.remoteUrl
   });
   if(guided&&revision===connectionRevision&&f.closest('dialog')?.open&&f.elements.guided===guideOption){
@@ -1385,7 +1388,7 @@ async function renderJobQuality(jobId){
   const evidence=await api('jobs/'+jobId+'/quality');
   if(inspectorKey!=='job:'+jobId||!$('inspector-job-quality'))return;
   const checks=(evidence.checks||[]).map(c=>`<tr><td>${esc(c.name)}</td>
-   <td>${esc(c.exitCode)}</td><td>${badge(c.passed?'passed':'failed')}</td></tr>`).join('');
+   <td>${esc(c.exitCode)}</td><td>${badge(c.passed?'passed':'failed')}</td><td>${esc(c.executionBoundary||'Unrecorded')}</td></tr>`).join('');
   const reviews=(evidence.reviews||[]).map(r=>`<tr><td>${esc(r.role)}</td>
    <td>${badge(r.verdict==='PASS'?'passed':'changes required')}</td></tr>`).join('');
   const findings=(evidence.findings||[]).map(f=>`<li>${esc(f)}</li>`).join('');
@@ -1395,7 +1398,7 @@ async function renderJobQuality(jobId){
    <p class="subtext">Evidence commit: ${esc(evidence.commit||'Unknown')}
    · ${current?'Matches current recorded job head':'Not verified for current job head'}</p>
    <p>${badge(overall)} ${evidence.verifiedAt?' · Captured '+esc(dateTime(evidence.verifiedAt)):''}</p>
-   ${checks?table(['Check','Exit code','Result'],checks):'<p class="subtext">No check reports available.</p>'}
+   ${checks?table(['Check','Exit code','Result','Execution boundary'],checks):'<p class="subtext">No check reports available.</p>'}
    ${reviews?table(['Review role','Verdict'],reviews):'<p class="subtext">No review verdicts available.</p>'}
    ${findings?`<h4>Findings</h4><ul>${findings}</ul>`:''}
    <p class="subtext">This view summarizes persisted evidence only. A textual reviewer verdict is not an independent security certification.</p>`;

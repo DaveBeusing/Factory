@@ -117,6 +117,7 @@ public sealed class ProjectInfo
     public int MaxParallel { get; set; } = 2;
     public string Status { get; set; } = "active";
     public List<CheckCommand> Checks { get; set; } = [];
+    public string CheckExecutionPolicy { get; set; } = QualityCheckPolicy.TrustedHost;
     // Additional execution requirements are controller-owned, never supplied by a worker.
     public List<string> RequiredExecutionCapabilities { get; set; } = [];
     public List<string> ProtectedPaths { get; set; } = [".github/workflows/", ".factory/", ".agents/", "factory/"];

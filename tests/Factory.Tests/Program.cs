@@ -13,6 +13,20 @@ if (args is ["--measure-queue-load"])
     return 0;
 }
 
+if (args is ["--verify-protected-check-source"])
+{
+    ProtectedQualityChecksTests.VerifyPolicy();
+    await ProtectedQualityChecksTests.VerifyArchiveAsync();
+    Console.WriteLine("PASS protected-check policy and committed archive");
+    return 0;
+}
+
+if (args is ["--verify-protected-checks", var checkImageId])
+{
+    await ProtectedQualityChecksTests.VerifyDockerAsync(checkImageId);
+    return 0;
+}
+
 if (args is ["--verify-windows-package", var windowsPackage])
 {
     await WindowsPackageValidation.RunAsync(windowsPackage);
@@ -236,6 +250,9 @@ Test("Provider routing is project-scoped and rejects unsupported builder capabil
     }
     catch (InvalidOperationException) { }
 });
+
+Test("Protected quality checks preserve the declared execution boundary", ProtectedQualityChecksTests.VerifyPolicy);
+await TestAsync("Protected quality checks reject archive transformations and submodules", ProtectedQualityChecksTests.VerifyArchiveAsync);
 
 await TestAsync("Controller role policies are versioned and separate trusted instructions from evidence", async () =>
 {
@@ -750,6 +767,8 @@ await TestAsync("Claude CLI uses independent read-only turns and persists report
         try { Directory.Delete(home, true); } catch { }
     }
 });
+
+await TestAsync("Project advisory uses an immutable source snapshot and cleans it up", ProjectAdvisorySnapshotTests.RunAsync);
 
 Test("Project review yields commit-bound findings and draft goals", () =>
 {
@@ -2466,6 +2485,7 @@ Test("Planning rejects cycle", () =>
 });
 Test("Unauthenticated worker blocked", () => Assert(!WorkerProtocol.Authorized("Bearer invalid", "secret")));
 await TestAsync("Dashboard queue restarts after startup failure and concurrent resume", DashboardFollowupTests.QueueRestartAsync);
+await TestAsync("Runtime settings persist before publication and serialize concurrent saves", DashboardSettingsTests.CommitAsync);
 Test("Dashboard health projection preserves snapshot semantics", DashboardFollowupTests.HealthProjection);
 Test("Dashboard revisions invalidate and bounded projections preserve activity", DashboardStateTests.Run);
 Test("Indexed workflow deliveries preserve and deduplicate retained receipts", AuditPerformanceTests.WorkflowDeliveryUpgrade);
@@ -3570,7 +3590,7 @@ Test("Relational SQLite schema contains no JSON state table", () =>
             cmd.CommandText = sql;
             return Convert.ToInt64(cmd.ExecuteScalar());
         }
-        Assert(Count("PRAGMA user_version;") == 26, "Unexpected relational schema version");
+        Assert(Count("PRAGMA user_version;") == 27, "Unexpected relational schema version");
         Assert(Count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='factory_state';") == 0);
         foreach (var table in new[] { "factory_metadata", "projects", "goals", "jobs", "events",
             "workers", "worker_project_grants", "worker_capability_proofs",
@@ -4190,7 +4210,7 @@ Test("Schema 5 budget state upgrades without data loss", () =>
         verify.Open();
         using var query = verify.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 26);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 27);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });
@@ -4879,7 +4899,7 @@ Test("SQLite 2 state migrates fencing columns without losing jobs", () =>
         check.Open();
         using var query = check.CreateCommand();
         query.CommandText = "PRAGMA user_version;";
-        Assert(Convert.ToInt64(query.ExecuteScalar()) == 26);
+        Assert(Convert.ToInt64(query.ExecuteScalar()) == 27);
     }
     finally { try { Directory.Delete(home, true); } catch { } }
 });

@@ -14,7 +14,7 @@ namespace Factory;
 /// </summary>
 public sealed partial class StateStore
 {
-    private const int DatabaseVersion = 26;
+    private const int DatabaseVersion = 27;
     private sealed record EntityMap(string Table, string Collection, Type Type);
 
     // Order places referenced entities before their dependents.
@@ -341,6 +341,13 @@ public sealed partial class StateStore
             {
                 UpgradeWorkflowDeliveries(db, tx);
                 UpgradeDashboardHealthIndexes(db, tx);
+            }
+            if (schemaVersion < 27)
+            {
+                using var column = Command(db, tx, "SELECT COUNT(*) FROM pragma_table_info('projects') WHERE name='check_execution_policy';");
+                if (Convert.ToInt32(column.ExecuteScalar(), CultureInfo.InvariantCulture) == 0)
+                    Execute(db, tx, "ALTER TABLE projects ADD COLUMN check_execution_policy TEXT NOT NULL DEFAULT 'trusted-host';");
+                Execute(db, tx, "PRAGMA user_version=27;");
             }
         }
         tx.Commit();

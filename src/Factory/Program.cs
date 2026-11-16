@@ -21,11 +21,7 @@ public static class Program
         var settingsFile = Path.Combine(home, "settings.json");
         var settings = FactorySettings.Load(settingsFile);
         if (settings.EnsureCredentials())
-        {
-            var temporary = settingsFile + ".tmp";
-            File.WriteAllText(temporary, Json.Stringify(settings));
-            File.Move(temporary, settingsFile, true);
-        }
+            SettingsFile.Save(settingsFile, settings);
         return settings;
     }
     private static string Option(string[] args, string key, string fallback = "")
@@ -48,8 +44,8 @@ public static class Program
         {
             Console.WriteLine("""
 Factory | C# / .NET 10
-  version | doctor | init <repo> --name NAME [--base master] [--checks-json PATH]
-  project create --name NAME --source new|clone|remote [--path PATH] [--remote-url URL] [--checks-json PATH]
+  version | doctor | init <repo> --name NAME [--base master] [--checks-json PATH] [--check-execution-policy trusted-host|protected-container]
+  project create --name NAME --source new|clone|remote [--path PATH] [--remote-url URL] [--checks-json PATH] [--check-execution-policy trusted-host|protected-container]
   enqueue --project NAME --title TITLE --description TEXT [--mode local|remote] [--paths file1,file2] --reviewed-existing-work
   run | recover | reconcile <job-guid> --reviewed --reason TEXT | status | pause | resume | verify <job-guid>
   goal add --project NAME --objective TEXT [--criteria TEXT] [--budget TOKENS]
@@ -129,6 +125,7 @@ Environment: FACTORY_HOME overrides the local state directory.
                     Source = Required(args, "source"),
                     Path = Option(args, "path"),
                     RemoteUrl = Option(args, "remote-url"),
+                    CheckExecutionPolicy = Option(args, "check-execution-policy", QualityCheckPolicy.TrustedHost),
                     Checks = string.IsNullOrEmpty(checksFile) ? [] : CheckLoader.Read(checksFile)
                 }));
                 return 0;
@@ -144,10 +141,12 @@ Environment: FACTORY_HOME overrides the local state directory.
                 GitOperations.Git(repo, "rev-parse", "--verify", "refs/heads/master");
                 var checksFile = Option(args, "checks-json");
                 var checks = string.IsNullOrEmpty(checksFile) ? new List<CheckCommand>() : CheckLoader.Read(checksFile);
+                var checkPolicy = Option(args, "check-execution-policy", QualityCheckPolicy.TrustedHost);
+                QualityCheckPolicy.Validate(checkPolicy, checks);
                 var project = new ProjectInfo
                 {
                     Name = name, Path = repo, Origin = GitOperations.Origin(repo) ?? "",
-                    BaseBranch = baseBranch, Checks = checks
+                    BaseBranch = baseBranch, Checks = checks, CheckExecutionPolicy = checkPolicy
                 };
                 store.Change(s =>
                 {

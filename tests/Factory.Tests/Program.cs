@@ -7,6 +7,29 @@ if (args is ["--command-timeout-fixture"])
     return 0;
 }
 
+if (args is ["--command-output-fixture"])
+{
+    static async Task EmitAsync(TextWriter writer, char symbol, string terminal)
+    {
+        var block = new string(symbol, 8_192);
+        for (var i = 0; i < 300; i++) await writer.WriteAsync(block);
+        await writer.WriteLineAsync();
+        await writer.WriteAsync(terminal);
+    }
+    await Task.WhenAll(EmitAsync(Console.Out, 'o', "stdout diagnostic"),
+        EmitAsync(Console.Error, 'e', "stderr diagnostic"));
+    return 0;
+}
+
+if (args is ["--command-records-fixture"])
+{
+    await Console.Out.WriteAsync(new string('x', 8_191) + "\r\n\r\nnext\ronly-lf\n");
+    var record = new string('r', 8_192);
+    for (var i = 0; i < 300; i++) await Console.Out.WriteLineAsync(record);
+    await Console.Out.WriteAsync("terminal");
+    return 0;
+}
+
 if (args is ["--measure-queue-load"])
 {
     await QueueLoadBaseline.RunAsync();
@@ -1765,6 +1788,33 @@ Test("Review admission survives restart and cannot exceed three cycles", () =>
         catch (InvalidOperationException ex) when (ex.Message.Contains("cycle limit")) { }
     }
     finally { try { home.Delete(true); } catch { } }
+});
+
+await TestAsync("Command output bounds an oversized record and keeps diagnostic tails", async () =>
+{
+    var arguments = new[] { typeof(FakeAgent).Assembly.Location, "--command-output-fixture" };
+    var seen = new List<string>();
+    var result = await Commands.RunAsync("dotnet", arguments, Environment.CurrentDirectory, lineCallback: seen.Add);
+    Assert(result.Code == 0 && !result.Ok && result.OutputTruncated && result.ErrorTruncated);
+    Assert(result.Output.Length == 2_000_000 && result.Error.Length == 2_000_000);
+    Assert(result.CallbackLineTruncated && seen.SequenceEqual(["stdout diagnostic"]));
+    try { Commands.Require(result, "structured fixture"); throw new Exception("Output was accepted"); }
+    catch (InvalidOperationException error) { Assert(error.Message.Contains("incomplete output")); }
+
+    var diagnostics = await Commands.RunForDiagnosticsAsync("dotnet", arguments, Environment.CurrentDirectory, 120,
+        CancellationToken.None);
+    Assert(diagnostics.Code == 0 && diagnostics.OutputTruncated && diagnostics.ErrorTruncated);
+    Assert(diagnostics.Output.Length == 4_000 && diagnostics.Error.Length == 4_000);
+    Assert(diagnostics.Output.EndsWith("stdout diagnostic" + Environment.NewLine));
+    Assert(diagnostics.Error.EndsWith("stderr diagnostic" + Environment.NewLine));
+
+    seen.Clear();
+    var records = await Commands.RunAsync("dotnet", [arguments[0], "--command-records-fixture"],
+        Environment.CurrentDirectory, lineCallback: seen.Add);
+    Assert(records.OutputTruncated && !records.CallbackLineTruncated && records.Code == 0);
+    Assert(seen.Count == 305 && seen.Take(4).SequenceEqual([new string('x', 8_191), "", "next", "only-lf"]));
+    Assert(seen.Skip(4).Take(300).All(line => line.Length == 8_192 && line.All(ch => ch == 'r')));
+    Assert(seen[^1] == "terminal");
 });
 
 await TestAsync("Command timeout exits quality gating as a typed transient failure", async () =>

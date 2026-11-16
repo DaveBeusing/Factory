@@ -125,7 +125,7 @@ public static class WorkPackagePreflight
             args.Add("*.ts"); args.Add("*.tsx"); args.Add("*.md");
             args.Add("*.json"); args.Add("*.py"); args.Add("*.cpp"); args.Add("*.h");
             var found = Commands.Run("git", args, project.Path, 60);
-            if (found.Code is not (0 or 1))
+            if (found.OutputTruncated || found.Code is not (0 or 1))
                 throw new InvalidOperationException("Cannot verify existing source on master: " + found.Error);
             report.ExistingCode = found.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries)
                 .Select(line => ParseMatch(commit, line))

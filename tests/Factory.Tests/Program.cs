@@ -2468,6 +2468,7 @@ Test("Planning rejects cycle", () =>
 });
 Test("Unauthenticated worker blocked", () => Assert(!WorkerProtocol.Authorized("Bearer invalid", "secret")));
 await TestAsync("Dashboard queue restarts after startup failure and concurrent resume", DashboardFollowupTests.QueueRestartAsync);
+await TestAsync("Runtime settings persist before publication and serialize concurrent saves", DashboardSettingsTests.CommitAsync);
 Test("Dashboard health projection preserves snapshot semantics", DashboardFollowupTests.HealthProjection);
 Test("Indexed workflow deliveries preserve and deduplicate retained receipts", AuditPerformanceTests.WorkflowDeliveryUpgrade);
 Test("Scheduler indexes preserve goal liabilities and blocker order", AuditPerformanceTests.SchedulerAvailabilityAndBlockerOrdering);

@@ -21,11 +21,7 @@ public static class Program
         var settingsFile = Path.Combine(home, "settings.json");
         var settings = FactorySettings.Load(settingsFile);
         if (settings.EnsureCredentials())
-        {
-            var temporary = settingsFile + ".tmp";
-            File.WriteAllText(temporary, Json.Stringify(settings));
-            File.Move(temporary, settingsFile, true);
-        }
+            SettingsFile.Save(settingsFile, settings);
         return settings;
     }
     private static string Option(string[] args, string key, string fallback = "")

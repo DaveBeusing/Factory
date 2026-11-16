@@ -22,6 +22,7 @@ public static class DashboardHost
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { Args = [] });
         builder.WebHost.UseUrls(listenUrl);
         var app = builder.Build();
+        using var stateRevision = store.WatchDashboardState();
 
         static IResult Asset(string resource, string contentType)
         {
@@ -90,9 +91,19 @@ public static class DashboardHost
             }
         });
         ProjectViewerEndpoint.Map(app, store, settings);
-        app.MapGet("/api/state", () =>
+        app.MapGet("/api/state", (HttpContext ctx) =>
         {
-            var snapshot = store.Read();
+            var dashboard = ctx.Request.Headers["X-Factory-State-View"] == "dashboard";
+            var revision = dashboard ? stateRevision.Current() : null;
+            if (dashboard && ctx.Request.Headers.IfNoneMatch == revision)
+            {
+                ctx.Response.Headers.ETag = revision;
+                return (IResult)Results.StatusCode(StatusCodes.Status304NotModified);
+            }
+            var snapshot = dashboard ? store.ReadDashboardState() : store.Read();
+            // If a writer committed during the read, send the body without a validator.
+            if (dashboard && revision == stateRevision.Current())
+                ctx.Response.Headers.ETag = revision;
             foreach (var job in snapshot.Jobs) job.LeaseToken = "";
             foreach (var reservation in snapshot.BudgetReservations) reservation.LeaseToken = "";
             foreach (var turn in snapshot.RemoteProviderTurns) turn.GrantDigest = "";
@@ -158,7 +169,7 @@ public static class DashboardHost
             ctx.Response.Headers["X-Accel-Buffering"] = "no";
             while (!ctx.RequestAborted.IsCancellationRequested)
             {
-                var json = Json.Stringify(Health(store)).Replace("\r", "").Replace("\n", "");
+                var json = Json.Stringify(Health(store) with { StateRevision = stateRevision.Current() }).Replace("\r", "").Replace("\n", "");
                 await ctx.Response.WriteAsync("event: heartbeat\ndata: " + json + "\n\n", ctx.RequestAborted);
                 await ctx.Response.Body.FlushAsync(ctx.RequestAborted);
                 await Task.Delay(TimeSpan.FromSeconds(3), ctx.RequestAborted);
@@ -272,6 +283,10 @@ public static class DashboardHost
             Results.Ok(MissionControlManager.SetProjectStatus(store, id, input.Action)));
         app.MapGet("/api/goals/{id:guid}/budget", (Guid id) =>
             Results.Ok(GoalBudgetLedger.Summary(store.Read(), id)));
+        app.MapGet("/api/goals/{id:guid}/budget/activity", (Guid id) =>
+            Results.Ok(store.ReadDashboardBudgetActivity(id)));
+        app.MapGet("/api/jobs/{id:guid}/activity", (Guid id) =>
+            Results.Ok(store.ReadDashboardJobActivity(id)));
         app.MapPost("/api/goals/{id:guid}/budget/reconcile", (Guid id, BudgetReconciliationInput input) =>
             Results.Ok(GoalBudgetLedger.Reconcile(store, id, input.ReservationId,
                 input.FinalTokensIn, input.FinalTokensOut, input.Reviewed, input.Reason, input.ConfirmOverrun)));
@@ -492,7 +507,7 @@ public static class DashboardHost
         await app.RunAsync(cancellationToken);
     }
 
-    private static object Health(StateStore store)
+    private static DashboardHealth Health(StateStore store)
     {
         return store.ReadDashboardHealth(DateTimeOffset.UtcNow);
     }

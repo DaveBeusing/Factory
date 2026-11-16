@@ -64,6 +64,8 @@ Start with [Project review and goal planning](project-reviews.md) for the workfl
 
 Use **Projects → Inspect → Configure AI providers** to route operations to enabled profiles. **Capacity** shows attributed usage, Factory-local limits and any account windows reported by the provider. The **Goal Planner** also shows the shared controller Codex allowance next to local project capacity. See [Provider routing and budgets](providers.md) for configuration and accounting. Use the [recovery guide](recovery.md) to review interrupted jobs and settle held usage.
 
+Mission Control keeps its connection heartbeat active while refreshing the controller state when the database revision changes. The administrator Activity view shows the latest 250 events. Job and goal-budget inspectors load their own recent activity independently.
+
 ## Project activity
 
 Open **Activity** with a project token to stream recent job events for a granted project. The view shows work package titles, event types and timestamps. Internal event messages and global events remain available through administrator access.

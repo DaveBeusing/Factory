@@ -1,7 +1,13 @@
+using System.Text.Json.Serialization;
+
 namespace Factory;
 
 internal sealed record DashboardHealth(DateTimeOffset ServerTime, bool QueuePaused, int Projects,
-    int ActiveJobs, int WorkersOnline, int WorkersTotal, DateTimeOffset? LastEventAt);
+    int ActiveJobs, int WorkersOnline, int WorkersTotal, DateTimeOffset? LastEventAt)
+{
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? StateRevision { get; init; }
+}
 
 public sealed partial class StateStore
 {

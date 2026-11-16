@@ -184,6 +184,68 @@ browserTest('clones into explicit and Factory-managed destinations', async ({ ho
   } };
 });
 
+browserTest('skips idle state reads across two Mission Control tabs and refreshes on change', async ({ browser, page, home, api }) => {
+  const token = await page.evaluate(() => sessionStorage.getItem('factory-token'));
+  const other = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  other.setDefaultTimeout(8000);
+  try {
+    const requests = [0, 0];
+    for (const [index, tab] of [page, other].entries()) {
+      tab.on('request', request => {
+        if (new URL(request.url()).pathname === '/api/state') requests[index]++;
+      });
+    }
+    await other.route('**/api/usage', route => route.fulfill({ json: {} }));
+    await other.addInitScript(value => sessionStorage.setItem('factory-token', value), token);
+    const stateResponse = other.waitForResponse(response => new URL(response.url()).pathname === '/api/state');
+    await other.goto(page.url());
+    const loaded = await stateResponse;
+    assert.equal(loaded.status(), 200);
+    const tag = loaded.headers().etag;
+    assert.ok(tag);
+    const notModified = await other.request.get(new URL('/api/state', other.url()).href, { headers: {
+      Authorization: 'Bearer ' + token, 'X-Factory-State-View': 'dashboard', 'If-None-Match': tag
+    } });
+    assert.equal(notModified.status(), 304);
+    assert.equal((await notModified.body()).length, 0);
+    const originalState = await api('state');
+    assert.ok(Array.isArray(originalState.knowledge), 'Existing full-state API must still return its complete shape');
+
+    for (const tab of [page, other]) {
+      await tab.getByRole('button', { name: 'Connection settings, connected' }).waitFor();
+      await tab.getByRole('navigation', { name: 'Primary navigation' })
+        .getByRole('button', { name: 'Projects' }).click();
+      await tab.evaluate(() => {
+        window.dashboardListUpdates = 0;
+        new MutationObserver(records => {
+          window.dashboardListUpdates += records.length;
+        }).observe(document.getElementById('main'), { childList: true, subtree: true });
+      });
+    }
+    const before = [...requests];
+    // Two heartbeat intervals pass while both tabs remain connected and idle.
+    await new Promise(resolve => setTimeout(resolve, 6500));
+    assert.deepEqual(requests, before);
+    const renderChanges = await Promise.all([page, other].map(tab => tab.evaluate(() => window.dashboardListUpdates)));
+    assert.deepEqual(renderChanges, [0, 0]);
+    console.log('BENCHMARK idle Mission Control (2 tabs, 6.5s): 0 state requests, 0 state bytes, 0 list DOM updates');
+
+    await api('projects', { method: 'POST', data: { name: 'Observed in both tabs', source: 'new', path: path.join(home, 'observed') } });
+    await Promise.all([page, other].map(tab => tab.getByText('Observed in both tabs', { exact: true }).waitFor()));
+    assert.deepEqual(requests, before.map(count => count + 1));
+    await other.route('**/api/events/stream', route => route.abort());
+    await other.reload();
+    await other.getByRole('navigation', { name: 'Primary navigation' }).getByRole('button', { name: 'Projects' }).click();
+    await other.getByText('Observed in both tabs', { exact: true }).waitFor();
+    await api('projects', { method: 'POST', data: { name: 'Created during disconnect', source: 'new', path: path.join(home, 'disconnected') } });
+    await page.getByText('Created during disconnect', { exact: true }).waitFor();
+    await other.unroute('**/api/events/stream');
+    await other.getByText('Created during disconnect', { exact: true }).waitFor();
+  } finally {
+    await other.close();
+  }
+});
+
 browserTest('keeps keyboard focus in Mission Control overlays and restores it by layer', async ({ page, nav, form, home, api }) => {
   await api('projects', { method: 'POST', data: { name: 'Keyboard project', source: 'new', path: path.join(home, 'keyboard') } });
   await nav.getByRole('button', { name: 'Projects' }).click();
@@ -317,7 +379,7 @@ async function withDashboard(exercise, seed, allowance) {
       if (!response.ok()) assert.fail(`${options.method || 'GET'} ${resource}: ${response.status()} ${await response.text()}`);
       return response.json();
     };
-    await exercise({ page, nav, form, inspector, api, home, connection, fixture });
+    await exercise({ browser, page, nav, form, inspector, api, home, connection, fixture });
     assert.deepEqual(errors, []);
   } finally {
     try {

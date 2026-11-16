@@ -588,7 +588,7 @@ public sealed partial class StateStore
         Convert.ToString(entity.GetType().GetProperty("Id")!.GetValue(entity), CultureInfo.InvariantCulture)
             ?? throw new InvalidOperationException("Missing entity ID");
 
-    private static FactoryState Load(SqliteConnection db, SqliteTransaction tx)
+    private static FactoryState Load(SqliteConnection db, SqliteTransaction tx, bool dashboard = false)
     {
         var state = new FactoryState();
         using (var meta = Command(db, tx, "SELECT schema,paused FROM factory_metadata WHERE id=1;"))
@@ -601,10 +601,13 @@ public sealed partial class StateStore
 
         foreach (var map in Entities)
         {
+            if (dashboard && map.Table is not ("projects" or "jobs" or "goals" or "workers" or "goal_budget_reservations"))
+                continue;
             var columns = Scalars(map);
             var byId = new Dictionary<string, object>(StringComparer.Ordinal);
             var fields = string.Join(",", columns.Select(p => Q(Column(p.Name))));
-            using (var cmd = Command(db, tx, "SELECT " + fields + " FROM " + Q(map.Table) +
+            var filter = dashboard && map.Table == "goal_budget_reservations" ? " WHERE state IN ('active','held')" : "";
+            using (var cmd = Command(db, tx, "SELECT " + fields + " FROM " + Q(map.Table) + filter +
                 " ORDER BY position,id;"))
             using (var reader = cmd.ExecuteReader())
             {
@@ -641,6 +644,11 @@ public sealed partial class StateStore
             }
             if (map.Type == typeof(ProjectInfo))
                 LoadChecks(db, tx, byId);
+        }
+        if (dashboard)
+        {
+            state.Events = ReadDashboardEvents(db, tx, 250);
+            return state;
         }
         using var integration = Command(db, tx, """
             SELECT DISTINCT j.id, EXISTS (

@@ -29,7 +29,25 @@ const relative = date => { if(!date)return 'Never'; const ms=Date.now()-new Date
 const dateTime = s => s ? new Date(s).toLocaleString() : '—';
 const badge = (s) => { const value=String(s||'unknown').replace(/_/g,' ');const tone=/^(active|online|integrated|passed|completed|completed local|pr ready|enabled|healthy)$/.test(value)?'success':/^(failed|blocked|stopped|disabled|offline|error)$/.test(value)?'danger':/^(paused|draining|awaiting approval|degraded|pending)$/.test(value)?'warning':'info';return `<span class="badge ${tone}">${esc(value)}</span>`; };
 const readToken = () => {try{return sessionStorage.getItem('factory-token')||''}catch{return ''}};
-let token=readToken(), state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};
+const emptyDashboardState=()=>({projects:[],goals:[],jobs:[],workers:[],events:[],budgetReservations:[],paused:false});
+let token=readToken(),state=emptyDashboardState(),stateTag=null;
+const jobsById=new Map(),projectJobCounts=new Map(),goalJobCounts=new Map();
+function applyDashboardState(snapshot){
+ state=snapshot;
+ jobsById.clear();projectJobCounts.clear();goalJobCounts.clear();
+ for(const job of state.jobs){
+  jobsById.set(job.id,job);
+  projectJobCounts.set(job.projectId,(projectJobCounts.get(job.projectId)||0)+1);
+  if(job.goalId){
+   const counts=goalJobCounts.get(job.goalId)||{total:0,done:0};
+   counts.total++;
+   if(job.integrated)counts.done++;
+   goalJobCounts.set(job.goalId,counts);
+  }
+ }
+}
+function jobCounts(goalId){return goalJobCounts.get(goalId)||{total:0,done:0}}
+function hasPendingDependency(job){return job.dependsOn.some(id=>!jobsById.get(id)?.integrated)}
 let planProject="";
 const generatingPlans=new Map();
 const number=value=>Number(value||0).toLocaleString();
@@ -99,7 +117,14 @@ function statusFromHealth(){
 function updateHealth(h){health=h;lastHeartbeat=Date.now();connected=true;statusFromHealth()}
 async function startStream(){if(!token||projectAccess())return;if(streamController)streamController.abort();streamController=new AbortController();const controller=streamController,credential=token;
  while(!controller.signal.aborted){try{const res=await fetch('/api/events/stream',{headers:{Authorization:'Bearer '+credential},cache:'no-store',signal:controller.signal});if(!res.ok)throw Error('Stream '+res.status);
- const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='';while(!controller.signal.aborted){const {done,value}=await reader.read();if(done||controller.signal.aborted)break;buffer+=decoder.decode(value,{stream:true});let pos;while(!controller.signal.aborted&&(pos=buffer.indexOf('\n\n'))>=0){const message=buffer.slice(0,pos);buffer=buffer.slice(pos+2);const data=message.split('\n').find(l=>l.startsWith('data: '));if(data){try{updateHealth(JSON.parse(data.slice(6)));if(Date.now()-lastStateUpdate>2200)await refreshState()}catch(e){console.warn('Heartbeat message:',e)}}}}
+ const reader=res.body.getReader(),decoder=new TextDecoder();let buffer='';while(!controller.signal.aborted){const {done,value}=await reader.read();if(done||controller.signal.aborted)break;buffer+=decoder.decode(value,{stream:true});let pos;while(!controller.signal.aborted&&(pos=buffer.indexOf('\n\n'))>=0){const message=buffer.slice(0,pos);buffer=buffer.slice(pos+2);const data=message.split('\n').find(l=>l.startsWith('data: '));if(data){
+  try{
+   const next=JSON.parse(data.slice(6)),workersChanged=health?.workersOnline!==next.workersOnline;
+   updateHealth(next);
+   if(!stateTag||next.stateRevision!==stateTag)await refreshState();
+   else if(workersChanged&&['overview','workers'].includes(view))render();
+  }catch(e){console.warn('Heartbeat message:',e)}
+ }}}
  }catch(e){if(controller.signal.aborted)break;connected=false;statusFromHealth()}await new Promise(r=>setTimeout(r,2800))}
 }
 async function refreshState(){
@@ -107,9 +132,19 @@ async function refreshState(){
  if(!token||projectAccess()||loadingStateRevision===revision)return;
  loadingStateRevision=revision;
  try{
-  const snapshot=await api('state');
+  const headers={'Authorization':'Bearer '+token,'X-Factory-State-View':'dashboard'};
+  if(stateTag)headers['If-None-Match']=stateTag;
+  const signal=apiRequests.signal;
+  const response=await fetch('/api/state',{headers,cache:'no-store',signal});
+  if(!response.ok&&response.status!==304)throw new Error('Dashboard state '+response.status);
+  const snapshot=response.status===304?null:await response.json();
+  signal.throwIfAborted();
   if(revision!==connectionRevision)return;
-  state=snapshot;lastStateUpdate=Date.now();connected=true;render();statusFromHealth();
+  if(snapshot){
+   stateTag=response.headers.get('ETag');
+   applyDashboardState(snapshot);render();
+  }
+  lastStateUpdate=Date.now();connected=true;statusFromHealth();
  }catch{
   if(revision!==connectionRevision)return;
   connected=false;statusFromHealth();if(!lastStateUpdate)render();
@@ -137,7 +172,7 @@ async function connect(nextToken){
    connected=false;
    health=null;
    lastStateUpdate=0;
-   state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};
+   applyDashboardState(emptyDashboardState());stateTag=null;
    decisionProject='';
    decisionRequest++;
    $('decision-evidence')?.replaceChildren();
@@ -160,7 +195,7 @@ async function connect(nextToken){
   try{token?sessionStorage.setItem('factory-token',token):sessionStorage.removeItem('factory-token')}catch{}
  }
  if(credentialChanged)render();
- if(!token){connected=false;if(streamController)streamController.abort();state={projects:[],goals:[],jobs:[],workers:[],events:[],graph:[],knowledge:[],evaluations:[],releases:[],paused:false};usage=null;render();statusFromHealth();return}
+ if(!token){connected=false;if(streamController)streamController.abort();applyDashboardState(emptyDashboardState());stateTag=null;usage=null;render();statusFromHealth();return}
  if(projectAccess()){
   nav('recovery');
   await loadProjectRecovery();
@@ -194,7 +229,7 @@ function empty(iconName,title,desc,action,label){return `<div class="empty"><div
 function eventItems(events,count=8){return events.length?events.slice(-count).reverse().map(e=>`<div class="event-line"><div class="event-marker"></div><div><strong>${esc(e.type.replaceAll('_',' '))}</strong><small>${esc(relative(e.at))}${e.jobId?' · '+esc(e.jobId.slice(0,8)):''}</small><p>${esc(shorten(e.message,150))}</p></div></div>`).join(''):empty('activity','No activity yet','Factory events will appear here as work is performed.');}
 function workerActive(w){return Date.now()-new Date(w.heartbeat).getTime()<20000}
 function usageCards(className=''){if(!usage)return '';const format=(w,label)=>{if(!w||!Number.isFinite(w.usedPercent)||!Number.isFinite(w.remainingPercent))return '';const used=Math.max(0,Math.min(100,w.usedPercent));return `<div class="usage-card"><div class="usage-top"><h3>${esc(label)}</h3>${badge(usage.stale?'cached':'available')}</div><div class="usage-percent">${w.remainingPercent.toFixed(1)}% <span>remaining</span></div><div class="progress-track" style="margin:13px 0 7px"><div class="progress-fill" data-progress="${used.toFixed(2)}"></div></div><div class="usage-values"><span>${used.toFixed(1)}% used</span><span>${w.remainingPercent.toFixed(1)}% free</span></div><div class="usage-note">${w.resetsAt?'Resets '+esc(dateTime(w.resetsAt)):'Reset time not reported'}${usage.observedAt?' · Updated '+esc(relative(usage.observedAt)):''}</div></div>`};return `<div class="usage-layout${className?' '+esc(className):''}">${format(usage.weekly,'Weekly allowance')}${format(usage.shortWindow,'Short window')}</div>`}
-function rowProjects(list){return list.map(p=>{const jobs=state.jobs.filter(j=>j.projectId===p.id);return `<tr><td><strong>${esc(p.name)}</strong><small class="mono">${esc(shorten(p.path,60))}</small></td><td>${badge(p.status||'active')}</td><td class="mono">${esc(p.baseBranch)}</td><td>${jobs.length}</td><td>${p.maxParallel}</td><td><div class="tiny-actions"><button class="tiny-button" data-inspect="project:${p.id}">Inspect</button><button class="tiny-button" data-edit="project:${p.id}">Configure</button></div></td></tr>`}).join('')}
+function rowProjects(list){return list.map(p=>{const jobs=projectJobCounts.get(p.id)||0;return `<tr><td><strong>${esc(p.name)}</strong><small class="mono">${esc(shorten(p.path,60))}</small></td><td>${badge(p.status||'active')}</td><td class="mono">${esc(p.baseBranch)}</td><td>${jobs}</td><td>${p.maxParallel}</td><td><div class="tiny-actions"><button class="tiny-button" data-inspect="project:${p.id}">Inspect</button><button class="tiny-button" data-edit="project:${p.id}">Configure</button></div></td></tr>`}).join('')}
 function rowJobs(list){const pMap=Object.fromEntries(state.projects.map(p=>[p.id,p.name]));return list.map(j=>`<tr><td><strong>${esc(shorten(j.title,60))}</strong><small class="mono">${esc(j.id.slice(0,8))} · ${esc(j.mode)}</small></td><td>${esc(pMap[j.projectId]||'Unknown')}</td><td>${badge(j.state)}</td><td>${badge(j.risk)}</td><td>${j.priority}</td><td><div class="tiny-actions"><button class="tiny-button" data-inspect="job:${j.id}">Inspect</button><button class="tiny-button" data-edit="job:${j.id}" ${['queued','paused','stopped','failed','blocked'].includes(j.state)?'':'disabled'}>Edit</button></div></td></tr>`).join('')}
 function table(columns,rows){return `<div class="table-wrap"><table><thead><tr>${columns.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div>`}
 function renderOverview(){const active=state.jobs.filter(j=>['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state));const blocked=state.jobs.filter(j=>['failed','blocked'].includes(j.state));const workersOnline=state.workers.filter(workerActive);const pipeline=state.jobs.filter(j=>j.state!=='integrated').slice(-5).reverse();let result=header('Good to see you.','Your engineering operations at a glance. Everything important, without the noise.');
@@ -204,7 +239,7 @@ function renderOverview(){const active=state.jobs.filter(j=>['preparing','buildi
  const jobsBody=pipeline.length?table(['Job','Project','Stage','Risk','Priority','Actions'],rowJobs(pipeline)):empty('layers','No jobs yet','Create a job or generate a plan to begin execution.','create-job','Create job');
  const workerBody=state.workers.length?state.workers.slice(0,7).map(w=>`<div class="list-item"><span class="list-icon">${ico('cpu')}</span><span class="list-text"><strong>${esc(w.id)}</strong><small>${esc(w.platform)} · ${esc(relative(w.heartbeat))}</small></span><span class="list-end">${badge(!w.enabled?'disabled':w.draining?'draining':workerActive(w)?'online':'offline')}</span></div>`).join(''):empty('cpu','No registered workers','Register a worker to track its connection and operational state.','create-worker','Register worker');
  result+=`<div class="content-grid">${card('Job pipeline','Latest work packages and execution states',jobsBody,'jobs')}${card('Worker fleet','Heartbeat-verified connected workers',workerBody,'workers')}</div>`;
- const goalBody=state.goals.length?state.goals.slice(-5).reverse().map(g=>{const total=state.jobs.filter(j=>j.goalId===g.id);const done=total.filter(j=>j.integrated).length;return `<div class="list-item"><span class="list-icon">${ico('target')}</span><span class="list-text"><strong>${esc(shorten(g.objective,66))}</strong><small>${total.length} packages · ${done} integrated</small>${total.length?`<div class="progress-track" style="margin-top:8px"><div class="progress-fill" data-progress="${Math.round(done/total.length*100)}"></div></div>`:''}</span>${badge(g.state)}</div>`}).join(''):empty('target','No goals yet','A goal keeps plans and work packages aligned to an outcome.','create-goal','Set a goal');
+ const goalBody=state.goals.length?state.goals.slice(-5).reverse().map(g=>{const {total,done}=jobCounts(g.id);return `<div class="list-item"><span class="list-icon">${ico('target')}</span><span class="list-text"><strong>${esc(shorten(g.objective,66))}</strong><small>${total} packages · ${done} integrated</small>${total?`<div class="progress-track" style="margin-top:8px"><div class="progress-fill" data-progress="${Math.round(done/total*100)}"></div></div>`:''}</span>${badge(g.state)}</div>`}).join(''):empty('target','No goals yet','A goal keeps plans and work packages aligned to an outcome.','create-goal','Set a goal');
  result+=`<div class="content-grid">${card('Current goals','Outcome-driven execution',goalBody,'goals')}${card('Recent activity','Live actions, reviews and changes',eventItems(state.events,7),'events')}</div>`;result+=`<section class="card stacked-card overview-intelligence"><div class="card-head"><div><h2>Operational intelligence</h2><p>Observed queue, review, integration and budget state</p></div><button class="subtle-link" data-view="recovery">Recovery center</button></div><div class="card-body">${renderOperationalPulse()}</div></section>`;return result}
 function filtered(items,fields){return items.filter(x=>(filter==='all'||x.state===filter||x.status===filter)&&fields.some(k=>String(x[k]||'').toLowerCase().includes(search.toLowerCase())))}
 function toolbar(viewName,statuses){return `<div class="toolbar"><div class="filters"><input class="filter-input" id="table-search" placeholder="Search ${esc(viewName)}..." value="${esc(search)}" aria-label="Search ${esc(viewName)}"><select class="filter-select" id="table-filter" aria-label="Filter by status"><option value="all">All statuses</option>${statuses.map(x=>`<option value="${x}" ${x===filter?'selected':''}>${esc(x)}</option>`).join('')}</select></div><small class="muted">${esc(viewName)} · live state</small></div>`}
@@ -357,7 +392,7 @@ function createReviewGoal(findingId){
     inspect('goal',goal.id);
   },'Create draft goal');
 }
-function renderGoals(){const items=filtered(state.goals,['objective']);const map=Object.fromEntries(state.projects.map(p=>[p.id,p.name]));return header('Goals','Define outcomes, acceptance criteria and token budgets.','create-goal','Create goal')+`<section class="card">${toolbar('goals',['draft','active','paused','stopped','completed','archived'])}<div class="cards-list" style="padding:18px">${items.length?items.map(g=>{const jobs=state.jobs.filter(j=>j.goalId===g.id);const done=jobs.filter(j=>j.integrated).length;return `<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('target')}</span><div><div class="entity-name">${esc(shorten(g.objective,85))}</div><div class="entity-sub">${esc(map[g.projectId]||'Unknown project')}</div></div></div><div class="entity-body">${g.acceptanceCriteria.length} acceptance criteria · ${g.tokenBudget.toLocaleString()} tokens<br>${jobs.length} work packages · ${done} integrated</div>${jobs.length?`<div class="progress-track"><div class="progress-fill" data-progress="${Math.round(done/jobs.length*100)}"></div></div>`:''}<div class="entity-foot">${badge(g.state)}<div class="tiny-actions"><button class="tiny-button" data-inspect="goal:${g.id}">Inspect</button><button class="tiny-button" data-edit="goal:${g.id}">Edit</button><button class="tiny-button" data-act="project-plans" data-id="${g.projectId}">Plan goals</button></div></div></div>`}).join(''):empty('target','No matching goals','Create a goal and set clear success criteria.','create-goal','Create goal')}</div></section>`}
+function renderGoals(){const items=filtered(state.goals,['objective']);const map=Object.fromEntries(state.projects.map(p=>[p.id,p.name]));return header('Goals','Define outcomes, acceptance criteria and token budgets.','create-goal','Create goal')+`<section class="card">${toolbar('goals',['draft','active','paused','stopped','completed','archived'])}<div class="cards-list" style="padding:18px">${items.length?items.map(g=>{const {total,done}=jobCounts(g.id);return `<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('target')}</span><div><div class="entity-name">${esc(shorten(g.objective,85))}</div><div class="entity-sub">${esc(map[g.projectId]||'Unknown project')}</div></div></div><div class="entity-body">${g.acceptanceCriteria.length} acceptance criteria · ${g.tokenBudget.toLocaleString()} tokens<br>${total} work packages · ${done} integrated</div>${total?`<div class="progress-track"><div class="progress-fill" data-progress="${Math.round(done/total*100)}"></div></div>`:''}<div class="entity-foot">${badge(g.state)}<div class="tiny-actions"><button class="tiny-button" data-inspect="goal:${g.id}">Inspect</button><button class="tiny-button" data-edit="goal:${g.id}">Edit</button><button class="tiny-button" data-act="project-plans" data-id="${g.projectId}">Plan goals</button></div></div></div>`}).join(''):empty('target','No matching goals','Create a goal and set clear success criteria.','create-goal','Create goal')}</div></section>`}
 function providerAccountAllowance(provider){
  if(provider.kind!=='codex'||(!usage?.weekly&&!usage?.shortWindow))return 'Unavailable';
  const windows=[['Weekly',usage.weekly],['Short window',usage.shortWindow]];
@@ -449,7 +484,7 @@ async function loadDecisionEvidence(){
 }
 function renderJobs(){const items=filtered(state.jobs,['title','description','state','risk']);return header('Jobs','Inspect execution, manage priority and safely control work packages.','create-job','Create job')+`<section class="card">${toolbar('jobs',['queued','preparing','building','gating','reviewing','reworking','awaiting_approval','pr_ready','completed_local','integrated','paused','stopped','cancelled','failed','blocked'])}${items.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(items.slice().reverse())):empty('layers','No matching jobs','Create a work package or adopt an approved plan.','create-job','Create job')}</section>`}
 function renderWorkers(){const w=state.workers;return header('Workers','Monitor health and control remote-worker admission. Drain/disable never force-kills a running process.','create-worker','Register worker')+`<div class="grid metrics-grid">${metric('Registered',w.length,'Known workers','cpu')}${metric('Online',w.filter(workerActive).length,'Heartbeat < 20 seconds','activity')}${metric('Draining',w.filter(x=>x.draining).length,'No new work assigned','pause')}${metric('Available',w.filter(x=>x.enabled&&!x.draining&&workerActive(x)).length,'Eligible for claims','check')}</div><div class="cards-list">${w.length?w.map(x=>`<div class="entity-card"><div class="entity-top"><span class="entity-avatar">${ico('cpu')}</span><div><div class="entity-name">${esc(x.id)}</div><div class="entity-sub">${esc(x.platform)}</div></div></div><div class="entity-body"><div class="worker-heartbeat"><span class="live-dot ${workerActive(x)?'':'offline'}"></span>${workerActive(x)?'Live heartbeat':'Heartbeat unavailable'} · ${esc(relative(x.heartbeat))}</div><p>Admission: ${x.enabled?(x.draining?'Draining':'Enabled'):'Disabled'}</p></div><div class="entity-foot">${badge(!x.enabled?'disabled':x.draining?'draining':workerActive(x)?'online':'offline')}<div class="tiny-actions"><button class="tiny-button" data-inspect="worker:${encodeURIComponent(x.id)}">Inspect</button><button class="tiny-button" data-act="worker-edit" data-id="${encodeURIComponent(x.id)}">Edit</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${managedWorkers.includes(x.id)?'stop':'start'}">${managedWorkers.includes(x.id)?'Stop local':'Start local'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:${x.draining||!x.enabled?'enable':'drain'}">${x.draining||!x.enabled?'Enable':'Drain'}</button><button class="tiny-button" data-control="worker:${encodeURIComponent(x.id)}:disable" ${!x.enabled?'disabled':''}>Disable</button></div></div></div>`).join(''):empty('cpu','No registered workers','Register a remote worker, then start it with the same ID to track its heartbeat.','create-worker','Register worker')}</div>`}
-function renderQueue(){const queued=state.jobs.filter(j=>j.state==='queued');const active=state.jobs.filter(j=>['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state));const waiting=queued.filter(j=>j.dependsOn.some(dep=>!state.jobs.some(o=>o.id===dep&&o.integrated)));return header('Queue & scheduling','Control admission, prioritize work and inspect dependency blockers.')+`<div class="overview-hero overview-home-hero queue-hero"><div class="overview-hero-left"><div class="hero-orb">${ico('queue')}</div><div><h2>${state.paused?'Queue paused':'Scheduler ready'}</h2><p>${queued.length} queued · ${active.length} active · ${waiting.length} waiting for dependencies</p></div></div><div class="head-actions queue-controls"><button class="button button-primary" data-act="queue-run">${ico('play')} Run</button><button class="button button-muted" data-act="queue-pause">${ico('pause')} Pause</button><button class="button button-muted" data-act="queue-resume">${ico('refresh')} Resume</button><button class="button button-danger" data-act="queue-stop">${ico('stop')} Stop</button></div></div><div class="grid metrics-grid">${metric('Ready or queued',queued.length,'Eligible after constraints','layers')}${metric('Active',active.length,'Working or validating','activity')}${metric('Waiting dependencies',waiting.length,'Must integrate predecessors','route')}${metric('Global concurrency',settings.maxParallel??'—','Configured worker slots','cpu')}</div>${card('Work schedule','Prioritized by eligibility and conflict',queued.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(queued.slice().sort((a,b)=>b.priority-a.priority))):empty('check','Queue is empty','No pending jobs. Add a job or adopt a plan.','create-job','Add job'))}${card('In flight','Active jobs continue during queue pause',active.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(active)):empty('activity','Nothing running','Start the queue when jobs are ready.'),null,'','stacked-card')}`}
+function renderQueue(){const queued=state.jobs.filter(j=>j.state==='queued');const active=state.jobs.filter(j=>['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state));const waiting=queued.filter(hasPendingDependency);return header('Queue & scheduling','Control admission, prioritize work and inspect dependency blockers.')+`<div class="overview-hero overview-home-hero queue-hero"><div class="overview-hero-left"><div class="hero-orb">${ico('queue')}</div><div><h2>${state.paused?'Queue paused':'Scheduler ready'}</h2><p>${queued.length} queued · ${active.length} active · ${waiting.length} waiting for dependencies</p></div></div><div class="head-actions queue-controls"><button class="button button-primary" data-act="queue-run">${ico('play')} Run</button><button class="button button-muted" data-act="queue-pause">${ico('pause')} Pause</button><button class="button button-muted" data-act="queue-resume">${ico('refresh')} Resume</button><button class="button button-danger" data-act="queue-stop">${ico('stop')} Stop</button></div></div><div class="grid metrics-grid">${metric('Ready or queued',queued.length,'Eligible after constraints','layers')}${metric('Active',active.length,'Working or validating','activity')}${metric('Waiting dependencies',waiting.length,'Must integrate predecessors','route')}${metric('Global concurrency',settings.maxParallel??'—','Configured worker slots','cpu')}</div>${card('Work schedule','Prioritized by eligibility and conflict',queued.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(queued.slice().sort((a,b)=>b.priority-a.priority))):empty('check','Queue is empty','No pending jobs. Add a job or adopt a plan.','create-job','Add job'))}${card('In flight','Active jobs continue during queue pause',active.length?table(['Work package','Project','State','Risk','Priority',''],rowJobs(active)):empty('activity','Nothing running','Start the queue when jobs are ready.'),null,'','stacked-card')}`}
 function stopProjectActivity(){
  activityController?.abort();
  activityController=null;
@@ -948,7 +983,7 @@ function renderRecovery(){
 }
 function renderOperationalPulse(){
  const queued=state.jobs.filter(j=>j.state==='queued');
- const waiting=queued.filter(j=>j.dependsOn.some(id=>!state.jobs.some(other=>other.id===id&&other.integrated)));
+ const waiting=queued.filter(hasPendingDependency);
  const ages=queued.map(j=>Date.now()-new Date(j.createdAt).getTime()).filter(ms=>Number.isFinite(ms)&&ms>=0);
  const oldest=ages.length?Math.round(Math.max(...ages)/60000)+' min':'Unavailable';
  const reviews=state.jobs.filter(j=>j.state==='reviewing').length;
@@ -1344,7 +1379,7 @@ function jobInspectorDetails(j,kv){
  const workerId=owner.startsWith('remote:')?owner.slice(7):owner;
  const worker=state.workers.find(w=>w.id===workerId);
  const heartbeat=worker?(workerActive(worker)?'Connected, ':'Stale or offline, ')+relative(worker.heartbeat):'No registered heartbeat';
- const dependencies=(j.dependsOn||[]).map(id=>{const p=state.jobs.find(x=>x.id===id);return p?`${shorten(p.title,55)}: ${p.integrated?'integrated':p.state}`:'Unresolved '+id}).join('; ')||'None';
+ const dependencies=(j.dependsOn||[]).map(id=>{const p=jobsById.get(id);return p?`${shorten(p.title,55)}: ${p.integrated?'integrated':p.state}`:'Unresolved '+id}).join('; ')||'None';
  const reservations=(state.budgetReservations||[]).filter(r=>r.jobId===j.id);
  const current=reservations.find(r=>r.executionGeneration===j.executionGeneration&&r.state==='active');
  const held=reservations.filter(r=>r.state==='held');
@@ -1445,8 +1480,10 @@ async function renderGoalBudget(goalId){
  const target=$('inspector-goal-budget');
  if(!target||inspectorKey!=='goal:'+goalId)return;
  try{
-  const budget=await api('goals/'+goalId+'/budget');
-  if(inspectorKey!=='goal:'+goalId||!$('inspector-goal-budget'))return;
+  const [budget,events]=await Promise.all([
+   api('goals/'+goalId+'/budget'),api('goals/'+goalId+'/budget/activity').catch(()=>null)
+  ]);
+  if(inspectorKey!=='goal:'+goalId||target!==$('inspector-goal-budget'))return;
   const nf=x=>Number(x||0).toLocaleString();
   const rows=budget.reservations||[];
   const active=budget.activeOutstanding;
@@ -1458,8 +1495,6 @@ async function renderGoalBudget(goalId){
   const records=rows.map(r=>{const j=state.jobs.find(j=>j.id===r.jobId);
    return `<tr><td>${esc(j?shorten(j.title,38):r.jobId.slice(0,8))}<small>Generation ${esc(r.executionGeneration)}</small></td><td>${badge(r.state)}</td><td>${nf(r.reserved)}</td><td>${nf(r.consumed)}</td><td>${nf(r.outstanding)}</td></tr>`;
   }).join('');
-  const jobs=new Set(state.jobs.filter(j=>j.goalId===goalId).map(j=>j.id));
-  const events=state.events.filter(e=>jobs.has(e.jobId)&&['budget_reserved','budget_extended','budget_held','budget_released','budget_reconciled','budget_overrun'].includes(e.type));
   const durableExtensions=Array.isArray(budget.extensions)?budget.extensions:null;
   const grantRows=(durableExtensions||[]).map(e=>{
    const job=state.jobs.find(j=>j.id===e.jobId);
@@ -1501,10 +1536,10 @@ async function renderGoalBudget(goalId){
    ${durableExtensions===null?'<p class="subtext">Dedicated extension history is unavailable on this controller version.</p>':
     grantRows?table(['Job','Granted at','Controller identity','Additional tokens','New reservation'],grantRows):
     '<p class="subtext">No extension requests have been recorded in the durable ledger.</p>'}
-   <h3>Budget activity</h3>${eventItems(events,20)}
+   <h3>Budget activity</h3>${events?eventItems(events,20):'<p class="subtext">Budget activity unavailable</p>'}
    <p class="subtext">Operational events are subject to controller retention limits. The durable extension ledger, when supported, begins at its migration date; older events cannot be reconstructed automatically.</p>`;
  }catch(error){
-  if(inspectorKey==='goal:'+goalId&&$('inspector-goal-budget'))
+  if(inspectorKey==='goal:'+goalId&&target===$('inspector-goal-budget'))
    $('inspector-goal-budget').innerHTML=`<p class="subtext" role="alert">Budget details unavailable: ${esc(error.message)}</p><button class="button button-muted" data-act="budget-refresh" data-id="${goalId}">Retry</button>`;
  }
 }
@@ -1556,6 +1591,18 @@ function closeInspector(){
  panel.close();
  if(document.activeElement===document.body)$('main').focus({preventScroll:true});
 }
+async function renderJobActivity(jobId){
+ const target=$('inspector-job-activity');
+ if(!target)return;
+ try{
+  const events=await api('jobs/'+jobId+'/activity');
+  if(target===$('inspector-job-activity')&&inspectorKey==='job:'+jobId&&events.length)
+   target.innerHTML='<hr class="panel-divider"><h3>Job activity</h3>'+eventItems(events,15);
+ }catch{
+  if(target===$('inspector-job-activity')&&inspectorKey==='job:'+jobId)
+   target.textContent='Job activity unavailable';
+ }
+}
 function inspectorPanel(title,body){inspectorKey=null;$('inspector-title').textContent=title;$('inspector-body').innerHTML=body;setProgress($('inspector-body'));showInspector()}
 function inspect(type,id){const entity=(type==='project'?state.projects:type==='goal'?state.goals:type==='worker'?state.workers:state.jobs).find(x=>(type==='worker'?x.id: x.id)===id);if(!entity)return;let body='';
  if(type==='job'){const j=entity;body=`${badge(j.state)}<div class="job-info-grid" style="margin-top:18px">${kv('Priority',j.priority)}${kv('Risk',j.risk)}${kv('Execution mode',j.mode)}${kv('Stage',j.stage)}${kv('Attempt',j.attempt)}${kv('Tokens',Number(j.tokensIn||0)+Number(j.tokensOut||0))}</div><h3>Description</h3><p class="subtext">${esc(j.description)}</p>${j.error?`<div class="badge danger">${esc(j.error)}</div>`:''}${kv('Branch',j.branch||'—')}${kv('Worktree',j.worktree||'—')}${kv('Head commit',j.headSha||'—')}${kv('Dependencies',j.dependsOn.join(', ')||'None')}${safeUrl(j.prUrl)?`<p><a href="${esc(safeUrl(j.prUrl))}" rel="noopener noreferrer" target="_blank">View pull request ↗</a></p>`:''}<hr class="panel-divider"><h3>Controls</h3><div class="queue-controls">${['queued'].includes(j.state)?`<button class="button button-primary" data-act="job-start" data-id="${j.id}" ${j.mode==='remote'?'disabled':''}>Run now</button><button class="button button-muted" data-control="job:${j.id}:pause">Pause</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop</button><button class="button button-danger" data-control="job:${j.id}:cancel">Cancel job</button>`:''}${['preparing','building','gating','reviewing','reworking','awaiting_approval'].includes(j.state)?`<button class="button button-muted" data-control="job:${j.id}:pause">Pause local</button><button class="button button-danger" data-control="job:${j.id}:stop">Stop local</button>`:''}${['paused','stopped','blocked','failed'].includes(j.state)?`<button class="button button-primary" data-control="job:${j.id}:resume">Review & requeue</button>`:''}${['pr_ready','completed_local'].includes(j.state)?`<button class="button button-muted" data-act="verify" data-id="${j.id}">Verify integration</button>`:''}</div>`;
@@ -1566,11 +1613,11 @@ function inspect(type,id){const entity=(type==='project'?state.projects:type==='
  }else if(type==='goal'){const g=entity;body=`${badge(g.state)}${kv('Objective',g.objective)}${kv('Token budget',g.tokenBudget.toLocaleString())}<h3>Acceptance criteria</h3><ul>${g.acceptanceCriteria.map(c=>`<li>${esc(c)}</li>`).join('')}</ul><hr class="panel-divider"><div class="queue-controls"><button class="button button-muted" data-edit="goal:${g.id}">Edit</button>${g.state==='draft'?`<button class="button button-primary" data-control="goal:${g.id}:activate">Activate</button>`:''}${['active'].includes(g.state)?`<button class="button button-muted" data-control="goal:${g.id}:pause">Pause</button><button class="button button-muted" data-control="goal:${g.id}:stop">Stop</button><button class="button button-muted" data-control="goal:${g.id}:complete">Complete</button>`:''}${['paused','stopped'].includes(g.state)?`<button class="button button-primary" data-control="goal:${g.id}:activate">Resume</button>`:''}<button class="button button-muted" data-control="goal:${g.id}:archive">Archive</button></div>`;
  body+='<hr class="panel-divider"><h3>Goal budget ledger</h3><div id="inspector-goal-budget" aria-live="polite"><p class="subtext">Loading controller budget data...</p></div>';
   }else{const w=entity;body=`${badge(!w.enabled?'disabled':w.draining?'draining':workerActive(w)?'online':'offline')}${kv('Platform',w.platform)}${kv('Last heartbeat',dateTime(w.heartbeat))}<p class="subtext">Draining prevents new claims; it does not terminate in-flight work.</p><div class="queue-controls"><button class="button button-muted" data-act="worker-edit" data-id="${encodeURIComponent(w.id)}">Configure</button><button class="button button-muted" data-control="worker:${encodeURIComponent(w.id)}:${managedWorkers.includes(w.id)?'stop':'start'}">${managedWorkers.includes(w.id)?'Stop local':'Start local'}</button><button class="button button-muted" data-control="worker:${encodeURIComponent(w.id)}:enable">Enable</button><button class="button button-muted" data-control="worker:${encodeURIComponent(w.id)}:drain">Drain</button><button class="button button-danger" data-control="worker:${encodeURIComponent(w.id)}:disable">Disable</button></div>`;}
- const events=state.events.filter(e=>e.jobId===id).slice(-15);if(events.length)body+=`<hr class="panel-divider"><h3>Job activity</h3>${eventItems(events,15)}`;
+ if(type==='job')body+='<div id="inspector-job-activity"></div>';
  inspectorPanel((type==='job'?entity.title:type==='goal'?shorten(entity.objective,40):type==='project'?entity.name:entity.id),body);
   inspectorKey=type+':'+id;
   if(type==='goal')renderGoalBudget(id);
-  if(type==='job'){renderJobQuality(id);renderJobProviderTurns(id);}
+  if(type==='job'){renderJobQuality(id);renderJobProviderTurns(id);renderJobActivity(id);}
 }
 function planPackageDetails(plan){
  return plan.packages.map((p,i)=>'<div class="package-row"><span class="package-num">'+(i+1)+'</span><div><strong>'+
@@ -1766,7 +1813,7 @@ document.addEventListener('keydown',e=>{
  if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('open-search').click()}
 });
 setInterval(statusFromHealth,1100);
-setInterval(()=>{if(token&&Date.now()-lastStateUpdate>11000)refreshState()},10000);
+setInterval(()=>{if(token&&Date.now()-lastStateUpdate>11000&&Date.now()-lastHeartbeat>8500)refreshState()},10000);
 setInterval(refreshUsage,60000);
 setInterval(()=>{if(view==='plans'&&token&&!projectAccess())loadPlans();if(view==='workers'&&token)fetchManagedWorkers()},15000);
 document.querySelectorAll('[data-icon]').forEach(el=>{el.innerHTML=ico(el.dataset.icon)});

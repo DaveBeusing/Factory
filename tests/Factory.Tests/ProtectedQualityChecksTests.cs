@@ -115,6 +115,10 @@ internal static class ProtectedQualityChecksTests
             var result = await source.RunAsync(check, default);
             Require(result.Ok, "Protected check failed: " + result.Error);
             Require(!File.Exists(Path.Combine(repo.FullName, "output")), "Check writes reached the controller checkout.");
+            check.Arguments = ["-ec", "printf '%8192s' x; printf 'final container diagnostic' >&2"];
+            result = await source.RunAsync(check, default);
+            Require(result.Code == 0 && result.Output.Length == 4_000 && result.OutputTruncated &&
+                result.Error.TrimEnd() == "final container diagnostic", "Protected checks lost bounded diagnostics.");
             check.ContainerImage = "sha256:" + new string('0', 64);
             result = await source.RunAsync(check, default);
             Require(!result.Ok, "Missing local image did not fail closed.");

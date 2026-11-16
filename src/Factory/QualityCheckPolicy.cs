@@ -161,7 +161,7 @@ internal sealed class ProtectedCheckSource : IDisposable
     }
 
     private Task<CommandResult> DockerAsync(IReadOnlyList<string> args, int timeout, CancellationToken ct) =>
-        Commands.RunAsync("docker", ["--host", DockerHost, "--config", _staging.FullName, ..args],
+        Commands.RunForDiagnosticsAsync("docker", ["--host", DockerHost, "--config", _staging.FullName, ..args],
             _staging.FullName, timeout, cancellationToken: ct, configure: ConfigureDocker);
 
     internal static void ConfigureDocker(ProcessStartInfo start)

@@ -41,6 +41,11 @@ internal sealed class ClaudeReadOnlyAgentRuntime(string model) : IAgentRuntime, 
             RequestedModel = model,
             Error = command.Ok ? "Claude Code returned no structured result" : "Claude Code exited with code " + command.Code
         };
+        if (command.OutputTruncated)
+        {
+            result.Error = "Claude Code returned an incomplete structured result";
+            return result;
+        }
         try
         {
             using var document = JsonDocument.Parse(command.Output);

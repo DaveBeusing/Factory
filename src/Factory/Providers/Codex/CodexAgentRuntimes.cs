@@ -73,7 +73,7 @@ public sealed class ExecAgentRuntime(string model) : IAgentRuntime
         args.Add("-");
         var turn = new CodexExecTurn(onSession, onUsage);
         var command = await Commands.RunAsync("codex", args, directory, 7200, prompt, turn.Observe, cancellation);
-        return turn.Finish(command.Ok, readOnly);
+        return turn.Finish(command.Code == 0 && !command.CallbackLineTruncated, readOnly);
     }
 }
 

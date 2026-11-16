@@ -29,6 +29,8 @@ public sealed class CheckReport
     public int ExitCode { get; set; }
     public string Output { get; set; } = "";
     public string Error { get; set; } = "";
+    public bool OutputTruncated { get; set; }
+    public bool ErrorTruncated { get; set; }
 }
 
 public sealed class QualityEngine
@@ -115,17 +117,17 @@ public sealed class QualityEngine
                     : check.Arguments;
                var response = checkSource is not null
                    ? await checkSource.RunAsync(check, ct)
-                   : await Commands.RunAsync(executable, arguments, job.Worktree, check.TimeoutSeconds,
+                   : await Commands.RunForDiagnosticsAsync(executable, arguments, job.Worktree, check.TimeoutSeconds,
                        cancellationToken: ct);
                quality.Checks.Add(new CheckReport
                 {
                     Name = check.Name, ExitCode = response.Code,
                     ExecutionBoundary = protectedChecks ? QualityCheckPolicy.ProtectedContainer :
                         isolated ? "legacy-container" : QualityCheckPolicy.TrustedHost,
-                    Output = response.Output[^Math.Min(4000, response.Output.Length)..],
-                    Error = response.Error[^Math.Min(4000, response.Error.Length)..]
+                    Output = response.Output, Error = response.Error,
+                    OutputTruncated = response.OutputTruncated, ErrorTruncated = response.ErrorTruncated
                 });
-               if (!response.Ok) quality.Findings.Add("Check failed: " + check.Name);
+               if (response.Code != 0) quality.Findings.Add("Check failed: " + check.Name);
            }
             catch (Exception ex) when (ex is not OperationCanceledException and not TimeoutException)
             {

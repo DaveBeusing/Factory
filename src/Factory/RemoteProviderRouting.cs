@@ -86,12 +86,14 @@ public static class RemoteProviderRouting
             !string.Equals(token, settings.WorkerTokenKey, StringComparison.OrdinalIgnoreCase) ? token : null;
     }
 
-    internal static RemoteProviderRoute[]? Plan(FactoryState state, FactorySettings settings, FactoryJob job)
+    internal static RemoteProviderRoute[]? Plan(FactoryState state, FactorySettings settings, FactoryJob job,
+        RuntimeSettingsRevision? runtimeSettings = null)
     {
-        if (!settings.AllowPush || !settings.EnableRemoteProviderRouting || !IsExecutorUrl(settings.RemoteProviderExecutorUrl) ||
+        runtimeSettings ??= settings.RuntimeRevision;
+        if (!runtimeSettings.AllowPush || !settings.EnableRemoteProviderRouting || !IsExecutorUrl(settings.RemoteProviderExecutorUrl) ||
             ExecutorCredential(settings) is null || job.GoalId is null ||
             settings.RemoteProviderTurnTokens is < 256 or > 65536 ||
-            settings.MaxJobReservationTokens < settings.GoalReservationTokens)
+            runtimeSettings.MaxJobReservationTokens < runtimeSettings.GoalReservationTokens)
             return null;
         try
         {
@@ -121,12 +123,14 @@ public static class RemoteProviderRouting
     internal static RemoteProviderLease? Current(FactoryState state, FactoryJob job) =>
         state.RemoteProviderLeases.SingleOrDefault(l => l.JobId == job.Id && l.ExecutionGeneration == job.ExecutionGeneration);
 
-    internal static bool CanContinue(FactoryState state, FactorySettings settings, FactoryJob job, RemoteProviderLease lease)
+    internal static bool CanContinue(FactoryState state, FactorySettings settings, FactoryJob job, RemoteProviderLease lease,
+        RuntimeSettingsRevision? runtimeSettings = null)
     {
-        var routes = Plan(state, settings, job);
+        runtimeSettings ??= settings.RuntimeRevision;
+        var routes = Plan(state, settings, job, runtimeSettings);
         return routes is not null && Json.Stringify(routes) == lease.RouteJson &&
             settings.RemoteProviderExecutorUrl == lease.ExecutorUrl && settings.RemoteProviderTurnTokens == lease.TurnTokens &&
-            settings.MaxJobReservationTokens == lease.MaxJobTokens;
+            runtimeSettings.MaxJobReservationTokens == lease.MaxJobTokens;
     }
 
     public static async Task<RemoteExecutorReceipt> ExecuteAsync(StateStore store, FactorySettings settings,

@@ -25,6 +25,7 @@ public sealed class QualityResult
 public sealed class CheckReport
 {
     public string Name { get; set; } = "";
+    public string ExecutionBoundary { get; set; } = "";
     public int ExitCode { get; set; }
     public string Output { get; set; } = "";
     public string Error { get; set; } = "";
@@ -84,6 +85,24 @@ public sealed class QualityEngine
             if (Regex.IsMatch(text, @"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|(?i:password\s*=\s*['""].{8,}['""])", RegexOptions.None))
                 quality.Findings.Add("Possible embedded secret in " + file);
         }
+        var protectedChecks = project.CheckExecutionPolicy == QualityCheckPolicy.ProtectedContainer;
+        try { QualityCheckPolicy.Validate(project.CheckExecutionPolicy, project.Checks); }
+        catch (ArgumentException ex)
+        {
+            quality.Findings.Add(ex.Message);
+            return quality;
+        }
+        ProtectedCheckSource? isolatedSource = null;
+        if (protectedChecks)
+        {
+            try { isolatedSource = await ProtectedCheckSource.CreateAsync(job.Worktree, quality.HeadSha, ct); }
+            catch (InvalidOperationException ex)
+            {
+                quality.Findings.Add(ex.Message);
+                return quality;
+            }
+        }
+        using var checkSource = isolatedSource;
         foreach (var check in project.Checks)
         {
             if (string.IsNullOrWhiteSpace(check.Executable)) { quality.Findings.Add("Empty check executable"); continue; }
@@ -96,11 +115,15 @@ public sealed class QualityEngine
                         "--mount", "type=bind,source=" + job.Worktree + ",target=/work,readonly", "--workdir", "/work",
                         check.ContainerImage, check.Executable }.Concat(check.Arguments).ToList()
                     : check.Arguments;
-               var response = await Commands.RunForDiagnosticsAsync(executable, arguments,
-                    job.Worktree, check.TimeoutSeconds, cancellationToken: ct);
+               var response = checkSource is not null
+                   ? await checkSource.RunAsync(check, ct)
+                   : await Commands.RunForDiagnosticsAsync(executable, arguments, job.Worktree, check.TimeoutSeconds,
+                       cancellationToken: ct);
                quality.Checks.Add(new CheckReport
                 {
                     Name = check.Name, ExitCode = response.Code,
+                    ExecutionBoundary = protectedChecks ? QualityCheckPolicy.ProtectedContainer :
+                        isolated ? "legacy-container" : QualityCheckPolicy.TrustedHost,
                     Output = response.Output, Error = response.Error,
                     OutputTruncated = response.OutputTruncated, ErrorTruncated = response.ErrorTruncated
                 });

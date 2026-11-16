@@ -51,7 +51,7 @@ function hasPendingDependency(job){return job.dependsOn.some(id=>!jobsById.get(i
 let planProject="";
 const generatingPlans=new Map();
 const number=value=>Number(value||0).toLocaleString();
-let settings={}, usage=null, providerData=null, projectReview=null, analysisProject='', health=null, view='overview', search='', filter='all', streamController=null,lastHeartbeat=0, connected=false, lastStateUpdate=0, modalHandler=null, inspector=null, planDraft=null, planGoal=null;
+let settings={}, usage=null, providerData=null, projectReview=null, analysisProject='', health=null, view='overview', search='', filter='all', streamController=null,lastHeartbeat=0, connected=false, lastStateUpdate=0, modalHandler=null, planDraft=null, planGoal=null;
 let connectionRevision=0, loadingStateRevision=null, apiRequests=new AbortController();
 let projectSetup=null;
 const projectAccess=()=>token.startsWith('factory-viewer-');
@@ -78,7 +78,8 @@ async function api(path,method='GET',body){
  return result;
 }
 const toastHost=()=>$('connection-modal').open?$('connection-modal'):
- $('form-modal').open?$('form-modal'):$('palette').open?$('palette'):document.body;
+ $('form-modal').open?$('form-modal'):$('palette').open?$('palette'):
+ $('inspector-dialog').open?$('inspector-dialog'):document.body;
 function notify(message,error=false){
  const stack=$('toast-stack');
  toastHost().append(stack);
@@ -91,10 +92,14 @@ function notify(message,error=false){
  setTimeout(()=>toast.remove(),5500);
 }
 for(const dialog of document.querySelectorAll('dialog')){
- dialog.addEventListener('close',()=>toastHost().append($('toast-stack')));
+ dialog.addEventListener('close',()=>{
+  const host=toastHost();
+  host.append($('toast-stack'));
+  if(host.id==='inspector-dialog'&&!host.contains(document.activeElement))$('inspector-close').focus();
+ });
 }
 function condition(cls, val) { document.querySelectorAll(cls).forEach(el=>el.classList.toggle('hidden',!val)); }
-function nav(v){if(view==='events'&&v!=='events'&&projectAccess())stopProjectActivity();view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=({plans:'Goal planner',analysis:'Project review'})[v]||v.charAt(0).toUpperCase()+v.slice(1);$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open');render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});if(v==='settings'&&!doctor)loadDoctor();}
+function nav(v){if(view==='events'&&v!=='events'&&projectAccess())stopProjectActivity();view=v;filter='all';search='';document.querySelectorAll('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.view===v));$('breadcrumb').textContent=({plans:'Goal planner',analysis:'Project review'})[v]||v.charAt(0).toUpperCase()+v.slice(1);setMobileNavigation(false);render();$('main').focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});if(v==='settings'&&!doctor)loadDoctor();}
 function statusFromHealth(){
  const since=lastHeartbeat?Date.now()-lastHeartbeat:Infinity;
  const status=projectAccess()?(connected?'connected':'offline'):!token?'offline':!lastHeartbeat?(connected?'connecting':'offline'):connected&&since<8500?'connected':connected&&since<17000?'degraded':'offline';
@@ -1003,6 +1008,16 @@ let renderedMain;
 function setProgress(root){
  for(const fill of root.querySelectorAll('[data-progress]'))fill.style.width=`${fill.dataset.progress}%`;
 }
+function replaceMain(html){
+ const main=$('main'),focused=document.activeElement;
+ const restore=focused!==main&&main.contains(focused);
+ main.innerHTML=html;
+ if(!restore)return;
+ const attributes=Object.entries(focused.dataset);
+ const counterpart=focused.id?$(focused.id):attributes.length&&[...main.querySelectorAll(focused.tagName)].find(
+  candidate=>attributes.every(([key,value])=>candidate.dataset[key]===value));
+ (counterpart&&!counterpart.disabled?counterpart:main).focus({preventScroll:true});
+}
 function render(){
  const scoped=projectAccess();
  document.body.classList.toggle('project-access',scoped);
@@ -1010,21 +1025,19 @@ function render(){
  if(scoped){
   const next=view==='plans'?renderScopedPlanning():view==='analysis'?renderScopedAnalysis():view==='events'?renderProjectActivity():renderProjectRecovery();
   if(next!==renderedMain){
-   const focused=document.activeElement?.id;
-   $('main').innerHTML=next;
+   replaceMain(next);
    renderedMain=next;
    $('recovery-project')?.addEventListener('change',event=>loadProjectRecovery(event.target.value));
    $('scoped-plan-project')?.addEventListener('change',event=>loadScopedPlanning(event.target.value));
    $('scoped-analysis-project')?.addEventListener('change',event=>loadScopedAnalysis(event.target.value));
    $('activity-project')?.addEventListener('change',event=>loadProjectActivity(event.target.value));
-   if(['recovery-project','scoped-plan-project','scoped-analysis-project','activity-project'].includes(focused))$(focused)?.focus();
   }
   document.querySelectorAll('[data-count]').forEach(el=>el.textContent='');
   return;
  }
 const renders={overview:renderOverview,projects:renderProjects,goals:renderGoals,analysis:renderAnalysis,plans:renderPlans,workers:renderWorkers,jobs:renderJobs,queue:renderQueue,recovery:renderRecovery,events:renderEvents,usage:renderUsage,settings:renderSettings,decisions:renderDecisions};const next=renderProjectSetup()+(renders[view]||renderOverview)();
  const mainChanged=next!==renderedMain;
- if(mainChanged){$('main').innerHTML=next;setProgress($('main'));renderedMain=next;}
+ if(mainChanged){replaceMain(next);setProgress($('main'));renderedMain=next;}
  for(const name of ['projects','goals','jobs','workers'])document.querySelectorAll(`[data-count="${name}"]`).forEach(el=>el.textContent=(state[name]||[]).length||'');
   document.querySelectorAll('[data-count="recovery"]').forEach(el=>el.textContent=recoveryCandidates().length||'');
  if(!mainChanged)return;
@@ -1447,7 +1460,7 @@ async function renderGoalBudget(goalId){
   const [budget,events]=await Promise.all([
    api('goals/'+goalId+'/budget'),api('goals/'+goalId+'/budget/activity').catch(()=>null)
   ]);
-  if(inspectorKey!=='goal:'+goalId||!$('inspector-goal-budget'))return;
+  if(inspectorKey!=='goal:'+goalId||target!==$('inspector-goal-budget'))return;
   const nf=x=>Number(x||0).toLocaleString();
   const rows=budget.reservations||[];
   const active=budget.activeOutstanding;
@@ -1503,7 +1516,7 @@ async function renderGoalBudget(goalId){
    <h3>Budget activity</h3>${events?eventItems(events,20):'<p class="subtext">Budget activity unavailable</p>'}
    <p class="subtext">Operational events are subject to controller retention limits. The durable extension ledger, when supported, begins at its migration date; older events cannot be reconstructed automatically.</p>`;
  }catch(error){
-  if(inspectorKey==='goal:'+goalId&&$('inspector-goal-budget'))
+  if(inspectorKey==='goal:'+goalId&&target===$('inspector-goal-budget'))
    $('inspector-goal-budget').innerHTML=`<p class="subtext" role="alert">Budget details unavailable: ${esc(error.message)}</p><button class="button button-muted" data-act="budget-refresh" data-id="${goalId}">Retry</button>`;
  }
 }
@@ -1543,8 +1556,18 @@ async function reconcileGoalBudget(goalId){
  });
 }
 
-function showInspector(){inspector=true;$('inspector').classList.add('open');$('inspector').setAttribute('aria-hidden','false');$('inspector-backdrop').classList.add('open')}
-function closeInspector(){scopedPlanEditor=null;scopedPlanRequest++;inspectorKey=null;inspector=null;$('inspector').classList.remove('open');$('inspector').setAttribute('aria-hidden','true');$('inspector-backdrop').classList.remove('open')}
+function showInspector(){
+ const panel=$('inspector-dialog');
+ if(!panel.open)panel.showModal();
+ if(!panel.contains(document.activeElement))$('inspector-close').focus();
+}
+function closeInspector(){
+ scopedPlanEditor=null;scopedPlanRequest++;inspectorKey=null;
+ const panel=$('inspector-dialog');
+ if(!panel.open)return;
+ panel.close();
+ if(document.activeElement===document.body)$('main').focus({preventScroll:true});
+}
 async function renderJobActivity(jobId){
  const target=$('inspector-job-activity');
  if(!target)return;
@@ -1720,14 +1743,52 @@ $('connection-form').addEventListener('submit',async e=>{e.preventDefault();awai
 $('disconnect').addEventListener('click',()=>{$('connection-modal').close();connect('')});
 document.querySelectorAll('[data-close]').forEach(el=>el.addEventListener('click',()=>$(el.dataset.close).close()));
 $('brand-connection').addEventListener('click',()=>{$('api-token').value=token;$('connection-modal').showModal()});
-$('inspector-close').addEventListener('click',closeInspector);$('inspector-backdrop').addEventListener('click',closeInspector);
-$('mobile-open').addEventListener('click',()=>{$('sidebar').classList.add('open');$('sidebar-backdrop').classList.add('open')});
-$('mobile-close').addEventListener('click',()=>{$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open')});
-$('sidebar-backdrop').addEventListener('click',()=>{$('sidebar').classList.remove('open');$('sidebar-backdrop').classList.remove('open')});
+$('inspector-close').addEventListener('click',closeInspector);
+const inspectorDialog=$('inspector-dialog');
+inspectorDialog.addEventListener('cancel',event=>{event.preventDefault();closeInspector()});
+inspectorDialog.addEventListener('click',event=>{if(event.target===inspectorDialog)closeInspector()});
+const mobileLayout=matchMedia('(max-width: 900px)');
+const sidebar=$('sidebar'),mainShell=document.querySelector('.main-shell');
+function setMobileNavigation(open,restoreFocus=false){
+ const active=mobileLayout.matches&&open;
+ sidebar.classList.toggle('open',active);
+ $('sidebar-backdrop').classList.toggle('open',active);
+ $('mobile-open').setAttribute('aria-expanded',String(active));
+ sidebar.inert=mobileLayout.matches&&!active;
+ mainShell.inert=active;
+ if(active){
+  sidebar.setAttribute('role','dialog');
+  sidebar.setAttribute('aria-modal','true');
+  sidebar.setAttribute('aria-label','Navigation');
+  $('mobile-close').focus();
+ }else{
+  for(const attribute of ['role','aria-modal','aria-label'])sidebar.removeAttribute(attribute);
+  if(restoreFocus&&mobileLayout.matches)$('mobile-open').focus();
+ }
+}
+$('mobile-open').addEventListener('click',()=>setMobileNavigation(true));
+$('mobile-close').addEventListener('click',()=>setMobileNavigation(false,true));
+$('sidebar-backdrop').addEventListener('click',()=>setMobileNavigation(false,true));
+mobileLayout.addEventListener('change',()=>{
+ if(!mobileLayout.matches||!sidebar.classList.contains('open'))setMobileNavigation(false);
+});
+setMobileNavigation(false);
 $('top-create').addEventListener('click',()=>{const actions=[['Project','create-project'],['Goal','create-goal'],['Job','create-job'],['Worker','create-worker']];openForm('Create new','Choose the object to add to your Factory workspace.',`<div class="list-stack">${actions.map(([name,action])=>`<button type="button" class="palette-entry" data-act="${action}">${ico('plus')} New ${name}</button>`).join('')}</div>`,async()=>{},'Done')});
 $('open-search').addEventListener('click',()=>{if(projectAccess())return;$('palette-input').value='';showPalette();$('palette').showModal();$('palette-input').focus()});
 $('palette-input').addEventListener('input',showPalette);
-document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('open-search').click()}if(e.key==='Escape'&&inspector)closeInspector()});
+document.addEventListener('keydown',e=>{
+ if(document.querySelector('dialog:modal'))return;
+ if(sidebar.classList.contains('open')){
+  if(e.key==='Escape'){e.preventDefault();setMobileNavigation(false,true)}
+  if(e.key==='Tab'){
+   const controls=[...sidebar.querySelectorAll('button:not(:disabled)')].filter(button=>button.getClientRects().length);
+   const edge=e.shiftKey?controls[0]:controls.at(-1);
+   if(document.activeElement===edge){e.preventDefault();(e.shiftKey?controls.at(-1):controls[0]).focus()}
+  }
+  return;
+ }
+ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='k'){e.preventDefault();$('open-search').click()}
+});
 setInterval(statusFromHealth,1100);
 setInterval(()=>{if(token&&Date.now()-lastStateUpdate>11000&&Date.now()-lastHeartbeat>8500)refreshState()},10000);
 setInterval(refreshUsage,60000);

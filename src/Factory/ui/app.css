@@ -166,8 +166,20 @@
 .project-setup-copy { flex: 1 1 230px; }
 .project-setup h2 { margin: 0 0 5px; font-size: 16px; }
 .project-setup p, .project-source-note { margin: 0; color: var(--sub); }
+.project-setup .setup-checks { margin-top: 4px; }
+#project-provisioning-status:not(:empty) { margin-top: 12px; color: var(--text); }
 .project-source-note { margin: -4px 0 14px; }
 .project-setup .head-actions { flex-wrap: wrap; }
+
+#inspector-dialog {
+  position: fixed; inset: 0 0 0 auto; margin: 0; padding: 0; border: 0;
+  width: min(450px, 100vw); max-width: none; height: 100%; max-height: none;
+  background: transparent; color: inherit; overflow: visible;
+}
+#inspector-dialog::backdrop { background: #05080d77; }
+#inspector-dialog .inspector { position: absolute; inset: 0; transform: none; }
+#inspector-dialog[open] .inspector { animation: inspector-enter .24s var(--interaction-ease) both; }
+@keyframes inspector-enter { from { translate: 100% 0; } }
 
 .field-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .field-heading:has(.preset-picker) { margin-bottom: 8px; }
@@ -213,6 +225,7 @@
 @keyframes progress-flow { to { transform: translateX(100%); } }
 
 @media (prefers-reduced-motion: reduce) {
+  #inspector-dialog[open] .inspector { animation: none; }
   :is(button, .button, .icon-button):not(:disabled, [aria-disabled="true"]):is(:hover, :focus-visible, :active) {
     translate: none; scale: none; rotate: none;
     transition-property: background-color, border-color, color, box-shadow;

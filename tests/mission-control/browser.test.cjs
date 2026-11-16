@@ -93,11 +93,17 @@ browserTest('creates a local project and can leave guided setup with a draft goa
   await source.selectOption('new');
   assert.equal(await form.getByLabel('Remote repository URL').isVisible(), false);
   await form.getByLabel('Project name').fill('Guided project');
+  await form.getByLabel('Quality check execution').selectOption('protected-container');
   await form.getByLabel('Destination folder').fill(repo);
   await guideOption.check();
   await form.getByRole('button', { name: 'Register project', exact: true }).click();
   await form.waitFor({ state: 'hidden' });
   const setup = page.getByRole('region', { name: 'Project setup guide' });
+  await setup.getByText('Configure quality checks before running jobs.').waitFor();
+  await setup.getByRole('button', { name: 'Configure quality checks' }).click();
+  assert.equal(await form.getByLabel('Quality check execution').inputValue(), 'protected-container');
+  await form.getByLabel('Quality checks (JSON array)').waitFor();
+  await form.getByRole('button', { name: 'Cancel' }).click();
   await setup.getByRole('button', { name: 'Review project' }).click();
   await page.getByRole('button', { name: 'Analyze project' }).click();
   await page.getByRole('heading', { name: 'Review findings' }).waitFor();
@@ -114,10 +120,39 @@ browserTest('creates a local project and can leave guided setup with a draft goa
   assert.equal(state.projects.length, 1);
   assert.equal(state.goals.length, 1);
   assert.equal(state.goals[0].projectId, state.projects[0].id);
+  assert.equal(state.projects[0].checkExecutionPolicy, 'protected-container');
   assert.equal(state.goals[0].state, 'draft');
   assert.equal(state.jobs.length, 0);
   assert.equal(execFileSync('git', ['branch', '--show-current'], { cwd: repo, encoding: 'utf8' }).trim(), 'master');
   assert.equal(execFileSync('git', ['rev-list', '--count', 'master'], { cwd: repo, encoding: 'utf8' }).trim(), '1');
+});
+
+browserTest('announces clone progress and the result after the form is dismissed', async ({ page, nav, form }) => {
+  let releaseClone;
+  const clonePending = new Promise(resolve => { releaseClone = resolve; });
+  await page.route('**/api/projects', async route => {
+    await clonePending;
+    await route.fulfill({ status: 400, json: { error: 'The fixture clone could not complete.' } });
+  });
+  try {
+    await nav.getByRole('button', { name: 'Projects' }).click();
+    const add = page.getByRole('button', { name: 'Add project', exact: true }).first();
+    await add.click();
+    await form.getByLabel('Repository source').selectOption('remote');
+    await form.getByLabel('Project name').fill('Pending clone');
+    await form.getByLabel('Remote repository URL').fill('https://fixture.invalid/project.git');
+    await form.getByRole('button', { name: 'Register project' }).click();
+    await form.getByRole('status').filter({ hasText: 'Cloning into a Factory-managed checkout' }).waitFor();
+    await form.getByRole('button', { name: 'Cancel' }).click();
+    await add.click();
+    await form.getByLabel('Project name').fill('Another project');
+    releaseClone();
+    await form.getByText('The fixture clone could not complete.').waitFor();
+    assert.equal(await form.getByLabel('Project name').inputValue(), 'Another project');
+    assert.equal(await form.getByRole('button', { name: 'Register project' }).isEnabled(), true);
+  } finally {
+    releaseClone();
+  }
 });
 
 browserTest('clones into explicit and Factory-managed destinations', async ({ home, api, fixture }) => {
@@ -147,6 +182,42 @@ browserTest('clones into explicit and Factory-managed destinations', async ({ ho
   return { head: git('rev-parse', 'master'), env: {
     GIT_SSH_COMMAND: `sh "${ssh}"`, GIT_SSH_VARIANT: 'simple', FACTORY_FIXTURE_REMOTE: remote.replaceAll('\\', '/')
   } };
+});
+
+browserTest('keeps keyboard focus in Mission Control overlays and restores it by layer', async ({ page, nav, form, home, api }) => {
+  await api('projects', { method: 'POST', data: { name: 'Keyboard project', source: 'new', path: path.join(home, 'keyboard') } });
+  await nav.getByRole('button', { name: 'Projects' }).click();
+  const inspect = page.getByRole('button', { name: 'Inspect', exact: true });
+  await inspect.press('Enter');
+  const dialog = page.getByRole('dialog', { name: 'Keyboard project' });
+  const close = dialog.getByRole('button', { name: 'Close inspector' });
+  const configure = dialog.getByRole('button', { name: 'Configure', exact: true });
+  assert.ok(await close.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Tab');
+  assert.ok(await configure.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Enter');
+  await page.getByRole('dialog', { name: 'Configure project' }).waitFor();
+  await page.keyboard.press('Escape');
+  await form.waitFor({ state: 'hidden' });
+  assert.ok(await configure.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'hidden' });
+  assert.ok(await inspect.evaluate(el => el === document.activeElement));
+
+  await page.setViewportSize({ width: 390, height: 800 });
+  const openNavigation = page.getByRole('button', { name: 'Open navigation' });
+  await openNavigation.press('Enter');
+  const drawer = page.getByRole('dialog', { name: 'Navigation' });
+  const first = drawer.getByRole('button', { name: /Connection settings/ });
+  const last = drawer.getByRole('button', { name: 'Settings', exact: true });
+  await first.focus();
+  await page.keyboard.press('Shift+Tab');
+  assert.ok(await last.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Tab');
+  assert.ok(await first.evaluate(el => el === document.activeElement));
+  await page.keyboard.press('Escape');
+  await drawer.waitFor({ state: 'hidden' });
+  assert.ok(await openNavigation.evaluate(el => el === document.activeElement));
 });
 
 browserTest('project quality presets, modal notifications and Factory doctor', async ({ page, nav, form, home }) => {
@@ -470,6 +541,7 @@ browserTest('creates a goal from project findings and rejects adoption of a stal
   await form.getByLabel('Acceptance checks (criterion | check name)').fill('Verify the fixture | fixture');
   await form.getByRole('button', { name: 'Save changes' }).click();
   await form.waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => document.querySelector('#inspector-dialog').contains(document.activeElement));
   await inspector.getByRole('button', { name: 'Save plan' }).click();
   const adopt = inspector.getByRole('button', { name: 'Adopt reviewed plan' });
   await adopt.waitFor();

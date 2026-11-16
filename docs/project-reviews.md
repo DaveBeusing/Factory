@@ -26,7 +26,7 @@
 | Configured checks and current Factory jobs | Existing declared quality gates and recorded statuses | That checks passed for every unobserved revision |
 | Optional assigned analysis provider | Advisory commentary over bounded master context and deterministic findings | Verified source truth, authorization, or a new budget allowance |
 
-An advisory provider requires a clean checkout at the reviewed master commit and spends its configured **local** budget. The UI presents advisory commentary separately from deterministic findings. See [Provider routing](providers.md).
+Factory runs an advisory provider in a temporary checkout of the reviewed master commit and charges its configured **local** budget. The registered checkout can remain on another branch. Factory saves the advisory only after verifying the temporary checkout and checking that master still matches the reviewed commit. The UI presents advisory commentary separately from deterministic findings. See [Provider routing](providers.md).
 
 ## Revision safety and storage
 
